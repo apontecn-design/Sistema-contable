@@ -297,8 +297,13 @@ elif opcion == "📥 Carga Masiva / Importar":
                                 if res_cli:
                                     cli_id = res_cli[0]
                                 else:
-                                    cursor.execute("INSERT INTO clientes (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
-                                    cli_id = cursor.lastrowid
+                                    try:
+                                        cursor.execute("INSERT INTO clientes (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
+                                        cli_id = cursor.lastrowid
+                                    except Exception:
+                                        cursor.execute("SELECT id FROM clientes WHERE rut = ?", (rut_val,))
+                                        res_r = cursor.fetchone()
+                                        cli_id = res_r[0] if res_r else 1
                                 
                                 # 2. Insert Venta
                                 cursor.execute("""
@@ -321,10 +326,11 @@ elif opcion == "📥 Carga Masiva / Importar":
                                     try:
                                         cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
                                         prov_id = cursor.lastrowid
-                                      except Exception:
-                                          cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_val,))
-                                          res_retry = cursor.fetchone()
-                                          prov_id = res_retry[0] if res_retry else None
+                                    except Exception:
+                                        cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_val,))
+                                        res_r = cursor.fetchone()
+                                        prov_id = res_r[0] if res_r else 1
+                                
                                 # 2. Insert Compra
                                 cursor.execute("""
                                     INSERT INTO compras (fecha, proveedor_id, cuenta_gasto, monto_neto, iva, monto_total, glosa)
@@ -373,7 +379,7 @@ elif opcion == "📥 Carga Masiva / Importar":
 
     with tab_asientos:
         st.subheader("Carga Masiva de Asientos Contables Manuales")
-        st.caption("Subi un CSV con las columnas: `fecha`, `cuenta`, `debe`, `haber`, `glosa`")
+        st.caption("Sube un CSV con las columnas: `fecha`, `cuenta`, `debe`, `haber`, `glosa`")
         
         p_asientos = pd.DataFrame([
             {"fecha": "2026-09-01", "cuenta": "Banco", "debe": 100000, "haber": 0, "glosa": "Aporte Capital"},
