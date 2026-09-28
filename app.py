@@ -84,6 +84,27 @@ def init_db():
         centro_costo TEXT
     )""")
     
+    # Función auxiliar para asegurar columnas si la tabla ya existía sin ellas
+    def agregar_columna_si_no_existe(tabla, columna, tipo_dato):
+        cursor.execute(f"PRAGMA table_info({tabla})")
+        columnas = [info[1] for info in cursor.fetchall()]
+        if columna not in columnas:
+            cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo_dato}")
+
+    # Asegurar columnas nuevas en proveedores y otras tablas
+    agregar_columna_si_no_existe("proveedores", "cuenta_defecto", "TEXT")
+    agregar_columna_si_no_existe("proveedores", "centro_costo", "TEXT")
+    agregar_columna_si_no_existe("compras", "cuenta_gasto", "TEXT")
+    agregar_columna_si_no_existe("compras", "centro_costo", "TEXT")
+    agregar_columna_si_no_existe("compras", "monto_neto", "REAL")
+    agregar_columna_si_no_existe("compras", "iva", "REAL")
+    agregar_columna_si_no_existe("compras", "monto_total", "REAL")
+    agregar_columna_si_no_existe("ventas", "cuenta_ingreso", "TEXT")
+    agregar_columna_si_no_existe("ventas", "monto_neto", "REAL")
+    agregar_columna_si_no_existe("ventas", "iva", "REAL")
+    agregar_columna_si_no_existe("ventas", "monto_total", "REAL")
+    agregar_columna_si_no_existe("libro_diario", "centro_costo", "TEXT")
+
     # 2. Plan de Cuentas Jerárquico
     cursor.execute("PRAGMA table_info(plan_cuentas)")
     columnas_pc = [info[1] for info in cursor.fetchall()]
@@ -138,7 +159,7 @@ def init_db():
             ("5", "GASTOS Y COSTOS", "Nominal", "Gastos", None, 1),
             ("5.1", "Costos de Operación / Ventas", "Nominal", "Gastos", "5", 2),
             ("5.1.01", "Costo de Ventas", "Nominal", "Gastos", "5.1", 3),
-            ("5.2", "Gastos Operacionales", "Nominal", "Gastos", "5.2", 2),
+            ("5.2", "Gastos Operacionales", "Nominal", "Gastos", "5", 2),
             ("5.2.01", "Gastos Generales", "Nominal", "Gastos", "5.2", 3),
             ("5.2.02", "Gastos de Arriendo", "Nominal", "Gastos", "5.2", 3),
             ("5.2.03", "Gastos de Servicios Básicos", "Nominal", "Gastos", "5.2", 3),
@@ -149,25 +170,6 @@ def init_db():
             INSERT INTO plan_cuentas (codigo, nombre, categoria, tipo, padre_codigo, nivel) 
             VALUES (?, ?, ?, ?, ?, ?)
         """, cat_inicial)
-
-    def agregar_columna_si_no_existe(tabla, columna, tipo_dato):
-        cursor.execute(f"PRAGMA table_info({tabla})")
-        columnas = [info[1] for info in cursor.fetchall()]
-        if columna not in columnas:
-            cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo_dato}")
-
-    agregar_columna_si_no_existe("proveedores", "cuenta_defecto", "TEXT")
-    agregar_columna_si_no_existe("proveedores", "centro_costo", "TEXT")
-    agregar_columna_si_no_existe("compras", "cuenta_gasto", "TEXT")
-    agregar_columna_si_no_existe("compras", "centro_costo", "TEXT")
-    agregar_columna_si_no_existe("compras", "monto_neto", "REAL")
-    agregar_columna_si_no_existe("compras", "iva", "REAL")
-    agregar_columna_si_no_existe("compras", "monto_total", "REAL")
-    agregar_columna_si_no_existe("ventas", "cuenta_ingreso", "TEXT")
-    agregar_columna_si_no_existe("ventas", "monto_neto", "REAL")
-    agregar_columna_si_no_existe("ventas", "iva", "REAL")
-    agregar_columna_si_no_existe("ventas", "monto_total", "REAL")
-    agregar_columna_si_no_existe("libro_diario", "centro_costo", "TEXT")
 
     conn.commit()
     conn.close()
