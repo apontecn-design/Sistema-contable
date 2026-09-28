@@ -5,8 +5,10 @@ from datetime import datetime
 
 st.set_page_config(page_title="Sistema Contable Web", page_icon="💼", layout="wide")
 
+DB_FILE = "sistema_contable.db"
+
 def get_connection():
-    return sqlite3.connect("sistema_contable.db")
+    return sqlite3.connect(DB_FILE)
 
 def init_db():
     conn = get_connection()
@@ -378,7 +380,7 @@ elif opcion == "Libro Diario (Contabilidad)":
 elif opcion == "📊 Reportes Financieros":
     st.header("📊 Reportes y Balances Financieros")
     
-    tab1, tab2, tab3 = st.tabs(["Estado de Resultados", "Balance de Comprobación", "Exportar Datos"])
+    tab1, tab2, tab3 = st.tabs(["Estado de Resultados", "Balance de Comprobación", "Exportar y Respaldos"])
     
     with tab1:
         st.subheader("Estado de Resultados Simplificado")
@@ -408,12 +410,39 @@ elif opcion == "📊 Reportes Financieros":
             st.info("No hay datos contables suficientes para generar el balance.")
 
     with tab3:
-        st.subheader("Descargar Libro Diario en CSV")
-        df_exp = pd.read_sql_query("SELECT * FROM libro_diario", conn)
-        if not df_exp.empty:
-            csv = df_exp.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Descargar Libro Diario (.csv)", data=csv, file_name="libro_diario.csv", mime="text/csv")
-        else:
-            st.info("No hay registros para exportar.")
+        st.subheader("Descargar Respaldos")
+        
+        col_r1, col_r2 = st.columns(2)
+        
+        with col_r1:
+            st.markdown("### 💾 Respaldo Completo (.db)")
+            st.caption("Descarga la base de datos completa. Puedes subirlos a tu Google Drive para respaldar.")
+            try:
+                with open(DB_FILE, "rb") as fp:
+                    db_bytes = fp.read()
+                fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+                st.download_button(
+                    label="💾 Descargar Base de Datos Completa (.db)",
+                    data=db_bytes,
+                    file_name=f"sistema_contable_{fecha_hoy}.db",
+                    mime="application/x-sqlite3"
+                )
+            except Exception as e:
+                st.error("Aún no se ha generado el archivo de base de datos.")
+
+        with col_r2:
+            st.markdown("### 📥 Exportar Libro Diario (.csv)")
+            st.caption("Descarga únicamente el Libro Diario en formato planilla para Excel.")
+            df_exp = pd.read_sql_query("SELECT * FROM libro_diario", conn)
+            if not df_exp.empty:
+                csv = df_exp.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Descargar Libro Diario (.csv)",
+                    data=csv,
+                    file_name="libro_diario.csv",
+                    mime="text/csv"
+                )
+            else:
+                st.info("No hay registros para exportar.")
 
 conn.close()
