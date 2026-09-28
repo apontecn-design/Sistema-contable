@@ -318,9 +318,13 @@ elif opcion == "📥 Carga Masiva / Importar":
                                 if res_prov:
                                     prov_id = res_prov[0]
                                 else:
-                                    cursor.execute("INSERT OR IGNORE INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
-                                    prov_id = cursor.lastrowid
-                                
+                                    try:
+                                        cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
+                                        prov_id = cursor.lastrowid
+                                      except Exception:
+                                          cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_val,))
+                                          res_retry = cursor.fetchone()
+                                          prov_id = res_retry[0] if res_retry else None
                                 # 2. Insert Compra
                                 cursor.execute("""
                                     INSERT INTO compras (fecha, proveedor_id, cuenta_gasto, monto_neto, iva, monto_total, glosa)
