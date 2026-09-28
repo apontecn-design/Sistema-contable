@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import sqlite3
+import io
 from datetime import datetime
 
 st.set_page_config(page_title="Sistema Contable Web", page_icon="💼", layout="wide")
@@ -18,7 +19,7 @@ def init_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        rut TEXT,
+        rut TEXT UNIQUE,
         nombre TEXT
     )""")
     
@@ -45,7 +46,7 @@ def init_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS clientes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        rut TEXT,
+        rut TEXT UNIQUE,
         nombre TEXT
     )""")
     
@@ -79,21 +80,20 @@ def init_db():
         glosa TEXT
     )""")
     
-    # 2. Recreación/Migración Segura de Plan de Cuentas
+    # 2. Plan de Cuentas Jerárquico
     cursor.execute("PRAGMA table_info(plan_cuentas)")
     columnas_pc = [info[1] for info in cursor.fetchall()]
     
-    # Si la tabla plan_cuentas no existe o tiene la estructura antigua, la actualizamos
     if not columnas_pc or "categoria" not in columnas_pc:
         cursor.execute("DROP TABLE IF EXISTS plan_cuentas")
         cursor.execute("""
         CREATE TABLE plan_cuentas (
             codigo TEXT PRIMARY KEY,
             nombre TEXT,
-            categoria TEXT, -- 'Real' o 'Nominal'
-            tipo TEXT,      -- 'Activo', 'Pasivo', 'Patrimonio', 'Ingresos', 'Gastos'
+            categoria TEXT,
+            tipo TEXT,
             padre_codigo TEXT,
-            nivel INTEGER   -- 1: Clase, 2: Cuenta Principal, 3: Subcuenta
+            nivel INTEGER
         )""")
         
         cat_inicial = [
@@ -146,7 +146,6 @@ def init_db():
             VALUES (?, ?, ?, ?, ?, ?)
         """, cat_inicial)
 
-    # 3. Verificación de columnas en Compras y Ventas
     def agregar_columna_si_no_existe(tabla, columna, tipo_dato):
         cursor.execute(f"PRAGMA table_info({tabla})")
         columnas = [info[1] for info in cursor.fetchall()]
@@ -173,6 +172,7 @@ opcion = st.sidebar.radio(
     "Selecciona un Módulo:",
     [
         "Inicio / Resumen",
+        "📥 Carga Masiva / Importar",
         "📋 Plan de Cuentas",
         "✏️ Registrar Asiento Manual",
         "Registrar Compra Proveedor",
@@ -196,11 +196,212 @@ def obtener_subcuentas(tipo_filtro=None):
         df = pd.read_sql_query(query, conn)
     return df['nombre'].tolist() if not df.empty else []
 
+def leer_csv_sii(uploaded_file):
+    bytes_data = uploaded_file.getvalue()
+    for enc in ['utf-8', 'latin1', 'cp1252', 'iso-8859-1']:
+        for sep in [';', ',', '\t']:
+            try:
+                df = pd.read_csv(io.BytesIO(bytes_data), encoding=enc, sep=sep)
+                if len(df.columns) > 1:
+                    df.columns = [str(col).strip() for col in df.columns]
+                    return df
+            except Exception:
+                continue
+    return None
+
 
 if opcion == "Inicio / Resumen":
     st.title("💼 Sistema Contable Web")
     st.subheader("Bienvenido a tu Sistema Contable Integrado")
-    st.info("Utiliza el menú lateral para acceder al Plan de Cuentas, Asientos Manuales, Compras, Ventas, Banco, Libro Diario y Reportes.")
+    st.info("Utiliza el menú lateral para acceder al Módulo de Carga Masiva, Plan de Cuentas, Asientos Manuales, Compras, Ventas, Banco, Libro Diario y Reportes.")
+
+elif opcion == "📥 Carga Masiva / Importar":
+    st.header("📥 Carga Masiva e Importación de Archivos")
+    
+    tab_sii, tab_entidades, tab_asientos = st.tabs([
+        "📄 RCV del SII (Compras / Ventas)", 
+        "👥 Clientes y Proveedores", 
+        "📖 Asientos Manuales / Históricos"
+    ])
+    
+    with tab_sii:
+        st.subheader("Importar Resumen / Detalle RCV del SII")
+        st.caption("Adjunta directamente el archivo CSV descargado desde el Registro de Compras y Ventas del SII.")
+        
+        col_tipo, col_cuenta = st.columns(2)
+        with col_tipo:
+            tipo_rcv = st.selectbox("Tipo de Registro:", ["Ventas (Clientes)", "Compras (Proveedores)"])
+        with col_cuenta:
+            if "Ventas" in tipo_rcv:
+                cuentas_opt = obtener_subcuentas("Ingresos") or ["Ingresos por Ventas"]
+                label_cta = "Subcuenta de Ingreso a Imputar:"
+            else:
+                cuentas_opt = obtener_subcuentas("Gastos") or ["Gastos Generales"]
+                label_cta = "Subcuenta de Gasto a Imputar:"
+            cta_imputar = st.selectbox(label_cta, cuentas_opt)
+
+        file_rcv = st.file_uploader("Selecciona el archivo CSV del SII", type=["csv", "txt"])
+        
+        if file_rcv is not None:
+            df_sii = leer_csv_sii(file_rcv)
+            if df_sii is not None:
+                st.success(f"¡Archivo leído con éxito! Se encontraron {len(df_sii)} registros.")
+                st.dataframe(df_sii.head(10), use_container_width=True)
+                
+                # Identificar columnas estándar del SII
+                col_rut = next((c for c in df_sii.columns if 'RUT' in c.upper() or 'RUT' in c), None)
+                col_nombre = next((c for c in df_sii.columns if 'RAZON' in c.upper() or 'NOMBRE' in c.upper()), None)
+                col_fecha = next((c for c in df_sii.columns if 'FECHA' in c.upper()), None)
+                col_neto = next((c for c in df_sii.columns if 'NETO' in c.upper()), None)
+                col_iva = next((c for c in df_sii.columns if 'IVA' in c.upper() and 'NO' not in c.upper()), None)
+                col_total = next((c for c in df_sii.columns if 'TOTAL' in c.upper()), None)
+                
+                if not col_rut or not col_neto:
+                    st.error("No se detectaron automáticamente las columnas principales (RUT, Neto). Por favor revisa el formato del archivo.")
+                else:
+                    if st.button("🚀 Procesar e Importar Masivamente"):
+                        cursor = conn.cursor()
+                        registros_procesados = 0
+                        
+                        for _, row in df_sii.iterrows():
+                            rut_val = str(row[col_rut]).strip() if pd.notna(row[col_rut]) else "S/RUT"
+                            nombre_val = str(row[col_nombre]).strip() if col_nombre and pd.notna(row[col_nombre]) else f"Entidad {rut_val}"
+                            
+                            # Limpieza de Fecha
+                            fecha_str = str(datetime.now().strftime("%Y-%m-%d"))
+                            if col_fecha and pd.notna(row[col_fecha]):
+                                try:
+                                    fecha_parsed = pd.to_datetime(row[col_fecha], dayfirst=True)
+                                    fecha_str = fecha_parsed.strftime("%Y-%m-%d")
+                                except Exception:
+                                    pass
+                                    
+                            # Limpieza de Montos
+                            def parse_monto(val):
+                                if pd.isna(val): return 0.0
+                                val_str = str(val).replace(".", "").replace(",", ".").replace("$", "").strip()
+                                try: return float(val_str)
+                                except: return 0.0
+
+                            m_neto = parse_monto(row[col_neto])
+                            m_iva = parse_monto(row[col_iva]) if col_iva else round(m_neto * 0.19, 2)
+                            m_total = parse_monto(row[col_total]) if col_total else round(m_neto + m_iva, 2)
+                            
+                            if m_neto <= 0 and m_total <= 0:
+                                continue
+
+                            if "Ventas" in tipo_rcv:
+                                # 1. Alta/Buscar Cliente
+                                cursor.execute("SELECT id FROM clientes WHERE rut = ?", (rut_val,))
+                                res_cli = cursor.fetchone()
+                                if res_cli:
+                                    cli_id = res_cli[0]
+                                else:
+                                    cursor.execute("INSERT INTO clientes (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
+                                    cli_id = cursor.lastrowid
+                                
+                                # 2. Insert Venta
+                                cursor.execute("""
+                                    INSERT INTO ventas (fecha, cliente_id, cuenta_ingreso, monto_neto, iva, monto_total, glosa)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (fecha_str, cli_id, cta_imputar, m_neto, m_iva, m_total, f"Carga Masiva SII - {nombre_val}"))
+                                
+                                # 3. Asiento Libro Diario
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar Clientes', ?, 0, ?)", (fecha_str, m_total, f"Venta {nombre_val}"))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, 0, ?, ?)", (fecha_str, cta_imputar, m_neto, f"Venta {nombre_val}"))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Débito Fiscal', 0, ?, ?)", (fecha_str, m_iva, f"IVA Venta {nombre_val}"))
+
+                            else:
+                                # 1. Alta/Buscar Proveedor
+                                cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_val,))
+                                res_prov = cursor.fetchone()
+                                if res_prov:
+                                    prov_id = res_prov[0]
+                                else:
+                                    cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
+                                    prov_id = cursor.lastrowid
+                                
+                                # 2. Insert Compra
+                                cursor.execute("""
+                                    INSERT INTO compras (fecha, proveedor_id, cuenta_gasto, monto_neto, iva, monto_total, glosa)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (fecha_str, prov_id, cta_imputar, m_neto, m_iva, m_total, f"Carga Masiva SII - {nombre_val}"))
+                                
+                                # 3. Asiento Libro Diario
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, ?, 0, ?)", (fecha_str, cta_imputar, m_neto, f"Compra {nombre_val}"))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Crédito Fiscal', ?, 0, ?)", (fecha_str, m_iva, f"IVA Compra {nombre_val}"))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar Proveedores', 0, ?, ?)", (fecha_str, m_total, f"Compra {nombre_val}"))
+
+                            registros_procesados += 1
+                        
+                        conn.commit()
+                        st.balloons()
+                        st.success(f"¡Importación completada con éxito! Se contabilizaron {registros_procesados} documentos y se actualizaron los clientes/proveedores.")
+            else:
+                st.error("No se pudo interpretar la codificación del archivo CSV.")
+
+    with tab_entidades:
+        st.subheader("Carga Masiva de Clientes / Proveedores")
+        st.caption("Sube un CSV con las columnas: `rut`, `nombre`")
+        
+        tipo_entidad = st.radio("Selecciona tipo de entidad:", ["Clientes", "Proveedores"], horizontal=True)
+        
+        plantilla_entidades = pd.DataFrame([{"rut": "12345678-9", "nombre": "Empresa Ejemplo SpA"}])
+        csv_p_ent = plantilla_entidades.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Descargar Plantilla Modelo (.csv)", data=csv_p_ent, file_name="plantilla_entidades.csv", mime="text/csv")
+        
+        file_ent = st.file_uploader("Subir Archivo de Entidades", type=["csv"])
+        if file_ent is not None:
+            df_e = pd.read_csv(file_ent)
+            st.dataframe(df_e.head(), use_container_width=True)
+            if st.button("Guardar Entidades Masivamente"):
+                cursor = conn.cursor()
+                tabla_target = "clientes" if tipo_entidad == "Clientes" else "proveedores"
+                guardados = 0
+                for _, r in df_e.iterrows():
+                    try:
+                        cursor.execute(f"INSERT INTO {tabla_target} (rut, nombre) VALUES (?, ?)", (str(r['rut']).strip(), str(r['nombre']).strip()))
+                        guardados += 1
+                    except sqlite3.IntegrityError:
+                        pass
+                conn.commit()
+                st.success(f"¡Se registraron {guardados} {tipo_entidad} con éxito!")
+
+    with tab_asientos:
+        st.subheader("Carga Masiva de Asientos Contables Manuales")
+        st.caption("Subi un CSV con las columnas: `fecha`, `cuenta`, `debe`, `haber`, `glosa`")
+        
+        p_asientos = pd.DataFrame([
+            {"fecha": "2026-09-01", "cuenta": "Banco", "debe": 100000, "haber": 0, "glosa": "Aporte Capital"},
+            {"fecha": "2026-09-01", "cuenta": "Capital Social", "debe": 0, "haber": 100000, "glosa": "Aporte Capital"}
+        ])
+        csv_p_as = p_asientos.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Descargar Plantilla de Asientos (.csv)", data=csv_p_as, file_name="plantilla_asientos.csv", mime="text/csv")
+        
+        file_as = st.file_uploader("Subir Archivo de Asientos Manuales", type=["csv"])
+        if file_as is not None:
+            df_a = pd.read_csv(file_as)
+            st.dataframe(df_a, use_container_width=True)
+            tot_d = df_a['debe'].sum()
+            tot_h = df_a['haber'].sum()
+            
+            c_d, c_h = st.columns(2)
+            c_d.metric("Total Debe en Archivo", f"${tot_d:,.0f}")
+            c_h.metric("Total Haber en Archivo", f"${tot_h:,.0f}")
+            
+            if abs(tot_d - tot_h) < 0.01:
+                st.success("✅ El archivo está cuadrado (Debe = Haber)")
+                if st.button("Guardar Asientos Masivos en Libro Diario"):
+                    cursor = conn.cursor()
+                    for _, r in df_a.iterrows():
+                        cursor.execute("""
+                            INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (str(r['fecha']), str(r['cuenta']), float(r['debe']), float(r['haber']), str(r['glosa'])))
+                    conn.commit()
+                    st.success("¡Asientos históricos/masivos agregados correctamente al Libro Diario!")
+            else:
+                st.error("❌ El lote de asientos no está cuadrado. La suma total del Debe debe ser igual al Haber.")
 
 elif opcion == "📋 Plan de Cuentas":
     st.header("📋 Plan de Cuentas (Cuentas Reales y Nominales)")
@@ -333,9 +534,7 @@ elif opcion == "✏️ Registrar Asiento Manual":
 elif opcion == "Registrar Compra Proveedor":
     st.header("🛒 Registrar Compra (Desglose Neto + IVA)")
     
-    cuentas_gastos = obtener_subcuentas("Gastos")
-    if not cuentas_gastos:
-        cuentas_gastos = ["Gastos Generales"]
+    cuentas_gastos = obtener_subcuentas("Gastos") or ["Gastos Generales"]
 
     col_input1, col_input2 = st.columns(2)
     with col_input1:
@@ -396,14 +595,12 @@ elif opcion == "Registrar Pago Proveedor":
                 conn.commit()
                 st.success("¡Pago registrado!")
     else:
-        st.warning("No hay proveedores registrados previamente. Registra primero una compra.")
+        st.warning("No hay proveedores registrados previamente. Registra primero una compra o importa tus proveedores.")
 
 elif opcion == "Registrar Venta Cliente":
     st.header("📈 Registrar Venta (Desglose Neto + IVA)")
     
-    cuentas_ingresos = obtener_subcuentas("Ingresos")
-    if not cuentas_ingresos:
-        cuentas_ingresos = ["Ingresos por Ventas"]
+    cuentas_ingresos = obtener_subcuentas("Ingresos") or ["Ingresos por Ventas"]
 
     col_v1, col_v2 = st.columns(2)
     with col_v1:
@@ -464,7 +661,7 @@ elif opcion == "Registrar Cobro Cliente":
                 conn.commit()
                 st.success("¡Cobro abonado al Banco!")
     else:
-        st.warning("No hay clientes registrados previamente. Registra primero una venta.")
+        st.warning("No hay clientes registrados previamente. Registra primero una venta o importa tus clientes.")
 
 elif opcion == "Cartola Bancaria y Saldos":
     st.header("🏦 Cartola Bancaria y Flujo de Caja")
