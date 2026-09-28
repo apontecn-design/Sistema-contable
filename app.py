@@ -12,11 +12,11 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Tablas existentes
+    # 1. Crear tablas si no existen
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        rut TEXT UNIQUE,
+        rut TEXT,
         nombre TEXT
     )""")
     
@@ -42,7 +42,7 @@ def init_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS clientes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        rut TEXT UNIQUE,
+        rut TEXT,
         nombre TEXT
     )""")
     
@@ -75,7 +75,6 @@ def init_db():
         glosa TEXT
     )""")
     
-    # Tabla Plan de Cuentas
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS plan_cuentas (
         codigo TEXT PRIMARY KEY,
@@ -83,7 +82,22 @@ def init_db():
         tipo TEXT
     )""")
     
-    # Poblar Plan de Cuentas por defecto si está vacío
+    # 2. Migración / Verificación segura de columnas adicionales
+    def agregar_columna_si_no_existe(tabla, columna, tipo):
+        cursor.execute(f"PRAGMA table_info({tabla})")
+        columnas = [info[1] for info in cursor.fetchall()]
+        if columna not in columnas:
+            cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}")
+
+    agregar_columna_si_no_existe("compras", "monto_neto", "REAL")
+    agregar_columna_si_no_existe("compras", "iva", "REAL")
+    agregar_columna_si_no_existe("compras", "monto_total", "REAL")
+
+    agregar_columna_si_no_existe("ventas", "monto_neto", "REAL")
+    agregar_columna_si_no_existe("ventas", "iva", "REAL")
+    agregar_columna_si_no_existe("ventas", "monto_total", "REAL")
+
+    # 3. Poblado inicial de Plan de Cuentas si está vacío
     cursor.execute("SELECT COUNT(*) FROM plan_cuentas")
     if cursor.fetchone()[0] == 0:
         cuentas_defecto = [
@@ -101,20 +115,6 @@ def init_db():
             ("5104", "Remuneraciones", "Gastos")
         ]
         cursor.executemany("INSERT INTO plan_cuentas (codigo, nombre, tipo) VALUES (?, ?, ?)", cuentas_defecto)
-
-    try:
-        cursor.execute("ALTER TABLE compras ADD COLUMN monto_neto REAL")
-        cursor.execute("ALTER TABLE compras ADD COLUMN iva REAL")
-        cursor.execute("ALTER TABLE compras ADD COLUMN monto_total REAL")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cursor.execute("ALTER TABLE ventas ADD COLUMN monto_neto REAL")
-        cursor.execute("ALTER TABLE ventas ADD COLUMN iva REAL")
-        cursor.execute("ALTER TABLE ventas ADD COLUMN monto_total REAL")
-    except sqlite3.OperationalError:
-        pass
 
     conn.commit()
     conn.close()
@@ -263,7 +263,12 @@ elif opcion == "Registrar Compra Proveedor":
 
 elif opcion == "Registrar Pago Proveedor":
     st.header("💸 Registrar Pago a Proveedor")
-    df_prov = pd.read_sql_query("SELECT id, nombre FROM proveedores", conn)
+    
+    try:
+        df_prov = pd.read_sql_query("SELECT id, nombre FROM proveedores", conn)
+    except Exception:
+        df_prov = pd.DataFrame(columns=['id', 'nombre'])
+        
     if not df_prov.empty:
         prov_sel = st.selectbox("Selecciona Proveedor", df_prov['nombre'])
         prov_id = df_prov[df_prov['nombre'] == prov_sel]['id'].values[0]
@@ -278,7 +283,7 @@ elif opcion == "Registrar Pago Proveedor":
                 conn.commit()
                 st.success("¡Pago registrado!")
     else:
-        st.warning("No hay proveedores registrados previamente.")
+        st.warning("No hay proveedores registrados previamente. Registra primero una compra para habilitar esta opción.")
 
 elif opcion == "Registrar Venta Cliente":
     st.header("📈 Registrar Venta (Desglose Neto + IVA)")
@@ -321,7 +326,12 @@ elif opcion == "Registrar Venta Cliente":
 
 elif opcion == "Registrar Cobro Cliente":
     st.header("💰 Registrar Cobro de Cliente")
-    df_cli = pd.read_sql_query("SELECT id, nombre FROM clientes", conn)
+    
+    try:
+        df_cli = pd.read_sql_query("SELECT id, nombre FROM clientes", conn)
+    except Exception:
+        df_cli = pd.DataFrame(columns=['id', 'nombre'])
+        
     if not df_cli.empty:
         cli_sel = st.selectbox("Selecciona Cliente", df_cli['nombre'])
         cli_id = df_cli[df_cli['nombre'] == cli_sel]['id'].values[0]
@@ -336,7 +346,7 @@ elif opcion == "Registrar Cobro Cliente":
                 conn.commit()
                 st.success("¡Cobro abonado al Banco!")
     else:
-        st.warning("No hay clientes registrados previamente.")
+        st.warning("No hay clientes registrados previamente. Registra primero una venta para habilitar esta opción.")
 
 elif opcion == "Cartola Bancaria y Saldos":
     st.header("🏦 Cartola Bancaria y Flujo de Caja")
