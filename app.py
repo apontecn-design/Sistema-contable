@@ -22,7 +22,9 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fecha TEXT,
         proveedor_id INTEGER,
-        monto REAL,
+        monto_neto REAL,
+        iva REAL,
+        monto_total REAL,
         glosa TEXT
     )""")
     cursor.execute("""
@@ -90,26 +92,48 @@ if opcion == "Inicio / Resumen":
     st.info("Utiliza el menú lateral para acceder a Compras, Ventas, Clientes, Proveedores, Banco, Libro Diario y Reportes.")
 
 elif opcion == "Registrar Compra Proveedor":
-    st.header("🛒 Registrar Compra (Proveedores)")
-    with st.form("form_compra"):
+    st.header("🛒 Registrar Compra con Desglose de IVA")
+    
+    col_input1, col_input2 = st.columns(2)
+    with col_input1:
         fecha = st.date_input("Fecha de Compra", datetime.now())
         rut_prov = st.text_input("RUT Proveedor")
         nombre_prov = st.text_input("Nombre Proveedor")
-        monto = st.number_input("Monto Total ($)", min_value=0.0, step=100.0)
         glosa = st.text_input("Glosa / Detalle")
-        btn = st.form_submit_button("Guardar Compra")
+    
+    with col_input2:
+        monto_neto = st.number_input("Monto Neto (Base $)", min_value=0.0, step=100.0)
+        iva = round(monto_neto * 0.19, 2)
+        monto_total = round(monto_neto + iva, 2)
         
-        if btn and rut_prov and monto > 0:
+        st.metric("IVA Crédito Fiscal (19%)", f"${iva:,.0f}")
+        st.metric("Monto Total ($)", f"${monto_total:,.0f}")
+    
+    if st.button("Guardar Compra"):
+        if rut_prov and monto_neto > 0:
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_prov,))
             res = cursor.fetchone()
-            prov_id = res[0] if res else cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_prov, nombre_prov)).lastrowid
+            if res:
+                prov_id = res[0]
+            else:
+                cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_prov, nombre_prov))
+                prov_id = cursor.lastrowid
             
-            cursor.execute("INSERT INTO compras (fecha, proveedor_id, monto, glosa) VALUES (?, ?, ?, ?)", (str(fecha), prov_id, monto, glosa))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Gastos Generales', ?, 0, ?)", (str(fecha), monto, f"Compra {nombre_prov}"))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', 0, ?, ?)", (str(fecha), monto, f"Compra {nombre_prov}"))
+            cursor.execute("""
+                INSERT INTO compras (fecha, proveedor_id, monto_neto, iva, monto_total, glosa) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (str(fecha), prov_id, monto_neto, iva, monto_total, glosa))
+            
+            # Asiento Contable Automático con Desglose de IVA
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Gastos Generales', ?, 0, ?)", (str(fecha), monto_neto, f"Compra {nombre_prov}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Crédito Fiscal', ?, 0, ?)", (str(fecha), iva, f"IVA Compra {nombre_prov}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', 0, ?, ?)", (str(fecha), monto_total, f"Compra {nombre_prov}"))
+            
             conn.commit()
-            st.success("¡Compra registrada y asiento contable generado correctamente!")
+            st.success(f"¡Compra registrada con éxito! Total: ${monto_total:,.0f} (Neto: ${monto_neto:,.0f} + IVA: ${iva:,.0f})")
+        else:
+            st.error("Por favor ingresa el RUT del proveedor y un monto neto válido.")
 
 elif opcion == "Registrar Pago Proveedor":
     st.header("💸 Registrar Pago a Proveedor")
@@ -206,7 +230,7 @@ elif opcion == "📊 Reportes Financieros":
     with tab1:
         st.subheader("Estado de Resultados Simplificado")
         df_v = pd.read_sql_query("SELECT SUM(monto) as total FROM ventas", conn)
-        df_c = pd.read_sql_query("SELECT SUM(monto) as total FROM compras", conn)
+        df_c = pd.read_sql_query("SELECT SUM(monto_neto) as total FROM compras", conn)
         
         tot_ventas = df_v['total'].iloc[0] or 0.0
         tot_compras = df_c['total'].iloc[0] or 0.0
@@ -214,7 +238,7 @@ elif opcion == "📊 Reportes Financieros":
         
         c1, c2, c3 = st.columns(3)
         c1.metric("Ingresos Totales (Ventas)", f"${tot_ventas:,.0f}")
-        c2.metric("Costos/Gastos (Compras)", f"${tot_compras:,.0f}")
+        c2.metric("Costos/Gastos Netos (Compras)", f"${tot_compras:,.0f}")
         c3.metric("Resultado Neto", f"${resultado:,.0f}", delta=f"${resultado:,.0f}")
         
     with tab2:
