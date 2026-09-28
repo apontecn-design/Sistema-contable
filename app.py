@@ -20,7 +20,9 @@ def init_db():
     CREATE TABLE IF NOT EXISTS proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         rut TEXT UNIQUE,
-        nombre TEXT
+        nombre TEXT,
+        cuenta_defecto TEXT,
+        centro_costo TEXT
     )""")
     
     cursor.execute("""
@@ -29,6 +31,7 @@ def init_db():
         fecha TEXT,
         proveedor_id INTEGER,
         cuenta_gasto TEXT,
+        centro_costo TEXT,
         monto_neto REAL,
         iva REAL,
         monto_total REAL,
@@ -77,7 +80,8 @@ def init_db():
         cuenta TEXT,
         debe REAL,
         haber REAL,
-        glosa TEXT
+        glosa TEXT,
+        centro_costo TEXT
     )""")
     
     # 2. Plan de Cuentas Jerárquico
@@ -134,7 +138,7 @@ def init_db():
             ("5", "GASTOS Y COSTOS", "Nominal", "Gastos", None, 1),
             ("5.1", "Costos de Operación / Ventas", "Nominal", "Gastos", "5", 2),
             ("5.1.01", "Costo de Ventas", "Nominal", "Gastos", "5.1", 3),
-            ("5.2", "Gastos Operacionales", "Nominal", "Gastos", "5", 2),
+            ("5.2", "Gastos Operacionales", "Nominal", "Gastos", "5.2", 2),
             ("5.2.01", "Gastos Generales", "Nominal", "Gastos", "5.2", 3),
             ("5.2.02", "Gastos de Arriendo", "Nominal", "Gastos", "5.2", 3),
             ("5.2.03", "Gastos de Servicios Básicos", "Nominal", "Gastos", "5.2", 3),
@@ -152,15 +156,18 @@ def init_db():
         if columna not in columnas:
             cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo_dato}")
 
+    agregar_columna_si_no_existe("proveedores", "cuenta_defecto", "TEXT")
+    agregar_columna_si_no_existe("proveedores", "centro_costo", "TEXT")
     agregar_columna_si_no_existe("compras", "cuenta_gasto", "TEXT")
+    agregar_columna_si_no_existe("compras", "centro_costo", "TEXT")
     agregar_columna_si_no_existe("compras", "monto_neto", "REAL")
     agregar_columna_si_no_existe("compras", "iva", "REAL")
     agregar_columna_si_no_existe("compras", "monto_total", "REAL")
-
     agregar_columna_si_no_existe("ventas", "cuenta_ingreso", "TEXT")
     agregar_columna_si_no_existe("ventas", "monto_neto", "REAL")
     agregar_columna_si_no_existe("ventas", "iva", "REAL")
     agregar_columna_si_no_existe("ventas", "monto_total", "REAL")
+    agregar_columna_si_no_existe("libro_diario", "centro_costo", "TEXT")
 
     conn.commit()
     conn.close()
@@ -173,6 +180,7 @@ opcion = st.sidebar.radio(
     [
         "Inicio / Resumen",
         "📥 Carga Masiva / Importar",
+        "🏢 Maestro de Proveedores y Reglas",
         "📋 Plan de Cuentas",
         "✏️ Registrar Asiento Manual",
         "Registrar Compra Proveedor",
@@ -186,6 +194,8 @@ opcion = st.sidebar.radio(
 )
 
 conn = get_connection()
+
+LISTA_CENTROS_COSTO = ["General / Ninguno", "Administración", "Ventas", "Operaciones / Producción", "TI y Tecnología", "Marketing"]
 
 def obtener_subcuentas(tipo_filtro=None):
     if tipo_filtro:
@@ -213,7 +223,50 @@ def leer_csv_sii(uploaded_file):
 if opcion == "Inicio / Resumen":
     st.title("💼 Sistema Contable Web")
     st.subheader("Bienvenido a tu Sistema Contable Integrado")
-    st.info("Utiliza el menú lateral para acceder al Módulo de Carga Masiva, Plan de Cuentas, Asientos Manuales, Compras, Ventas, Banco, Libro Diario y Reportes.")
+    st.info("Utiliza el menú lateral para acceder al Módulo de Carga Masiva, Maestro de Proveedores, Plan de Cuentas, Asientos Manuales, Compras, Ventas, Banco, Libro Diario y Reportes.")
+
+elif opcion == "🏢 Maestro de Proveedores y Reglas":
+    st.header("🏢 Maestro de Proveedores y Reglas de Imputación")
+    st.caption("Configura qué cuenta contable de gasto y centro de costo se asignará automáticamente a cada proveedor cuando cargues facturas masivas del SII.")
+    
+    cuentas_gastos = obtener_subcuentas("Gastos") or ["Gastos Generales"]
+    df_prov = pd.read_sql_query("SELECT id, rut, nombre, cuenta_defecto, centro_costo FROM proveedores ORDER BY nombre", conn)
+    
+    st.subheader("📋 Lista de Proveedores Registrados")
+    if not df_prov.empty:
+        st.dataframe(df_prov[['rut', 'nombre', 'cuenta_defecto', 'centro_costo']], use_container_width=True)
+        
+        st.markdown("---")
+        st.subheader("✏️ Asignar / Modificar Regla de Imputación")
+        
+        prov_seleccionado = st.selectbox("Selecciona Proveedor para Configurar:", options=df_prov['rut'] + " - " + df_prov['nombre'])
+        rut_sel = prov_seleccionado.split(" - ")[0]
+        row_p = df_prov[df_prov['rut'] == rut_sel].iloc[0]
+        
+        with st.form("form_regla_prov"):
+            col_r1, col_r2 = st.columns(2)
+            with col_r1:
+                cta_def = st.selectbox(
+                    "Cuenta de Gasto Habitual:", 
+                    options=cuentas_gastos, 
+                    index=cuentas_gastos.index(row_p['cuenta_defecto']) if row_p['cuenta_defecto'] in cuentas_gastos else 0
+                )
+            with col_r2:
+                cc_def = st.selectbox(
+                    "Centro de Costo Asociado:", 
+                    options=LISTA_CENTROS_COSTO,
+                    index=LISTA_CENTROS_COSTO.index(row_p['centro_costo']) if row_p['centro_costo'] in LISTA_CENTROS_COSTO else 0
+                )
+                
+            btn_guardar_regla = st.form_submit_button("💾 Guardar Regla de Imputación")
+            if btn_guardar_regla:
+                cursor = conn.cursor()
+                cursor.execute("UPDATE proveedores SET cuenta_defecto = ?, centro_costo = ? WHERE rut = ?", (cta_def, cc_def, rut_sel))
+                conn.commit()
+                st.success(f"¡Regla guardada con éxito para {row_p['nombre']}! Carga masiva usará: '{cta_def}' y '{cc_def}'.")
+                st.rerun()
+    else:
+        st.info("Aún no tienes proveedores registrados. Puedes registrarlos manualmente o importar compras del SII para alimentarlos automáticamente.")
 
 elif opcion == "📥 Carga Masiva / Importar":
     st.header("📥 Carga Masiva e Importación de Archivos")
@@ -228,17 +281,19 @@ elif opcion == "📥 Carga Masiva / Importar":
         st.subheader("Importar Resumen / Detalle RCV del SII")
         st.caption("Adjunta directamente el archivo CSV descargado desde el Registro de Compras y Ventas del SII.")
         
-        col_tipo, col_cuenta = st.columns(2)
+        col_tipo, col_cuenta, col_cc = st.columns(3)
         with col_tipo:
             tipo_rcv = st.selectbox("Tipo de Registro:", ["Ventas (Clientes)", "Compras (Proveedores)"])
         with col_cuenta:
             if "Ventas" in tipo_rcv:
                 cuentas_opt = obtener_subcuentas("Ingresos") or ["Ingresos por Ventas"]
-                label_cta = "Subcuenta de Ingreso a Imputar:"
+                label_cta = "Subcuenta de Ingreso (Por defecto):"
             else:
                 cuentas_opt = obtener_subcuentas("Gastos") or ["Gastos Generales"]
-                label_cta = "Subcuenta de Gasto a Imputar:"
-            cta_imputar = st.selectbox(label_cta, cuentas_opt)
+                label_cta = "Subcuenta de Gasto (Comodín si no hay regla):"
+            cta_imputar_defecto = st.selectbox(label_cta, cuentas_opt)
+        with col_cc:
+            cc_defecto = st.selectbox("Centro de Costo (Por defecto):", LISTA_CENTROS_COSTO)
 
         file_rcv = st.file_uploader("Selecciona el archivo CSV del SII", type=["csv", "txt"])
         
@@ -309,44 +364,52 @@ elif opcion == "📥 Carga Masiva / Importar":
                                 cursor.execute("""
                                     INSERT INTO ventas (fecha, cliente_id, cuenta_ingreso, monto_neto, iva, monto_total, glosa)
                                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """, (fecha_str, cli_id, cta_imputar, m_neto, m_iva, m_total, f"Carga Masiva SII - {nombre_val}"))
+                                """, (fecha_str, cli_id, cta_imputar_defecto, m_neto, m_iva, m_total, f"Carga Masiva SII - {nombre_val}"))
                                 
                                 # 3. Asiento Libro Diario
-                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar Clientes', ?, 0, ?)", (fecha_str, m_total, f"Venta {nombre_val}"))
-                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, 0, ?, ?)", (fecha_str, cta_imputar, m_neto, f"Venta {nombre_val}"))
-                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Débito Fiscal', 0, ?, ?)", (fecha_str, m_iva, f"IVA Venta {nombre_val}"))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, 'Cuentas por Cobrar Clientes', ?, 0, ?, ?)", (fecha_str, m_total, f"Venta {nombre_val}", cc_defecto))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, ?, 0, ?, ?, ?)", (fecha_str, cta_imputar_defecto, m_neto, f"Venta {nombre_val}", cc_defecto))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, 'IVA Débito Fiscal', 0, ?, ?, ?)", (fecha_str, m_iva, f"IVA Venta {nombre_val}", cc_defecto))
 
                             else:
-                                # 1. Alta/Buscar Proveedor
-                                cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_val,))
+                                # 1. Alta/Buscar Proveedor y REGLAS
+                                cursor.execute("SELECT id, cuenta_defecto, centro_costo FROM proveedores WHERE rut = ?", (rut_val,))
                                 res_prov = cursor.fetchone()
+                                
+                                cta_final_gasto = cta_imputar_defecto
+                                cc_final = cc_defecto
+                                
                                 if res_prov:
                                     prov_id = res_prov[0]
+                                    if res_prov[1]: cta_final_gasto = res_prov[1]
+                                    if res_prov[2]: cc_final = res_prov[2]
                                 else:
                                     try:
-                                        cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
+                                        cursor.execute("INSERT INTO proveedores (rut, nombre, cuenta_defecto, centro_costo) VALUES (?, ?, ?, ?)", (rut_val, nombre_val, cta_imputar_defecto, cc_defecto))
                                         prov_id = cursor.lastrowid
                                     except Exception:
-                                        cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_val,))
+                                        cursor.execute("SELECT id, cuenta_defecto, centro_costo FROM proveedores WHERE rut = ?", (rut_val,))
                                         res_r = cursor.fetchone()
                                         prov_id = res_r[0] if res_r else 1
+                                        if res_r and res_r[1]: cta_final_gasto = res_r[1]
+                                        if res_r and res_r[2]: cc_final = res_r[2]
                                 
                                 # 2. Insert Compra
                                 cursor.execute("""
-                                    INSERT INTO compras (fecha, proveedor_id, cuenta_gasto, monto_neto, iva, monto_total, glosa)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                                """, (fecha_str, prov_id, cta_imputar, m_neto, m_iva, m_total, f"Carga Masiva SII - {nombre_val}"))
+                                    INSERT INTO compras (fecha, proveedor_id, cuenta_gasto, centro_costo, monto_neto, iva, monto_total, glosa)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (fecha_str, prov_id, cta_final_gasto, cc_final, m_neto, m_iva, m_total, f"Carga Masiva SII - {nombre_val}"))
                                 
-                                # 3. Asiento Libro Diario
-                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, ?, 0, ?)", (fecha_str, cta_imputar, m_neto, f"Compra {nombre_val}"))
-                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Crédito Fiscal', ?, 0, ?)", (fecha_str, m_iva, f"IVA Compra {nombre_val}"))
-                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar Proveedores', 0, ?, ?)", (fecha_str, m_total, f"Compra {nombre_val}"))
+                                # 3. Asiento Libro Diario con Cuenta Inteligente y Centro de Costo
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, ?, ?, 0, ?, ?)", (fecha_str, cta_final_gasto, m_neto, f"Compra {nombre_val}", cc_final))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, 'IVA Crédito Fiscal', ?, 0, ?, ?)", (fecha_str, m_iva, f"IVA Compra {nombre_val}", cc_final))
+                                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, 'Cuentas por Pagar Proveedores', 0, ?, ?, ?)", (fecha_str, m_total, f"Compra {nombre_val}", cc_final))
 
                             registros_procesados += 1
                         
                         conn.commit()
                         st.balloons()
-                        st.success(f"¡Importación completada con éxito! Se contabilizaron {registros_procesados} documentos y se actualizaron los clientes/proveedores.")
+                        st.success(f"¡Importación completada! Se contabilizaron {registros_procesados} documentos respetando las reglas de imputación por RUT.")
             else:
                 st.error("No se pudo interpretar la codificación del archivo CSV.")
 
@@ -502,6 +565,7 @@ elif opcion == "✏️ Registrar Asiento Manual":
     
     fecha_m = st.date_input("Fecha del Asiento", datetime.now())
     glosa_m = st.text_input("Glosa / Explicación del Asiento", "Ajuste contable manual")
+    cc_m = st.selectbox("Centro de Costo", LISTA_CENTROS_COSTO)
     
     st.markdown("---")
     st.subheader("Movimientos del Asiento")
@@ -534,10 +598,10 @@ elif opcion == "✏️ Registrar Asiento Manual":
             st.error("No se puede guardar un asiento descuadrado. El Debe debe ser igual al Haber.")
         else:
             cursor = conn.cursor()
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, ?, 0, ?)",
-                           (str(fecha_m), cuenta_debe, monto_debe, glosa_m))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, 0, ?, ?)",
-                           (str(fecha_m), cuenta_haber, monto_haber, glosa_m))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, ?, ?, 0, ?, ?)",
+                           (str(fecha_m), cuenta_debe, monto_debe, glosa_m, cc_m))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, ?, 0, ?, ?, ?)",
+                           (str(fecha_m), cuenta_haber, monto_haber, glosa_m, cc_m))
             conn.commit()
             st.success("¡Asiento manual guardado correctamente en el Libro Diario!")
 
@@ -552,6 +616,7 @@ elif opcion == "Registrar Compra Proveedor":
         rut_prov = st.text_input("RUT Proveedor")
         nombre_prov = st.text_input("Nombre Proveedor")
         cuenta_gasto_sel = st.selectbox("Imputar a Subcuenta de Gasto:", cuentas_gastos)
+        cc_sel = st.selectbox("Centro de Costo:", LISTA_CENTROS_COSTO)
         glosa = st.text_input("Glosa / Detalle")
     
     with col_input2:
@@ -567,19 +632,19 @@ elif opcion == "Registrar Compra Proveedor":
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_prov,))
             res = cursor.fetchone()
-            prov_id = res[0] if res else cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_prov, nombre_prov)).lastrowid
+            prov_id = res[0] if res else cursor.execute("INSERT INTO proveedores (rut, nombre, cuenta_defecto, centro_costo) VALUES (?, ?, ?, ?)", (rut_prov, nombre_prov, cuenta_gasto_sel, cc_sel)).lastrowid
             
             cursor.execute("""
-                INSERT INTO compras (fecha, proveedor_id, cuenta_gasto, monto_neto, iva, monto_total, glosa) 
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (str(fecha), prov_id, cuenta_gasto_sel, monto_neto, iva, monto_total, glosa))
+                INSERT INTO compras (fecha, proveedor_id, cuenta_gasto, centro_costo, monto_neto, iva, monto_total, glosa) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (str(fecha), prov_id, cuenta_gasto_sel, cc_sel, monto_neto, iva, monto_total, glosa))
             
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, ?, 0, ?)", (str(fecha), cuenta_gasto_sel, monto_neto, f"Compra {nombre_prov}"))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Crédito Fiscal', ?, 0, ?)", (str(fecha), iva, f"IVA Compra {nombre_prov}"))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar Proveedores', 0, ?, ?)", (str(fecha), monto_total, f"Compra {nombre_prov}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, ?, ?, 0, ?, ?)", (str(fecha), cuenta_gasto_sel, monto_neto, f"Compra {nombre_prov}", cc_sel))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, 'IVA Crédito Fiscal', ?, 0, ?, ?)", (str(fecha), iva, f"IVA Compra {nombre_prov}", cc_sel))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, 'Cuentas por Pagar Proveedores', 0, ?, ?, ?)", (str(fecha), monto_total, f"Compra {nombre_prov}", cc_sel))
             
             conn.commit()
-            st.success(f"¡Compra registrada con éxito e imputada a '{cuenta_gasto_sel}'! Total: ${monto_total:,.0f}")
+            st.success(f"¡Compra registrada con éxito e imputada a '{cuenta_gasto_sel}' [{cc_sel}]! Total: ${monto_total:,.0f}")
         else:
             st.error("Por favor ingresa el RUT del proveedor y un monto neto válido.")
 
