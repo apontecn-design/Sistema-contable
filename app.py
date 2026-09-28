@@ -318,7 +318,7 @@ elif opcion == "📥 Carga Masiva / Importar":
                                 if res_prov:
                                     prov_id = res_prov[0]
                                 else:
-                                    cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
+                                    cursor.execute("INSERT OR IGNORE INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_val, nombre_val))
                                     prov_id = cursor.lastrowid
                                 
                                 # 2. Insert Compra
