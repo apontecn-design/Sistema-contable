@@ -11,12 +11,15 @@ def get_connection():
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
+    
+    # Proveedores y Pagos
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        rut TEXT,
+        rut TEXT UNIQUE,
         nombre TEXT
     )""")
+    
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS compras (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -27,6 +30,7 @@ def init_db():
         monto_total REAL,
         glosa TEXT
     )""")
+    
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS pagos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,20 +38,26 @@ def init_db():
         proveedor_id INTEGER,
         monto REAL
     )""")
+    
+    # Clientes, Ventas y Cobros
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS clientes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        rut TEXT,
+        rut TEXT UNIQUE,
         nombre TEXT
     )""")
+    
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ventas (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fecha TEXT,
         cliente_id INTEGER,
-        monto REAL,
+        monto_neto REAL,
+        iva REAL,
+        monto_total REAL,
         glosa TEXT
     )""")
+    
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS cobros (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,6 +65,8 @@ def init_db():
         cliente_id INTEGER,
         monto REAL
     )""")
+    
+    # Libro Diario
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS libro_diario (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +76,22 @@ def init_db():
         haber REAL,
         glosa TEXT
     )""")
+    
+    # Migración/Ajuste automático de estructura si la DB ya existía sin las nuevas columnas
+    try:
+        cursor.execute("ALTER TABLE compras ADD COLUMN monto_neto REAL")
+        cursor.execute("ALTER TABLE compras ADD COLUMN iva REAL")
+        cursor.execute("ALTER TABLE compras ADD COLUMN monto_total REAL")
+    except sqlite3.OperationalError:
+        pass  # Las columnas ya existen
+
+    try:
+        cursor.execute("ALTER TABLE ventas ADD COLUMN monto_neto REAL")
+        cursor.execute("ALTER TABLE ventas ADD COLUMN iva REAL")
+        cursor.execute("ALTER TABLE ventas ADD COLUMN monto_total REAL")
+    except sqlite3.OperationalError:
+        pass  # Las columnas ya existen
+
     conn.commit()
     conn.close()
 
@@ -92,7 +120,7 @@ if opcion == "Inicio / Resumen":
     st.info("Utiliza el menú lateral para acceder a Compras, Ventas, Clientes, Proveedores, Banco, Libro Diario y Reportes.")
 
 elif opcion == "Registrar Compra Proveedor":
-    st.header("🛒 Registrar Compra con Desglose de IVA")
+    st.header("🛒 Registrar Compra (Desglose Neto + IVA)")
     
     col_input1, col_input2 = st.columns(2)
     with col_input1:
@@ -125,7 +153,7 @@ elif opcion == "Registrar Compra Proveedor":
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (str(fecha), prov_id, monto_neto, iva, monto_total, glosa))
             
-            # Asiento Contable Automático con Desglose de IVA
+            # Asiento Contable Automático
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Gastos Generales', ?, 0, ?)", (str(fecha), monto_neto, f"Compra {nombre_prov}"))
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Crédito Fiscal', ?, 0, ?)", (str(fecha), iva, f"IVA Compra {nombre_prov}"))
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', 0, ?, ?)", (str(fecha), monto_total, f"Compra {nombre_prov}"))
@@ -152,29 +180,51 @@ elif opcion == "Registrar Pago Proveedor":
                 conn.commit()
                 st.success("¡Pago registrado!")
     else:
-        st.warning("No hay proveedores registrados.")
+        st.warning("No hay proveedores registrados previamente.")
 
 elif opcion == "Registrar Venta Cliente":
-    st.header("📈 Registrar Venta (Clientes)")
-    with st.form("form_venta"):
+    st.header("📈 Registrar Venta (Desglose Neto + IVA)")
+    
+    col_v1, col_v2 = st.columns(2)
+    with col_v1:
         fecha_v = st.date_input("Fecha de Venta", datetime.now())
         rut_cli = st.text_input("RUT Cliente")
         nombre_cli = st.text_input("Nombre Cliente")
-        monto_v = st.number_input("Monto Venta ($)", min_value=0.0, step=100.0)
         glosa_v = st.text_input("Glosa / Detalle")
-        btn_v = st.form_submit_button("Guardar Venta")
+    
+    with col_v2:
+        monto_neto_v = st.number_input("Monto Neto Venta (Base $)", min_value=0.0, step=100.0)
+        iva_v = round(monto_neto_v * 0.19, 2)
+        monto_total_v = round(monto_neto_v + iva_v, 2)
         
-        if btn_v and rut_cli and monto_v > 0:
+        st.metric("IVA Débito Fiscal (19%)", f"${iva_v:,.0f}")
+        st.metric("Monto Total Venta ($)", f"${monto_total_v:,.0f}")
+        
+    if st.button("Guardar Venta"):
+        if rut_cli and monto_neto_v > 0:
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM clientes WHERE rut = ?", (rut_cli,))
             res = cursor.fetchone()
-            cli_id = res[0] if res else cursor.execute("INSERT INTO clientes (rut, nombre) VALUES (?, ?)", (rut_cli, nombre_cli)).lastrowid
+            if res:
+                cli_id = res[0]
+            else:
+                cursor.execute("INSERT INTO clientes (rut, nombre) VALUES (?, ?)", (rut_cli, nombre_cli))
+                cli_id = cursor.lastrowid
             
-            cursor.execute("INSERT INTO ventas (fecha, cliente_id, monto, glosa) VALUES (?, ?, ?, ?)", (str(fecha_v), cli_id, monto_v, glosa_v))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar', ?, 0, ?)", (str(fecha_v), monto_v, f"Venta a {nombre_cli}"))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Ingresos por Ventas', 0, ?, ?)", (str(fecha_v), monto_v, f"Venta a {nombre_cli}"))
+            cursor.execute("""
+                INSERT INTO ventas (fecha, cliente_id, monto_neto, iva, monto_total, glosa) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (str(fecha_v), cli_id, monto_neto_v, iva_v, monto_total_v, glosa_v))
+            
+            # Asiento Contable Automático para Ventas
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar', ?, 0, ?)", (str(fecha_v), monto_total_v, f"Venta a {nombre_cli}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Ingresos por Ventas', 0, ?, ?)", (str(fecha_v), monto_neto_v, f"Venta a {nombre_cli}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Débito Fiscal', 0, ?, ?)", (str(fecha_v), iva_v, f"IVA Venta {nombre_cli}"))
+            
             conn.commit()
-            st.success("¡Venta registrada e ingresada al Libro Diario!")
+            st.success(f"¡Venta registrada con éxito! Total: ${monto_total_v:,.0f} (Neto: ${monto_neto_v:,.0f} + IVA: ${iva_v:,.0f})")
+        else:
+            st.error("Por favor ingresa el RUT del cliente y un monto neto válido.")
 
 elif opcion == "Registrar Cobro Cliente":
     st.header("💰 Registrar Cobro de Cliente")
@@ -193,7 +243,7 @@ elif opcion == "Registrar Cobro Cliente":
                 conn.commit()
                 st.success("¡Cobro abonado al Banco!")
     else:
-        st.warning("No hay clientes registrados.")
+        st.warning("No hay clientes registrados previamente.")
 
 elif opcion == "Cartola Bancaria y Saldos":
     st.header("🏦 Cartola Bancaria y Flujo de Caja")
@@ -229,7 +279,7 @@ elif opcion == "📊 Reportes Financieros":
     
     with tab1:
         st.subheader("Estado de Resultados Simplificado")
-        df_v = pd.read_sql_query("SELECT SUM(monto) as total FROM ventas", conn)
+        df_v = pd.read_sql_query("SELECT SUM(monto_neto) as total FROM ventas", conn)
         df_c = pd.read_sql_query("SELECT SUM(monto_neto) as total FROM compras", conn)
         
         tot_ventas = df_v['total'].iloc[0] or 0.0
@@ -237,9 +287,9 @@ elif opcion == "📊 Reportes Financieros":
         resultado = tot_ventas - tot_compras
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Ingresos Totales (Ventas)", f"${tot_ventas:,.0f}")
+        c1.metric("Ingresos Netos (Ventas)", f"${tot_ventas:,.0f}")
         c2.metric("Costos/Gastos Netos (Compras)", f"${tot_compras:,.0f}")
-        c3.metric("Resultado Neto", f"${resultado:,.0f}", delta=f"${resultado:,.0f}")
+        c3.metric("Resultado Neto (Utilidad/Pérdida)", f"${resultado:,.0f}", delta=f"${resultado:,.0f}")
         
     with tab2:
         st.subheader("Balance de Comprobación de Sumas y Saldos")
