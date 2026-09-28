@@ -465,7 +465,7 @@ elif opcion == "📖 Libro Diario (Contabilidad)":
 elif opcion == "📊 Reportes Financieros (Norma Chile)":
     st.header("📊 Reportes y Balances Financieros (CMF / IFRS)")
     
-    tab_er, tab_esf, tab_bc = st.tabs(["Estado de Resultados", "Estado de Situación Financiera", "Balance de Comprobación"])
+    tab_er, tab_esf, tab_bc, tab_resp = st.tabs(["Estado de Resultados", "Estado de Situación Financiera", "Balance de Comprobación", "Exportar y Respaldos"])
     
     with tab_er:
         st.subheader("Estado de Resultados Integral (Por Función)")
@@ -537,5 +537,33 @@ elif opcion == "📊 Reportes Financieros (Norma Chile)":
             st.dataframe(df_bc, use_container_width=True)
             st.metric("Total Sumas Debe", f"${df_bc['Total_Debe'].sum():,.0f}")
             st.metric("Total Sumas Haber", f"${df_bc['Total_Haber'].sum():,.0f}")
+
+    with tab_resp:
+        st.subheader("💾 Respaldo y Descarga de Base de Datos")
+        st.caption("Descarga periódicamente tu archivo SQLite completo para mantener respaldada toda la contabilidad.")
+        try:
+            with open(DB_FILE, "rb") as fp:
+                db_bytes = fp.read()
+            fecha_hoy = datetime.now().strftime("%Y-%m-%d")
+            st.download_button(
+                label="📥 Descargar Base de Datos Completa (.db)",
+                data=db_bytes,
+                file_name=f"sistema_contable_chile_{fecha_hoy}.db",
+                mime="application/x-sqlite3"
+            )
+        except Exception:
+            st.error("El archivo de base de datos aún no se ha generado.")
+            
+        st.markdown("---")
+        st.subheader("📥 Exportar Libro Diario a CSV")
+        df_exp_ld = pd.read_sql_query("SELECT * FROM libro_diario", conn)
+        if not df_exp_ld.empty:
+            csv_ld = df_exp_ld.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Descargar Libro Diario Completo (.csv)",
+                data=csv_ld,
+                file_name="libro_diario_completo.csv",
+                mime="text/csv"
+            )
 
 conn.close()
