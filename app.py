@@ -14,7 +14,7 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
-    # 1. Tablas Operativas
+    # 1. Tablas Operativas Básicas
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,18 +79,74 @@ def init_db():
         glosa TEXT
     )""")
     
-    # 2. Plan de Cuentas Jerárquico
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS plan_cuentas (
-        codigo TEXT PRIMARY KEY,
-        nombre TEXT,
-        categoria TEXT, -- 'Real' o 'Nominal'
-        tipo TEXT,      -- 'Activo', 'Pasivo', 'Patrimonio', 'Ingresos', 'Gastos'
-        padre_codigo TEXT,
-        nivel INTEGER   -- 1: Clase, 2: Cuenta Principal, 3: Subcuenta
-    )""")
+    # 2. Recreación/Migración Segura de Plan de Cuentas
+    cursor.execute("PRAGMA table_info(plan_cuentas)")
+    columnas_pc = [info[1] for info in cursor.fetchall()]
     
-    # Migraciones/Verificaciones de Columnas en Tablas Existentes
+    # Si la tabla plan_cuentas no existe o tiene la estructura antigua, la actualizamos
+    if not columnas_pc or "categoria" not in columnas_pc:
+        cursor.execute("DROP TABLE IF EXISTS plan_cuentas")
+        cursor.execute("""
+        CREATE TABLE plan_cuentas (
+            codigo TEXT PRIMARY KEY,
+            nombre TEXT,
+            categoria TEXT, -- 'Real' o 'Nominal'
+            tipo TEXT,      -- 'Activo', 'Pasivo', 'Patrimonio', 'Ingresos', 'Gastos'
+            padre_codigo TEXT,
+            nivel INTEGER   -- 1: Clase, 2: Cuenta Principal, 3: Subcuenta
+        )""")
+        
+        cat_inicial = [
+            # CUENTAS REALES (BALANCE GENERAL)
+            ("1", "ACTIVO", "Real", "Activo", None, 1),
+            ("1.1", "Activo Corriente", "Real", "Activo", "1", 2),
+            ("1.1.01", "Efectivo y Equivalentes", "Real", "Activo", "1.1", 2),
+            ("1.1.01.01", "Banco", "Real", "Activo", "1.1.01", 3),
+            ("1.1.01.02", "Caja General", "Real", "Activo", "1.1.01", 3),
+            ("1.1.02", "Cuentas y Documentos por Cobrar", "Real", "Activo", "1.1", 2),
+            ("1.1.02.01", "Cuentas por Cobrar Clientes", "Real", "Activo", "1.1.02", 3),
+            ("1.1.02.02", "IVA Crédito Fiscal", "Real", "Activo", "1.1.02", 3),
+            ("1.2", "Activo No Corriente", "Real", "Activo", "1", 2),
+            ("1.2.01", "Propiedad, Planta y Equipo", "Real", "Activo", "1.2", 2),
+            ("1.2.01.01", "Equipos de Computación", "Real", "Activo", "1.2.01", 3),
+            ("1.2.01.02", "Muebles y Enseres", "Real", "Activo", "1.2.01", 3),
+            
+            ("2", "PASIVO", "Real", "Pasivo", None, 1),
+            ("2.1", "Pasivo Corriente", "Real", "Pasivo", "2", 2),
+            ("2.1.01", "Cuentas por Pagar Comerciales", "Real", "Pasivo", "2.1", 2),
+            ("2.1.01.01", "Cuentas por Pagar Proveedores", "Real", "Pasivo", "2.1.01", 3),
+            ("2.1.01.02", "IVA Débito Fiscal", "Real", "Pasivo", "2.1.01", 3),
+            ("2.1.01.03", "Retenciones e Impuestos por Pagar", "Real", "Pasivo", "2.1.01", 3),
+            
+            ("3", "PATRIMONIO", "Real", "Patrimonio", None, 1),
+            ("3.1", "Patrimonio Neto", "Real", "Patrimonio", "3", 2),
+            ("3.1.01", "Capital Social", "Real", "Patrimonio", "3.1", 3),
+            ("3.1.02", "Resultados Acumulados", "Real", "Patrimonio", "3.1", 3),
+            
+            # CUENTAS NOMINALES (ESTADO DE RESULTADOS)
+            ("4", "INGRESOS", "Nominal", "Ingresos", None, 1),
+            ("4.1", "Ingresos Operacionales", "Nominal", "Ingresos", "4", 2),
+            ("4.1.01", "Ingresos por Ventas", "Nominal", "Ingresos", "4.1", 3),
+            ("4.1.02", "Ingresos por Servicios", "Nominal", "Ingresos", "4.1", 3),
+            ("4.2", "Ingresos No Operacionales", "Nominal", "Ingresos", "4", 2),
+            ("4.2.01", "Otros Ingresos", "Nominal", "Ingresos", "4.2", 3),
+            
+            ("5", "GASTOS Y COSTOS", "Nominal", "Gastos", None, 1),
+            ("5.1", "Costos de Operación / Ventas", "Nominal", "Gastos", "5", 2),
+            ("5.1.01", "Costo de Ventas", "Nominal", "Gastos", "5.1", 3),
+            ("5.2", "Gastos Operacionales", "Nominal", "Gastos", "5", 2),
+            ("5.2.01", "Gastos Generales", "Nominal", "Gastos", "5.2", 3),
+            ("5.2.02", "Gastos de Arriendo", "Nominal", "Gastos", "5.2", 3),
+            ("5.2.03", "Gastos de Servicios Básicos", "Nominal", "Gastos", "5.2", 3),
+            ("5.2.04", "Remuneraciones y Sueldos", "Nominal", "Gastos", "5.2", 3),
+            ("5.2.05", "Gastos de Publicidad y Marketing", "Nominal", "Gastos", "5.2", 3)
+        ]
+        cursor.executemany("""
+            INSERT INTO plan_cuentas (codigo, nombre, categoria, tipo, padre_codigo, nivel) 
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, cat_inicial)
+
+    # 3. Verificación de columnas en Compras y Ventas
     def agregar_columna_si_no_existe(tabla, columna, tipo_dato):
         cursor.execute(f"PRAGMA table_info({tabla})")
         columnas = [info[1] for info in cursor.fetchall()]
@@ -106,64 +162,6 @@ def init_db():
     agregar_columna_si_no_existe("ventas", "monto_neto", "REAL")
     agregar_columna_si_no_existe("ventas", "iva", "REAL")
     agregar_columna_si_no_existe("ventas", "monto_total", "REAL")
-
-    # 3. Cargar Plan de Cuentas Estructurado (Cuentas Reales y Nominales)
-    cursor.execute("SELECT COUNT(*) FROM plan_cuentas")
-    if cursor.fetchone()[0] == 0:
-        cat_inicial = [
-            # CUENTAS REALES (BALANCE GENERAL)
-            # 1. ACTIVO
-            ("1", "ACTIVO", "Real", "Activo", None, 1),
-            ("1.1", "Activo Corriente", "Real", "Activo", "1", 2),
-            ("1.1.01", "Efectivo y Equivalentes", "Real", "Activo", "1.1", 2),
-            ("1.1.01.01", "Banco", "Real", "Activo", "1.1.01", 3),
-            ("1.1.01.02", "Caja General", "Real", "Activo", "1.1.01", 3),
-            ("1.1.02", "Cuentas y Documentos por Cobrar", "Real", "Activo", "1.1", 2),
-            ("1.1.02.01", "Cuentas por Cobrar Clientes", "Real", "Activo", "1.1.02", 3),
-            ("1.1.02.02", "IVA Crédito Fiscal", "Real", "Activo", "1.1.02", 3),
-            ("1.2", "Activo No Corriente", "Real", "Activo", "1", 2),
-            ("1.2.01", "Propiedad, Planta y Equipo", "Real", "Activo", "1.2", 2),
-            ("1.2.01.01", "Equipos de Computación", "Real", "Activo", "1.2.01", 3),
-            ("1.2.01.02", "Muebles y Enseres", "Real", "Activo", "1.2.01", 3),
-            
-            # 2. PASIVO
-            ("2", "PASIVO", "Real", "Pasivo", None, 1),
-            ("2.1", "Pasivo Corriente", "Real", "Pasivo", "2", 2),
-            ("2.1.01", "Cuentas por Pagar Comerciales", "Real", "Pasivo", "2.1", 2),
-            ("2.1.01.01", "Cuentas por Pagar Proveedores", "Real", "Pasivo", "2.1.01", 3),
-            ("2.1.01.02", "IVA Débito Fiscal", "Real", "Pasivo", "2.1.01", 3),
-            ("2.1.01.03", "Retenciones e Impuestos por Pagar", "Real", "Pasivo", "2.1.01", 3),
-            
-            # 3. PATRIMONIO
-            ("3", "PATRIMONIO", "Real", "Patrimonio", None, 1),
-            ("3.1", "Patrimonio Neto", "Real", "Patrimonio", "3", 2),
-            ("3.1.01", "Capital Social", "Real", "Patrimonio", "3.1", 3),
-            ("3.1.02", "Resultados Acumulados", "Real", "Patrimonio", "3.1", 3),
-            
-            # CUENTAS NOMINALES (ESTADO DE RESULTADOS)
-            # 4. INGRESOS
-            ("4", "INGRESOS", "Nominal", "Ingresos", None, 1),
-            ("4.1", "Ingresos Operacionales", "Nominal", "Ingresos", "4", 2),
-            ("4.1.01", "Ingresos por Ventas", "Nominal", "Ingresos", "4.1", 3),
-            ("4.1.02", "Ingresos por Servicios", "Nominal", "Ingresos", "4.1", 3),
-            ("4.2", "Ingresos No Operacionales", "Nominal", "Ingresos", "4", 2),
-            ("4.2.01", "Otros Ingresos", "Nominal", "Ingresos", "4.2", 3),
-            
-            # 5. GASTOS Y COSTOS
-            ("5", "GASTOS Y COSTOS", "Nominal", "Gastos", None, 1),
-            ("5.1", "Costos de Operación / Ventas", "Nominal", "Gastos", "5", 2),
-            ("5.1.01", "Costo de Ventas", "Nominal", "Gastos", "5.1", 3),
-            ("5.2", "Gastos Operacionales", "Nominal", "Gastos", "5", 2),
-            ("5.2.01", "Gastos Generales", "Nominal", "Gastos", "5.2", 3),
-            ("5.2.02", "Gastos de Arriendo", "Nominal", "Gastos", "5.2", 3),
-            ("5.2.03", "Gastos de Servicios Básicos", "Nominal", "Gastos", "5.2", 3),
-            ("5.2.04", "Remuneraciones y Sueldos", "Nominal", "Gastos", "5.2", 3),
-            ("5.2.05", "Gastos de Publicidad y Marketing", "Nominal", "Gastos", "5.2", 3)
-        ]
-        cursor.executemany("""
-            INSERT INTO plan_cuentas (codigo, nombre, categoria, tipo, padre_codigo, nivel) 
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, cat_inicial)
 
     conn.commit()
     conn.close()
@@ -189,7 +187,6 @@ opcion = st.sidebar.radio(
 
 conn = get_connection()
 
-# Funciones Auxiliares para Cuentas
 def obtener_subcuentas(tipo_filtro=None):
     if tipo_filtro:
         query = "SELECT nombre FROM plan_cuentas WHERE nivel = 3 AND tipo = ? ORDER BY codigo"
@@ -224,7 +221,6 @@ elif opcion == "📋 Plan de Cuentas":
             ORDER BY codigo
         """, conn)
         
-        # Formato visual con identación jerárquica
         df_reales['Nombre de Cuenta / Subcuenta'] = df_reales.apply(
             lambda r: ("  " * (r['Nivel'] - 1) + "• " if r['Nivel'] > 1 else "") + r['Nombre de Cuenta / Subcuenta'], axis=1
         )
@@ -258,8 +254,6 @@ elif opcion == "📋 Plan de Cuentas":
                     options=df_padres['codigo'] + " - " + df_padres['nombre']
                 )
                 cod_padre = padre_sel.split(" - ")[0]
-                
-                # Obtener info del padre seleccionado
                 row_padre = df_padres[df_padres['codigo'] == cod_padre].iloc[0]
                 
                 nuevo_codigo = st.text_input("Código para Nueva Subcuenta (Ej: 5.2.06)", value=f"{cod_padre}.")
@@ -285,9 +279,9 @@ elif opcion == "📋 Plan de Cuentas":
                         st.success(f"¡Cuenta '{nombre_cuenta}' ({nuevo_codigo}) creada con éxito!")
                         st.rerun()
                     except sqlite3.IntegrityError:
-                        st.error("El código ingresado ya existe. Por favor usa un código único.")
+                        st.error("El código ingresado ya existe. Usa un código único.")
                 else:
-                    st.error("Por favor completa el código y el nombre de la cuenta.")
+                    st.error("Por favor completa el código y el nombre.")
 
 elif opcion == "✏️ Registrar Asiento Manual":
     st.header("✏️ Registrar Asiento Contable Manual (Partida Doble)")
@@ -371,7 +365,6 @@ elif opcion == "Registrar Compra Proveedor":
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (str(fecha), prov_id, cuenta_gasto_sel, monto_neto, iva, monto_total, glosa))
             
-            # Asiento Integrado usando la subcuenta de gasto seleccionada
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, ?, 0, ?)", (str(fecha), cuenta_gasto_sel, monto_neto, f"Compra {nombre_prov}"))
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Crédito Fiscal', ?, 0, ?)", (str(fecha), iva, f"IVA Compra {nombre_prov}"))
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar Proveedores', 0, ?, ?)", (str(fecha), monto_total, f"Compra {nombre_prov}"))
@@ -440,7 +433,6 @@ elif opcion == "Registrar Venta Cliente":
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (str(fecha_v), cli_id, cuenta_ingreso_sel, monto_neto_v, iva_v, monto_total_v, glosa_v))
             
-            # Asiento Integrado usando la subcuenta de ingreso seleccionada
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar Clientes', ?, 0, ?)", (str(fecha_v), monto_total_v, f"Venta a {nombre_cli}"))
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, ?, 0, ?, ?)", (str(fecha_v), cuenta_ingreso_sel, monto_neto_v, f"Venta a {nombre_cli}"))
             cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'IVA Débito Fiscal', 0, ?, ?)", (str(fecha_v), iva_v, f"IVA Venta {nombre_cli}"))
