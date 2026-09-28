@@ -1,114 +1,78 @@
+import streamlit as st
 import pandas as pd
 import sqlite3
-import streamlit as st
+from datetime import datetime
 
-# Configuración de la página web
-st.set_page_config(
-    page_title="Sistema Contable Pyme", page_icon="📊", layout="wide"
-)
+# Configuración de página
+st.set_page_config(page_title="Sistema Contable Web", page_icon="💼", layout="wide")
 
-# Conexión a la base de datos local
-DB_PATH = "sistema_contable.db"
+# Conexión con base de datos SQLite
+def get_connection():
+    return sqlite3.connect("sistema_contable.db")
 
-
-def inicializar_db():
-    conn = sqlite3.connect(DB_PATH)
+def init_db():
+    conn = get_connection()
     cursor = conn.cursor()
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS cuentas_contables (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        codigo TEXT NOT NULL UNIQUE,
-        nombre TEXT NOT NULL,
-        tipo TEXT NOT NULL,
-        naturaleza TEXT NOT NULL
-    )""")
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS asientos_contables (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        numero INTEGER NOT NULL UNIQUE,
-        fecha TEXT NOT NULL,
-        tipo_operacion TEXT NOT NULL,
-        descripcion TEXT NOT NULL,
-        periodo TEXT NOT NULL
-    )""")
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS detalle_asientos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        asiento_id INTEGER NOT NULL,
-        cuenta_id INTEGER NOT NULL,
-        debe REAL NOT NULL DEFAULT 0,
-        haber REAL NOT NULL DEFAULT 0,
-        FOREIGN KEY (asiento_id) REFERENCES asientos_contables(id),
-        FOREIGN KEY (cuenta_id) REFERENCES cuentas_contables(id)
-    )""")
-
+    # Tablas existentes
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        codigo TEXT NOT NULL UNIQUE,
-        razon_social TEXT NOT NULL,
-        rut TEXT NOT NULL UNIQUE
+        rut TEXT,
+        nombre TEXT
     )""")
-
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS facturas_compra (
+    CREATE TABLE IF NOT EXISTS compras (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        numero_factura TEXT NOT NULL,
-        fecha TEXT NOT NULL,
-        proveedor_id INTEGER NOT NULL,
-        neto REAL NOT NULL,
-        iva REAL NOT NULL,
-        total REAL NOT NULL,
-        asiento_id INTEGER
+        fecha TEXT,
+        proveedor_id INTEGER,
+        monto REAL,
+        glosa TEXT
     )""")
-
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS pagos_proveedores (
+    CREATE TABLE IF NOT EXISTS pagos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        factura_id INTEGER NOT NULL,
-        fecha TEXT NOT NULL,
-        monto REAL NOT NULL,
-        medio_pago TEXT NOT NULL,
-        asiento_id INTEGER
+        fecha TEXT,
+        proveedor_id INTEGER,
+        monto REAL
     )""")
-
+    # Módulo de Clientes / Ventas
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS movimientos_banco (
+    CREATE TABLE IF NOT EXISTS clientes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        fecha TEXT NOT NULL,
-        tipo_movimiento TEXT NOT NULL,
-        monto REAL NOT NULL,
-        referencia TEXT
+        rut TEXT,
+        nombre TEXT
     )""")
-
-    cuentas_basicas = [
-        ("1.1.02", "Banco", "ACTIVO", "DEUDORA"),
-        ("1.1.04", "IVA Crédito Fiscal", "ACTIVO", "DEUDORA"),
-        ("2.1.01", "Proveedores", "PASIVO", "ACREEDORA"),
-        ("5.1.01", "Costo de ventas / Gastos", "GASTO", "DEUDORA"),
-    ]
-    for cod, nom, tipo, nat in cuentas_basicas:
-        cursor.execute(
-            "INSERT OR IGNORE INTO cuentas_contables (codigo, nombre, tipo,"
-            " naturaleza) VALUES (?, ?, ?, ?)",
-            (cod, nom, tipo, nat),
-        )
-
-    cursor.execute(
-        "INSERT OR IGNORE INTO proveedores (codigo, razon_social, rut) VALUES"
-        " ('PROV01', 'PROVEEDOR EJEMPLO SpA', '77.111.222-3')"
-    )
-
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS ventas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT,
+        cliente_id INTEGER,
+        monto REAL,
+        glosa TEXT
+    )""")
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS cobros (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT,
+        cliente_id INTEGER,
+        monto REAL
+    )""")
+    # Libro Diario (Asientos Contables)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS libro_diario (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT,
+        cuenta TEXT,
+        debe REAL,
+        haber REAL,
+        glosa TEXT
+    )""")
     conn.commit()
     conn.close()
 
+init_db()
 
-inicializar_db()
-
-# Menú de Navegación Lateral
+# Menú lateral interactivo
 st.sidebar.title("📌 Menú Principal")
 opcion = st.sidebar.radio(
     "Selecciona un Módulo:",
@@ -116,219 +80,151 @@ opcion = st.sidebar.radio(
         "Inicio / Resumen",
         "Registrar Compra Proveedor",
         "Registrar Pago Proveedor",
+        "Registrar Venta Cliente",
+        "Registrar Cobro Cliente",
         "Cartola Bancaria y Saldos",
-    ],
+        "Libro Diario (Contabilidad)"
+    ]
 )
 
-st.title("💼 Sistema Contable Web")
+conn = get_connection()
 
 if opcion == "Inicio / Resumen":
+    st.title("💼 Sistema Contable Web")
     st.subheader("Bienvenido a tu Sistema Contable Integrado")
-    st.info(
-        "Utiliza el menú lateral para registrar compras, pagos a proveedores y"
-        " consultar la cartola de banco."
-    )
+    st.info("Utiliza el menú lateral para acceder a Compras, Ventas, Clientes, Proveedores, Banco y Libro Diario.")
 
 elif opcion == "Registrar Compra Proveedor":
-    st.subheader("🛒 Registro de Factura de Compra")
+    st.header("🛒 Registrar Compra (Proveedores)")
     with st.form("form_compra"):
-        numero_factura = st.text_input("Número de Factura", "550")
-        fecha = st.date_input("Fecha de Factura")
-        neto = st.number_input("Monto Neto ($)", min_value=0.0, value=100000.0)
-        iva = neto * 0.19
-        total = neto + iva
-        st.write(f"**IVA (19%):** ${iva:,.0f} | **Total:** ${total:,.0f}")
-
-        submit = st.form_submit_button("Guardar Factura y Generar Asiento")
-
-        if submit:
-            conn = sqlite3.connect(DB_PATH)
+        fecha = st.date_input("Fecha de Compra", datetime.now())
+        rut_prov = st.text_input("RUT Proveedor")
+        nombre_prov = st.text_input("Nombre Proveedor")
+        monto = st.number_input("Monto Total ($)", min_value=0.0, step=100.0)
+        glosa = st.text_input("Glosa / Detalle")
+        btn = st.form_submit_button("Guardar Compra")
+        
+        if btn and rut_prov and monto > 0:
             cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT IFNULL(MAX(numero), 0) + 1 FROM asientos_contables"
-            )
-            num_asiento = cursor.fetchone()[0]
-
-            cursor.execute(
-                """
-                INSERT INTO asientos_contables (numero, fecha, tipo_operacion, descripcion, periodo)
-                VALUES (?, ?, 'FACTURA DE COMPRA', ?, ?)
-            """,
-                (
-                    num_asiento,
-                    str(fecha),
-                    f"Factura Compra N° {numero_factura}",
-                    str(fecha)[:7],
-                ),
-            )
-            asiento_id = cursor.lastrowid
-
-            cursor.execute(
-                "SELECT id FROM cuentas_contables WHERE codigo = '5.1.01'"
-            )
-            c_gasto = cursor.fetchone()[0]
-            cursor.execute(
-                "SELECT id FROM cuentas_contables WHERE codigo = '1.1.04'"
-            )
-            c_iva = cursor.fetchone()[0]
-            cursor.execute(
-                "SELECT id FROM cuentas_contables WHERE codigo = '2.1.01'"
-            )
-            c_prov = cursor.fetchone()[0]
-
-            cursor.execute(
-                "INSERT INTO detalle_asientos (asiento_id, cuenta_id, debe,"
-                " haber) VALUES (?, ?, ?, 0)",
-                (asiento_id, c_gasto, neto),
-            )
-            cursor.execute(
-                "INSERT INTO detalle_asientos (asiento_id, cuenta_id, debe,"
-                " haber) VALUES (?, ?, ?, 0)",
-                (asiento_id, c_iva, iva),
-            )
-            cursor.execute(
-                "INSERT INTO detalle_asientos (asiento_id, cuenta_id, debe,"
-                " haber) VALUES (?, ?, 0, ?)",
-                (asiento_id, c_prov, total),
-            )
-
-            cursor.execute(
-                """
-                INSERT INTO facturas_compra (numero_factura, fecha, proveedor_id, neto, iva, total, asiento_id)
-                VALUES (?, ?, 1, ?, ?, ?, ?)
-            """,
-                (numero_factura, str(fecha), neto, iva, total, asiento_id),
-            )
-
+            cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_prov,))
+            res = cursor.fetchone()
+            if res:
+                prov_id = res[0]
+            else:
+                cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_prov, nombre_prov))
+                prov_id = cursor.lastrowid
+            
+            cursor.execute("INSERT INTO compras (fecha, proveedor_id, monto, glosa) VALUES (?, ?, ?, ?)",
+                           (str(fecha), prov_id, monto, glosa))
+            # Asiento Contable Automático (Gasto / Cuentas por Pagar)
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Gastos Generales', ?, 0, ?)",
+                           (str(fecha), monto, f"Compra {nombre_prov}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', 0, ?, ?)",
+                           (str(fecha), monto, f"Compra {nombre_prov}"))
             conn.commit()
-            conn.close()
-            st.success(
-                f"✅ Factura N° {numero_factura} guardada con éxito por"
-                f" ${total:,.0f}. Asiento Contable #{num_asiento} creado."
-            )
+            st.success("¡Compra registrada y asiento contable generado correctamente!")
 
 elif opcion == "Registrar Pago Proveedor":
-    st.subheader("💳 Registro de Pago a Proveedor")
-    with st.form("form_pago"):
-        factura_id = st.number_input("ID de Factura", min_value=1, value=1)
-        fecha_pago = st.date_input("Fecha de Pago")
-        monto_pago = st.number_input(
-            "Monto a Pagar ($)", min_value=0.0, value=50000.0
-        )
-        medio_pago = st.selectbox(
-            "Medio de Pago", ["TRANSFERENCIA", "EFECTIVO", "CHEQUE"]
-        )
+    st.header("💸 Registrar Pago a Proveedor")
+    df_prov = pd.read_sql_query("SELECT id, nombre FROM proveedores", conn)
+    if not df_prov.empty:
+        prov_sel = st.selectbox("Selecciona Proveedor", df_prov['nombre'])
+        prov_id = df_prov[df_prov['nombre'] == prov_sel]['id'].values[0]
+        fecha_pago = st.date_input("Fecha Pago", datetime.now())
+        monto_pago = st.number_input("Monto Pagado ($)", min_value=0.0, step=100.0)
+        if st.button("Registrar Pago"):
+            if monto_pago > 0:
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO pagos (fecha, proveedor_id, monto) VALUES (?, ?, ?)",
+                               (str(fecha_pago), prov_id, monto_pago))
+                # Asiento Contable (Cuentas por Pagar / Banco)
+                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', ?, 0, ?)",
+                               (str(fecha_pago), monto_pago, f"Pago a {prov_sel}"))
+                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Banco', 0, ?, ?)",
+                               (str(fecha_pago), monto_pago, f"Pago a {prov_sel}"))
+                conn.commit()
+                st.success("¡Pago registrado!")
+    else:
+        st.warning("No hay proveedores registrados.")
 
-        submit_pago = st.form_submit_button("Registrar Pago")
-
-        if submit_pago:
-            conn = sqlite3.connect(DB_PATH)
+elif opcion == "Registrar Venta Cliente":
+    st.header("📈 Registrar Venta (Clientes)")
+    with st.form("form_venta"):
+        fecha_v = st.date_input("Fecha de Venta", datetime.now())
+        rut_cli = st.text_input("RUT Cliente")
+        nombre_cli = st.text_input("Nombre Cliente")
+        monto_v = st.number_input("Monto Venta ($)", min_value=0.0, step=100.0)
+        glosa_v = st.text_input("Glosa / Detalle")
+        btn_v = st.form_submit_button("Guardar Venta")
+        
+        if btn_v and rut_cli and monto_v > 0:
             cursor = conn.cursor()
-
-            cursor.execute(
-                "SELECT IFNULL(MAX(numero), 0) + 1 FROM asientos_contables"
-            )
-            num_asiento = cursor.fetchone()[0]
-
-            cursor.execute(
-                """
-                INSERT INTO asientos_contables (numero, fecha, tipo_operacion, descripcion, periodo)
-                VALUES (?, ?, 'PAGO PROVEEDOR', ?, ?)
-            """,
-                (
-                    num_asiento,
-                    str(fecha_pago),
-                    f"Pago Factura ID {factura_id}",
-                    str(fecha_pago)[:7],
-                ),
-            )
-            asiento_id = cursor.lastrowid
-
-            cursor.execute(
-                "SELECT id FROM cuentas_contables WHERE codigo = '2.1.01'"
-            )
-            c_prov = cursor.fetchone()[0]
-            cursor.execute(
-                "SELECT id FROM cuentas_contables WHERE codigo = '1.1.02'"
-            )
-            c_banco = cursor.fetchone()[0]
-
-            cursor.execute(
-                "INSERT INTO detalle_asientos (asiento_id, cuenta_id, debe,"
-                " haber) VALUES (?, ?, ?, 0)",
-                (asiento_id, c_prov, monto_pago),
-            )
-            cursor.execute(
-                "INSERT INTO detalle_asientos (asiento_id, cuenta_id, debe,"
-                " haber) VALUES (?, ?, 0, ?)",
-                (asiento_id, c_banco, monto_pago),
-            )
-
-            cursor.execute(
-                """
-                INSERT INTO pagos_proveedores (factura_id, fecha, monto, medio_pago, asiento_id)
-                VALUES (?, ?, ?, ?, ?)
-            """,
-                (
-                    factura_id,
-                    str(fecha_pago),
-                    monto_pago,
-                    medio_pago,
-                    asiento_id,
-                ),
-            )
-
-            cursor.execute(
-                """
-                INSERT INTO movimientos_banco (fecha, tipo_movimiento, monto, referencia)
-                VALUES (?, 'CARGO', ?, ?)
-            """,
-                (
-                    str(fecha_pago),
-                    monto_pago,
-                    f"Pago Factura Compra ID {factura_id}",
-                ),
-            )
-
+            cursor.execute("SELECT id FROM clientes WHERE rut = ?", (rut_cli,))
+            res = cursor.fetchone()
+            if res:
+                cli_id = res[0]
+            else:
+                cursor.execute("INSERT INTO clientes (rut, nombre) VALUES (?, ?)", (rut_cli, nombre_cli))
+                cli_id = cursor.lastrowid
+            
+            cursor.execute("INSERT INTO ventas (fecha, cliente_id, monto, glosa) VALUES (?, ?, ?, ?)",
+                           (str(fecha_v), cli_id, monto_v, glosa_v))
+            # Asiento Contable Automático (Cuentas por Cobrar / Ventas)
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar', ?, 0, ?)",
+                           (str(fecha_v), monto_v, f"Venta a {nombre_cli}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Ingresos por Ventas', 0, ?, ?)",
+                           (str(fecha_v), monto_v, f"Venta a {nombre_cli}"))
             conn.commit()
-            conn.close()
-            st.success(
-                f"✅ Pago de ${monto_pago:,.0f} registrado exitosamente."
-            )
+            st.success("¡Venta registrada e ingresada al Libro Diario!")
+
+elif opcion == "Registrar Cobro Cliente":
+    st.header("💰 Registrar Cobro de Cliente")
+    df_cli = pd.read_sql_query("SELECT id, nombre FROM clientes", conn)
+    if not df_cli.empty:
+        cli_sel = st.selectbox("Selecciona Cliente", df_cli['nombre'])
+        cli_id = df_cli[df_cli['nombre'] == cli_sel]['id'].values[0]
+        fecha_cobro = st.date_input("Fecha Cobro", datetime.now())
+        monto_cobro = st.number_input("Monto Cobrado ($)", min_value=0.0, step=100.0)
+        if st.button("Registrar Cobro"):
+            if monto_cobro > 0:
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO cobros (fecha, cliente_id, monto) VALUES (?, ?, ?)",
+                               (str(fecha_cobro), cli_id, monto_cobro))
+                # Asiento Contable (Banco / Cuentas por Cobrar)
+                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Banco', ?, 0, ?)",
+                               (str(fecha_cobro), monto_cobro, f"Cobro a {cli_sel}"))
+                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar', 0, ?, ?)",
+                               (str(fecha_cobro), monto_cobro, f"Cobro a {cli_sel}"))
+                conn.commit()
+                st.success("¡Cobro abonado al Banco!")
+    else:
+        st.warning("No hay clientes registrados.")
 
 elif opcion == "Cartola Bancaria y Saldos":
-    st.subheader("📄 Estado de Cuenta y Cartola Bancaria")
-    conn = sqlite3.connect(DB_PATH)
+    st.header("🏦 Cartola Bancaria y Flujo de Caja")
+    df_ingresos = pd.read_sql_query("SELECT SUM(monto) as total FROM cobros", conn)
+    df_egresos = pd.read_sql_query("SELECT SUM(monto) as total FROM pagos", conn)
+    
+    total_ing = df_ingresos['total'].iloc[0] or 0.0
+    total_egr = df_egresos['total'].iloc[0] or 0.0
+    saldo_banco = total_ing - total_egr
+    
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Ingresos (Cobros)", f"${total_ing:,.0f}")
+    col2.metric("Total Egresos (Pagos)", f"${total_egr:,.0f}")
+    col3.metric("Saldo Disponible Banco", f"${saldo_banco:,.0f}")
 
-    st.write("### 🏢 Estado de Cuenta Proveedor")
-    query_prov = """
-        SELECT fecha AS Fecha, 'Factura ' || numero_factura AS Documento, total AS Cargo, 0 AS Abono 
-        FROM facturas_compra
-        UNION ALL
-        SELECT p.fecha, 'Pago Factura ' || f.numero_factura, 0, p.monto 
-        FROM pagos_proveedores p
-        JOIN facturas_compra f ON p.factura_id = f.id
-        ORDER BY Fecha ASC
-    """
-    df_prov = pd.read_sql_query(query_prov, conn)
-    if not df_prov.empty:
-        df_prov["Saldo"] = (df_prov["Cargo"] - df_prov["Abono"]).cumsum()
-        st.dataframe(df_prov, use_container_width=True)
+elif opcion == "Libro Diario (Contabilidad)":
+    st.header("📖 Libro Diario Contable (Asientos de Partida Doble)")
+    df_ld = pd.read_sql_query("SELECT * FROM libro_diario ORDER BY id DESC", conn)
+    if not df_ld.empty:
+        st.dataframe(df_ld, use_container_width=True)
+        total_debe = df_ld['debe'].sum()
+        total_haber = df_ld['haber'].sum()
+        c1, c2 = st.columns(2)
+        c1.metric("Total Debe", f"${total_debe:,.0f}")
+        c2.metric("Total Haber", f"${total_haber:,.0f}")
+    else:
+        st.info("Aún no hay asientos registrados en el Libro Diario.")
 
-    st.write("### 🏦 Cartola Histórica de Banco")
-    query_banco = """
-        SELECT fecha AS Fecha, referencia AS Detalle, 
-               CASE WHEN tipo_movimiento = 'ABONO' THEN monto ELSE 0 END AS Ingresos,
-               CASE WHEN tipo_movimiento = 'CARGO' THEN monto ELSE 0 END AS Egresos
-        FROM movimientos_banco
-        ORDER BY Fecha ASC
-    """
-    df_banco = pd.read_sql_query(query_banco, conn)
-    if not df_banco.empty:
-        df_banco["Saldo"] = (
-            df_banco["Ingresos"] - df_banco["Egresos"]
-        ).cumsum()
-        st.dataframe(df_banco, use_container_width=True)
-
-    conn.close()
+conn.close()
