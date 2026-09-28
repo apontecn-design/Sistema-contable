@@ -3,17 +3,14 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 
-# Configuración de página
 st.set_page_config(page_title="Sistema Contable Web", page_icon="💼", layout="wide")
 
-# Conexión con base de datos SQLite
 def get_connection():
     return sqlite3.connect("sistema_contable.db")
 
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
-    # Tablas existentes
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,7 +32,6 @@ def init_db():
         proveedor_id INTEGER,
         monto REAL
     )""")
-    # Módulo de Clientes / Ventas
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS clientes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +53,6 @@ def init_db():
         cliente_id INTEGER,
         monto REAL
     )""")
-    # Libro Diario (Asientos Contables)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS libro_diario (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,7 +67,6 @@ def init_db():
 
 init_db()
 
-# Menú lateral interactivo
 st.sidebar.title("📌 Menú Principal")
 opcion = st.sidebar.radio(
     "Selecciona un Módulo:",
@@ -83,7 +77,8 @@ opcion = st.sidebar.radio(
         "Registrar Venta Cliente",
         "Registrar Cobro Cliente",
         "Cartola Bancaria y Saldos",
-        "Libro Diario (Contabilidad)"
+        "Libro Diario (Contabilidad)",
+        "📊 Reportes Financieros"
     ]
 )
 
@@ -92,7 +87,7 @@ conn = get_connection()
 if opcion == "Inicio / Resumen":
     st.title("💼 Sistema Contable Web")
     st.subheader("Bienvenido a tu Sistema Contable Integrado")
-    st.info("Utiliza el menú lateral para acceder a Compras, Ventas, Clientes, Proveedores, Banco y Libro Diario.")
+    st.info("Utiliza el menú lateral para acceder a Compras, Ventas, Clientes, Proveedores, Banco, Libro Diario y Reportes.")
 
 elif opcion == "Registrar Compra Proveedor":
     st.header("🛒 Registrar Compra (Proveedores)")
@@ -108,19 +103,11 @@ elif opcion == "Registrar Compra Proveedor":
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM proveedores WHERE rut = ?", (rut_prov,))
             res = cursor.fetchone()
-            if res:
-                prov_id = res[0]
-            else:
-                cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_prov, nombre_prov))
-                prov_id = cursor.lastrowid
+            prov_id = res[0] if res else cursor.execute("INSERT INTO proveedores (rut, nombre) VALUES (?, ?)", (rut_prov, nombre_prov)).lastrowid
             
-            cursor.execute("INSERT INTO compras (fecha, proveedor_id, monto, glosa) VALUES (?, ?, ?, ?)",
-                           (str(fecha), prov_id, monto, glosa))
-            # Asiento Contable Automático (Gasto / Cuentas por Pagar)
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Gastos Generales', ?, 0, ?)",
-                           (str(fecha), monto, f"Compra {nombre_prov}"))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', 0, ?, ?)",
-                           (str(fecha), monto, f"Compra {nombre_prov}"))
+            cursor.execute("INSERT INTO compras (fecha, proveedor_id, monto, glosa) VALUES (?, ?, ?, ?)", (str(fecha), prov_id, monto, glosa))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Gastos Generales', ?, 0, ?)", (str(fecha), monto, f"Compra {nombre_prov}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', 0, ?, ?)", (str(fecha), monto, f"Compra {nombre_prov}"))
             conn.commit()
             st.success("¡Compra registrada y asiento contable generado correctamente!")
 
@@ -135,13 +122,9 @@ elif opcion == "Registrar Pago Proveedor":
         if st.button("Registrar Pago"):
             if monto_pago > 0:
                 cursor = conn.cursor()
-                cursor.execute("INSERT INTO pagos (fecha, proveedor_id, monto) VALUES (?, ?, ?)",
-                               (str(fecha_pago), prov_id, monto_pago))
-                # Asiento Contable (Cuentas por Pagar / Banco)
-                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', ?, 0, ?)",
-                               (str(fecha_pago), monto_pago, f"Pago a {prov_sel}"))
-                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Banco', 0, ?, ?)",
-                               (str(fecha_pago), monto_pago, f"Pago a {prov_sel}"))
+                cursor.execute("INSERT INTO pagos (fecha, proveedor_id, monto) VALUES (?, ?, ?)", (str(fecha_pago), prov_id, monto_pago))
+                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Pagar', ?, 0, ?)", (str(fecha_pago), monto_pago, f"Pago a {prov_sel}"))
+                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Banco', 0, ?, ?)", (str(fecha_pago), monto_pago, f"Pago a {prov_sel}"))
                 conn.commit()
                 st.success("¡Pago registrado!")
     else:
@@ -161,19 +144,11 @@ elif opcion == "Registrar Venta Cliente":
             cursor = conn.cursor()
             cursor.execute("SELECT id FROM clientes WHERE rut = ?", (rut_cli,))
             res = cursor.fetchone()
-            if res:
-                cli_id = res[0]
-            else:
-                cursor.execute("INSERT INTO clientes (rut, nombre) VALUES (?, ?)", (rut_cli, nombre_cli))
-                cli_id = cursor.lastrowid
+            cli_id = res[0] if res else cursor.execute("INSERT INTO clientes (rut, nombre) VALUES (?, ?)", (rut_cli, nombre_cli)).lastrowid
             
-            cursor.execute("INSERT INTO ventas (fecha, cliente_id, monto, glosa) VALUES (?, ?, ?, ?)",
-                           (str(fecha_v), cli_id, monto_v, glosa_v))
-            # Asiento Contable Automático (Cuentas por Cobrar / Ventas)
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar', ?, 0, ?)",
-                           (str(fecha_v), monto_v, f"Venta a {nombre_cli}"))
-            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Ingresos por Ventas', 0, ?, ?)",
-                           (str(fecha_v), monto_v, f"Venta a {nombre_cli}"))
+            cursor.execute("INSERT INTO ventas (fecha, cliente_id, monto, glosa) VALUES (?, ?, ?, ?)", (str(fecha_v), cli_id, monto_v, glosa_v))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar', ?, 0, ?)", (str(fecha_v), monto_v, f"Venta a {nombre_cli}"))
+            cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Ingresos por Ventas', 0, ?, ?)", (str(fecha_v), monto_v, f"Venta a {nombre_cli}"))
             conn.commit()
             st.success("¡Venta registrada e ingresada al Libro Diario!")
 
@@ -188,13 +163,9 @@ elif opcion == "Registrar Cobro Cliente":
         if st.button("Registrar Cobro"):
             if monto_cobro > 0:
                 cursor = conn.cursor()
-                cursor.execute("INSERT INTO cobros (fecha, cliente_id, monto) VALUES (?, ?, ?)",
-                               (str(fecha_cobro), cli_id, monto_cobro))
-                # Asiento Contable (Banco / Cuentas por Cobrar)
-                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Banco', ?, 0, ?)",
-                               (str(fecha_cobro), monto_cobro, f"Cobro a {cli_sel}"))
-                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar', 0, ?, ?)",
-                               (str(fecha_cobro), monto_cobro, f"Cobro a {cli_sel}"))
+                cursor.execute("INSERT INTO cobros (fecha, cliente_id, monto) VALUES (?, ?, ?)", (str(fecha_cobro), cli_id, monto_cobro))
+                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Banco', ?, 0, ?)", (str(fecha_cobro), monto_cobro, f"Cobro a {cli_sel}"))
+                cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa) VALUES (?, 'Cuentas por Cobrar', 0, ?, ?)", (str(fecha_cobro), monto_cobro, f"Cobro a {cli_sel}"))
                 conn.commit()
                 st.success("¡Cobro abonado al Banco!")
     else:
@@ -215,7 +186,7 @@ elif opcion == "Cartola Bancaria y Saldos":
     col3.metric("Saldo Disponible Banco", f"${saldo_banco:,.0f}")
 
 elif opcion == "Libro Diario (Contabilidad)":
-    st.header("📖 Libro Diario Contable (Asientos de Partida Doble)")
+    st.header("📖 Libro Diario Contable")
     df_ld = pd.read_sql_query("SELECT * FROM libro_diario ORDER BY id DESC", conn)
     if not df_ld.empty:
         st.dataframe(df_ld, use_container_width=True)
@@ -226,5 +197,46 @@ elif opcion == "Libro Diario (Contabilidad)":
         c2.metric("Total Haber", f"${total_haber:,.0f}")
     else:
         st.info("Aún no hay asientos registrados en el Libro Diario.")
+
+elif opcion == "📊 Reportes Financieros":
+    st.header("📊 Reportes y Balances Financieros")
+    
+    tab1, tab2, tab3 = st.tabs(["Estado de Resultados", "Balance de Comprobación", "Exportar Datos"])
+    
+    with tab1:
+        st.subheader("Estado de Resultados Simplificado")
+        df_v = pd.read_sql_query("SELECT SUM(monto) as total FROM ventas", conn)
+        df_c = pd.read_sql_query("SELECT SUM(monto) as total FROM compras", conn)
+        
+        tot_ventas = df_v['total'].iloc[0] or 0.0
+        tot_compras = df_c['total'].iloc[0] or 0.0
+        resultado = tot_ventas - tot_compras
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Ingresos Totales (Ventas)", f"${tot_ventas:,.0f}")
+        c2.metric("Costos/Gastos (Compras)", f"${tot_compras:,.0f}")
+        c3.metric("Resultado Neto", f"${resultado:,.0f}", delta=f"${resultado:,.0f}")
+        
+    with tab2:
+        st.subheader("Balance de Comprobación de Sumas y Saldos")
+        df_bal = pd.read_sql_query("""
+            SELECT cuenta, SUM(debe) as Total_Debe, SUM(haber) as Total_Haber,
+                   (SUM(debe) - SUM(haber)) as Saldo
+            FROM libro_diario
+            GROUP BY cuenta
+        """, conn)
+        if not df_bal.empty:
+            st.dataframe(df_bal, use_container_width=True)
+        else:
+            st.info("No hay datos contables suficientes para generar el balance.")
+
+    with tab3:
+        st.subheader("Descargar Libro Diario en CSV")
+        df_exp = pd.read_sql_query("SELECT * FROM libro_diario", conn)
+        if not df_exp.empty:
+            csv = df_exp.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Descargar Libro Diario (.csv)", data=csv, file_name="libro_diario.csv", mime="text/csv")
+        else:
+            st.info("No hay registros para exportar.")
 
 conn.close()
