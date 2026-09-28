@@ -15,8 +15,11 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     
+    # Forzar la recreación limpia de la tabla proveedores para asegurar que tenga todas las columnas
+    cursor.execute("DROP TABLE IF EXISTS proveedores")
+    
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS proveedores (
+    CREATE TABLE proveedores (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         rut TEXT UNIQUE,
         nombre TEXT,
@@ -83,28 +86,6 @@ def init_db():
         centro_costo TEXT
     )""")
     
-    def asegurar_columna(tabla, columna, tipo):
-        cursor.execute(f"PRAGMA table_info({tabla})")
-        cols = [info[1] for info in cursor.fetchall()]
-        if cols and columna not in cols:
-            try:
-                cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}")
-            except Exception:
-                pass
-
-    asegurar_columna("proveedores", "cuenta_defecto", "TEXT")
-    asegurar_columna("proveedores", "centro_costo", "TEXT")
-    asegurar_columna("compras", "cuenta_gasto", "TEXT")
-    asegurar_columna("compras", "centro_costo", "TEXT")
-    asegurar_columna("compras", "monto_neto", "REAL")
-    asegurar_columna("compras", "iva", "REAL")
-    asegurar_columna("compras", "monto_total", "REAL")
-    asegurar_columna("ventas", "cuenta_ingreso", "TEXT")
-    asegurar_columna("ventas", "monto_neto", "REAL")
-    asegurar_columna("ventas", "iva", "REAL")
-    asegurar_columna("ventas", "monto_total", "REAL")
-    asegurar_columna("libro_diario", "centro_costo", "TEXT")
-
     cursor.execute("PRAGMA table_info(plan_cuentas)")
     columnas_pc = [info[1] for info in cursor.fetchall()]
     
@@ -229,18 +210,7 @@ elif opcion == "🏢 Maestro de Proveedores y Reglas":
     st.caption("Configura qué cuenta contable de gasto y centro de costo se asignará automáticamente a cada proveedor cuando cargues facturas masivas del SII.")
     
     cuentas_gastos = obtener_subcuentas("Gastos") or ["Gastos Generales"]
-    
-    # Lectura protegida con reintento automático si faltan columnas en la BD antigua
-    try:
-        df_prov = pd.read_sql_query("SELECT id, rut, nombre, cuenta_defecto, centro_costo FROM proveedores ORDER BY nombre", conn)
-    except Exception:
-        c_temp = conn.cursor()
-        try: c_temp.execute("ALTER TABLE proveedores ADD COLUMN cuenta_defecto TEXT")
-        except: pass
-        try: c_temp.execute("ALTER TABLE proveedores ADD COLUMN centro_costo TEXT")
-        except: pass
-        conn.commit()
-        df_prov = pd.read_sql_query("SELECT id, rut, nombre, cuenta_defecto, centro_costo FROM proveedores ORDER BY nombre", conn)
+    df_prov = pd.read_sql_query("SELECT id, rut, nombre, cuenta_defecto, centro_costo FROM proveedores ORDER BY nombre", conn)
     
     st.subheader("📋 Lista de Proveedores Registrados")
     if not df_prov.empty:
@@ -376,15 +346,8 @@ elif opcion == "📥 Carga Masiva / Importar":
                                 cursor.execute("INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo) VALUES (?, 'IVA Débito Fiscal', 0, ?, ?, ?)", (fecha_str, m_iva, f"IVA Venta {nombre_val}", cc_defecto))
 
                             else:
-                                try:
-                                    cursor.execute("SELECT id, cuenta_defecto, centro_costo FROM proveedores WHERE rut = ?", (rut_val,))
-                                    res_prov = cursor.fetchone()
-                                except Exception:
-                                    cursor.execute("ALTER TABLE proveedores ADD COLUMN cuenta_defecto TEXT")
-                                    cursor.execute("ALTER TABLE proveedores ADD COLUMN centro_costo TEXT")
-                                    conn.commit()
-                                    cursor.execute("SELECT id, cuenta_defecto, centro_costo FROM proveedores WHERE rut = ?", (rut_val,))
-                                    res_prov = cursor.fetchone()
+                                cursor.execute("SELECT id, cuenta_defecto, centro_costo FROM proveedores WHERE rut = ?", (rut_val,))
+                                res_prov = cursor.fetchone()
                                 
                                 cta_final_gasto = cta_imputar_defecto
                                 cc_final = cc_defecto
