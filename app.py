@@ -898,7 +898,7 @@ def normalizar_rcv(df, tipo):
     rut_opciones = (
         ["RUT Proveedor", "Rut Proveedor", "RUT", "Rut"]
         if compras
-        else ["Rut Cliente", "RUT Cliente", "RUT", "Rut"]
+        else ["Rut cliente", "Rut Cliente", "RUT Cliente", "RUT", "Rut"]
     )
 
     columnas = [
@@ -1037,6 +1037,7 @@ def normalizar_rcv(df, tipo):
     resultado["total"] = serie_numero(
         columna(
             df,
+            "Monto total",
             "Monto Total",
             "Total"
         )
@@ -3564,7 +3565,7 @@ elif menu == "📋 Plan de Cuentas":
 
 elif menu == "⚙️ Reglas Contables":
 
-    st.title("⚙️ Reglas de clasificación contable")
+    st.title("⚙️️ Reglas de clasificación contable")
     st.info(
         """
         Las reglas tienen prioridad sobre la cuenta habitual del
