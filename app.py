@@ -2,7 +2,9 @@
 
 """
 SGCI - Sistema de Gestión Contable Integral
-Versión optimizada con:
+Versión con:
+- Protección de acceso mediante contraseña
+- Botón de descarga de respaldo de Base de Datos en el Sidebar
 - Corrección de visualización en Reglas Contables
 - Módulo de Asientos Manuales y Saldos Iniciales por Matriz Excel Descargable
 - Plan de cuentas, RCV Compras/Ventas, Auxiliares, Conciliación, Lotes y SQLite.
@@ -19,7 +21,7 @@ import streamlit as st
 
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN Y SEGURIDAD (AUTENTICACIÓN)
 # ============================================================
 
 DB_FILE = "sgci.db"
@@ -30,6 +32,24 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _, col2, _ = st.columns([1, 2, 1])
+    with col2:
+        st.title("🔐 Acceso Restringido - SGCI")
+        st.info("Por seguridad, ingresa la contraseña para acceder al sistema contable.")
+        pwd = st.text_input("Contraseña de acceso", type="password")
+        if st.button("Ingresar al Sistema", type="primary", use_container_width=True):
+            if pwd == "admin2026":  # Contraseña por defecto (puedes modificarla aquí)
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta.")
+    st.stop()
 
 
 # ============================================================
@@ -542,6 +562,7 @@ def crear_esquema(conn):
             ("email", "TEXT"),
             ("telefono", "TEXT"),
             ("direccion", "TEXT"),
+            ("comuna", "TEXT"),
             ("comuna", "TEXT"),
             ("ciudad", "TEXT"),
             ("cuenta_defecto", "TEXT"),
@@ -2552,6 +2573,20 @@ menu = st.sidebar.radio(
     ]
 )
 
+# Botón de Respaldo de Base de Datos en el Sidebar
+st.sidebar.divider()
+st.sidebar.caption("Respaldo de Datos")
+if os.path.exists(DB_FILE):
+    with open(DB_FILE, "rb") as f:
+        db_bytes = f.read()
+    st.sidebar.download_button(
+        label="💾 Descargar Respaldo BD",
+        data=db_bytes,
+        file_name=f"sgci_respaldo_{date.today().strftime('%Y%m%d')}.db",
+        mime="application/octet-stream",
+        help="Descarga una copia de seguridad exacta de tu base de datos local."
+    )
+
 
 # ============================================================
 # INICIO
@@ -2928,7 +2963,7 @@ elif menu == "📤 RCV Ventas":
 
 
 # ============================================================
-# ASIENTOS MANUALES Y SALDOS INICIALES (NUEVO MÓDULO)
+# ASIENTOS MANUALES Y SALDOS INICIALES
 # ============================================================
 
 elif menu == "✍️ Asientos y Saldos":
@@ -2941,7 +2976,6 @@ elif menu == "✍️ Asientos y Saldos":
         """
     )
 
-    # Botón para descargar plantilla modelo
     df_modelo_asiento = pd.DataFrame([
         {"fecha": "2026-01-01", "codigo_cuenta": "1.1.01", "debe": 500000.0, "haber": 0.0, "glosa": "Saldo inicial Caja", "asiento": 1, "centro_costo": "General / Ninguno"},
         {"fecha": "2026-01-01", "codigo_cuenta": "3.1.01", "debe": 0.0, "haber": 500000.0, "glosa": "Saldo inicial Capital", "asiento": 1, "centro_costo": "General / Ninguno"}
@@ -3655,7 +3689,7 @@ elif menu == "📋 Plan de Cuentas":
 
 
 # ============================================================
-# REGLAS CONTABLES (CORREGIDO Y OPTIMIZADO)
+# REGLAS CONTABLES
 # ============================================================
 
 elif menu == "⚙️ Reglas Contables":
