@@ -191,7 +191,14 @@ def leer_csv(uploaded_file):
     if texto is None:
         raise ValueError("No fue posible leer el archivo.")
 
-    primera = texto.splitlines()[0] if texto.splitlines() else ""
+    # Limpiar punto y coma extra al final de las líneas típicos del SII
+    lineas_limpias = [
+        linea.rstrip(";")
+        for linea in texto.splitlines()
+    ]
+    texto_limpio = "\n".join(lineas_limpias)
+
+    primera = lineas_limpias[0] if lineas_limpias else ""
 
     separadores = [";", ",", "\t"]
 
@@ -201,7 +208,7 @@ def leer_csv(uploaded_file):
     )
 
     df = pd.read_csv(
-        io.StringIO(texto),
+        io.StringIO(texto_limpio),
         sep=sep,
         dtype=str,
         index_col=False
@@ -867,91 +874,95 @@ def guardar_rol(conn, rol, codigo):
 
 
 # ============================================================
-# RCV (Extractor Ultra Inteligente e Inmune a Desfases del SII)
+# RCV (Normalizador Adaptado a Compras y Ventas del SII)
 # ============================================================
 
 def normalizar_rcv(df, tipo):
     compras = tipo == "compras"
-    df.columns = [str(c).strip() for c in df.columns]
+    cols_lower = {c.lower(): c for c in df.columns}
+
+    def buscar_col(*posibles):
+        for p in posibles:
+            if p.lower() in cols_lower:
+                return cols_lower[p.lower()]
+        return None
 
     resultado = pd.DataFrame()
 
     if compras:
-        filas = []
-        for _, row in df.iterrows():
-            vals = [str(v).strip() for v in row.values if pd.notna(v) and str(v).strip() != '']
-            
-            # Extraer RUT (buscando formato XX.XXX.XXX-X o patrones con guión)
-            rut = ""
-            for v in vals:
-                if re.search(r'\d+-[0-9Kk]', v) and len(v) <= 12:
-                    rut = v
-                    break
+        rut_col = buscar_col("RUT Proveedor", "Rut Proveedor", "RUT", "Rut")
+        tipo_doc_col = buscar_col("Tipo Doc", "Tipo", "Tipo Documento")
+        folio_col = buscar_col("Folio", "Nro", "Nro.", "Número")
+        fecha_doc_col = buscar_col("Fecha Docto", "Fecha Emision", "Fecha Emisión", "Fecha")
+        fecha_rec_col = buscar_col("Fecha Recepcion", "Fecha Recepción")
+        razon_col = buscar_col("Razon Social", "Razón Social", "Proveedor")
+        exento_col = buscar_col("Monto Exento", "Exento")
+        neto_col = buscar_col("Monto Neto", "Neto")
+        iva_col = buscar_col("Monto IVA Recuperable", "IVA", "I.V.A.")
+        total_col = buscar_col("Monto Total", "Total")
+        
+        iva_nr_col = buscar_col("Monto Iva No Recuperable", "Monto IVA No Recuperable")
+        neto_af_col = buscar_col("Monto Neto Activo Fijo")
+        iva_af_col = buscar_col("IVA Activo Fijo")
+        iva_uc_col = buscar_col("IVA uso Comun", "IVA uso Común")
+        
+        ref_tipo_col = buscar_col("Tipo Docto. Referencia", "Tipo Doc Referencia")
+        ref_folio_col = buscar_col("Folio Docto. Referencia", "Folio Referencia")
 
-            # Extraer Tipo de Documento
-            tipo_doc = 33
-            for v in vals:
-                if v in ['30', '32', '33', '34', '46', '55', '56', '60', '61']:
-                    tipo_doc = int(v)
-                    break
+        if not tipo_doc_col or not folio_col:
+            cols = df.columns
+            resultado["tipo_doc"] = pd.to_numeric(df.iloc[:, 1], errors="coerce")
+            resultado["folio"] = df.iloc[:, 5].fillna("").astype(str).str.strip()
+            resultado["fecha_doc"] = serie_fecha(df.iloc[:, 6])
+            resultado["fecha_recepcion"] = serie_fecha(df.iloc[:, 7])
+            resultado["rut"] = df.iloc[:, 3].fillna("").astype(str).apply(normalizar_rut)
+            resultado["razon_social"] = df.iloc[:, 4].fillna("").astype(str).str.strip()
+            resultado["exento"] = serie_numero(df.iloc[:, 9]) if len(cols) > 9 else 0.0
+            resultado["neto"] = serie_numero(df.iloc[:, 10]) if len(cols) > 10 else 0.0
+            resultado["iva"] = serie_numero(df.iloc[:, 11]) if len(cols) > 11 else 0.0
+            resultado["iva_no_rec"] = serie_numero(df.iloc[:, 12]) if len(cols) > 12 else 0.0
+            resultado["neto_af"] = serie_numero(df.iloc[:, 15]) if len(cols) > 15 else 0.0
+            resultado["iva_af"] = serie_numero(df.iloc[:, 16]) if len(cols) > 16 else 0.0
+            resultado["iva_uso_comun"] = serie_numero(df.iloc[:, 17]) if len(cols) > 17 else 0.0
+            resultado["total"] = serie_numero(df.iloc[:, 14]) if len(cols) > 14 else 0.0
+            resultado["ref_type"] = None
+            resultado["ref_folio"] = ""
+        else:
+            resultado["tipo_doc"] = pd.to_numeric(df[tipo_doc_col], errors="coerce")
+            resultado["folio"] = df[folio_col].fillna("").astype(str).str.strip()
+            resultado["fecha_doc"] = serie_fecha(df[fecha_doc_col])
+            resultado["fecha_recepcion"] = serie_fecha(df[fecha_rec_col]) if fecha_rec_col else None
+            resultado["rut"] = df[rut_col].fillna("").astype(str).apply(normalizar_rut)
+            resultado["razon_social"] = df[razon_col].fillna("").astype(str).str.strip() if razon_col else ""
+            resultado["exento"] = serie_numero(df[exento_col]) if exento_col else 0.0
+            resultado["neto"] = serie_numero(df[neto_col]) if neto_col else 0.0
+            resultado["iva"] = serie_numero(df[iva_col]) if iva_col else 0.0
+            resultado["iva_no_rec"] = serie_numero(df[iva_nr_col]) if iva_nr_col else 0.0
+            resultado["neto_af"] = serie_numero(df[neto_af_col]) if neto_af_col else 0.0
+            resultado["iva_af"] = serie_numero(df[iva_af_col]) if iva_af_col else 0.0
+            resultado["iva_uso_comun"] = serie_numero(df[iva_uc_col]) if iva_uc_col else 0.0
+            resultado["total"] = serie_numero(df[total_col]) if total_col else 0.0
+            resultado["ref_type"] = pd.to_numeric(df[ref_tipo_col], errors="coerce") if ref_tipo_col else None
+            resultado["ref_folio"] = df[ref_folio_col].fillna("").astype(str).str.strip() if ref_folio_col else ""
 
-            # Extraer montos numéricos limpios
-            numeros = []
-            for v in vals:
-                clean_v = v.replace('.', '').replace(',', '')
-                if clean_v.isdigit() and len(clean_v) < 10:
-                    numeros.append(float(clean_v))
-
-            # Folio y Razón Social
-            folio = vals[5] if len(vals) > 5 else "0"
-            razon = vals[4] if len(vals) > 4 else "PROVEEDOR"
-
-            total = numeros[-1] if numeros else 0.0
-            neto = numeros[1] if len(numeros) > 2 else round(total / 1.19, 2)
-            iva = round(total - neto, 2) if total >= neto else 0.0
-
-            filas.append({
-                "tipo_doc": tipo_doc,
-                "folio": folio,
-                "fecha_doc": fecha_iso(vals[6]) if len(vals) > 6 else date.today().strftime("%Y-%m-%d"),
-                "fecha_recepcion": None,
-                "rut": normalizar_rut(rut),
-                "razon_social": razon,
-                "exento": 0.0,
-                "neto": neto,
-                "iva": iva,
-                "iva_no_rec": 0.0,
-                "neto_af": 0.0,
-                "iva_af": 0.0,
-                "iva_uso_comun": 0.0,
-                "total": total,
-                "ref_type": None,
-                "ref_folio": ""
-            })
-        resultado = pd.DataFrame(filas)
     else:
-        # Ventas
-        cols_lower = {c.lower(): c for c in df.columns}
-        def buscar_col(*posibles):
-            for p in posibles:
-                if p.lower() in cols_lower:
-                    return cols_lower[p.lower()]
-            return None
-
         rut_col = buscar_col("Rut cliente", "RUT Cliente", "Rut Cliente", "RUT", "Rut")
         tipo_doc_col = buscar_col("Tipo Doc", "Tipo", "Tipo Documento")
         folio_col = buscar_col("Folio", "Nro", "Nro.", "Número")
         fecha_doc_col = buscar_col("Fecha Docto", "Fecha Emision", "Fecha Emisión", "Fecha")
+        fecha_rec_col = buscar_col("Fecha Recepcion", "Fecha Recepción")
         razon_col = buscar_col("Razon Social", "Razón Social", "Cliente")
         exento_col = buscar_col("Monto Exento", "Exento")
         neto_col = buscar_col("Monto Neto", "Neto")
         iva_col = buscar_col("Monto IVA", "IVA", "I.V.A.")
         total_col = buscar_col("Monto total", "Monto Total", "Total")
+        ref_tipo_col = buscar_col("Tipo Docto. Referencia", "Tipo Doc Referencia")
+        ref_folio_col = buscar_col("Folio Docto. Referencia", "Folio Referencia")
 
         resultado["tipo_doc"] = pd.to_numeric(df[tipo_doc_col], errors="coerce") if tipo_doc_col else pd.to_numeric(df.iloc[:, 1], errors="coerce")
         resultado["folio"] = df[folio_col].fillna("").astype(str).str.strip() if folio_col else df.iloc[:, 5].fillna("").astype(str).str.strip()
         resultado["fecha_doc"] = serie_fecha(df[fecha_doc_col]) if fecha_doc_col else serie_fecha(df.iloc[:, 6])
-        resultado["fecha_recepcion"] = None
+        resultado["fecha_recepcion"] = serie_fecha(df[fecha_rec_col]) if fecha_rec_col else None
         resultado["rut"] = df[rut_col].fillna("").astype(str).apply(normalizar_rut) if rut_col else df.iloc[:, 3].fillna("").astype(str).apply(normalizar_rut)
         resultado["razon_social"] = df[razon_col].fillna("").astype(str).str.strip() if razon_col else df.iloc[:, 4].fillna("").astype(str).str.strip()
         resultado["exento"] = serie_numero(df[exento_col]) if exento_col else 0.0
@@ -962,8 +973,8 @@ def normalizar_rcv(df, tipo):
         resultado["iva_af"] = 0.0
         resultado["iva_uso_comun"] = 0.0
         resultado["total"] = serie_numero(df[total_col]) if total_col else 0.0
-        resultado["ref_type"] = None
-        resultado["ref_folio"] = ""
+        resultado["ref_type"] = pd.to_numeric(df[ref_tipo_col], errors="coerce") if ref_tipo_col else None
+        resultado["ref_folio"] = df[ref_folio_col].fillna("").astype(str).str.strip() if ref_folio_col else ""
 
     resultado = resultado[resultado["tipo_doc"].notna()].copy()
     resultado["tipo_doc"] = resultado["tipo_doc"].astype(int)
@@ -1287,7 +1298,7 @@ def preparar_documentos(conn, docs, tipo):
 
 
 # ============================================================
-# ASIENTOS (Con cuadre automático garantizado)
+# ASIENTOS (Con respaldo robusto para el Debe)
 # ============================================================
 
 def armar_asiento(doc, tipo, cuenta, roles):
@@ -1326,10 +1337,6 @@ def armar_asiento(doc, tipo, cuenta, roles):
                 principal = neto
             else:
                 principal = max(0.0, total - iva_recuperable - iva_no_rec - iva_uso)
-
-        # Forzar cuadre exacto con el total del documento si hay mínima centésima de diferencia
-        if abs((principal + iva_recuperable + iva_no_rec + iva_uso + activo_fijo + exento) - total) > 0.01:
-            principal = max(0.0, total - iva_recuperable - iva_no_rec - iva_uso - activo_fijo - exento)
 
         debe = []
 
@@ -3555,7 +3562,7 @@ elif menu == "📦 Lotes":
             "contables y documentos asociados a ese lote."
         )
 
-        if st.button("🗑️ DESHACER LOTE", type="secondary"):
+        if st.button("🗑️️ DESHACER LOTE", type="secondary"):
             try:
                 resultado = deshacer_lote(conn, lote)
                 st.success(f"Lote eliminado: {resultado}")
