@@ -83,9 +83,6 @@ def normalizar_rut(rut):
 
 
 def validar_rut(rut):
-    """
-    Validador básico de RUT chileno.
-    """
     rut = normalizar_rut(rut)
 
     if not rut or "-" not in rut:
@@ -1171,7 +1168,7 @@ def preparar_documentos(conn, docs, tipo):
             estado = "⚠️ Tipo no soportado"
 
         elif d.total == 0:
-            estado = "⚠️️ Monto cero"
+            estado = "⚠️ Monto cero"
 
         elif clave in existentes:
             estado = "🔁 Ya contabilizado"
@@ -1297,7 +1294,7 @@ def preparar_documentos(conn, docs, tipo):
 
 
 # ============================================================
-# ASIENTOS (Con Blindaje Total y Cálculo por Diferencia)
+# ASIENTOS (Con Blindaje Total y Cálculo Automático por Diferencia)
 # ============================================================
 
 def armar_asiento(doc, tipo, cuenta, roles):
@@ -1331,8 +1328,7 @@ def armar_asiento(doc, tipo, cuenta, roles):
             - exento
         )
         
-        # BLINDAJE TOTAL: Si el principal (neto) viene en 0 o negativo pero hay un total,
-        # deducimos el neto automáticamente por diferencia matemática para que jamás dé Debe = 0.0
+        # BLINDAJE TOTAL: Si el neto viene en 0 en el SII, lo calculamos por diferencia exacta para que jamás dé Debe = 0.0
         if principal <= 0:
             if neto > 0:
                 principal = neto
@@ -2855,7 +2851,7 @@ elif menu == "📤 RCV Ventas":
 
         for i in range(len(df)):
             estado = df.loc[i, "estado"]
-            if estado.startswith("🔁") or estado.startswith("❌") or estado.startswith("⚠️"):
+            if estado.startswith("🔁") or estado.startswith("❌") or estado.startswith("⚠️️"):
                 continue
 
             actual = df.loc[i, "cuenta_codigo"]
@@ -3483,7 +3479,7 @@ elif menu == "📋 Plan de Cuentas":
 
 elif menu == "⚙️ Reglas Contables":
 
-    st.title("⚙️️ Reglas de clasificación contable")
+    st.title("⚙️ Reglas de clasificación contable")
     st.info(
         """
         Las reglas tienen prioridad sobre la cuenta habitual del
