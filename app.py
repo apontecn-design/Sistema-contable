@@ -2,9 +2,9 @@
 
 """
 SGCI - Sistema de Gestión Contable Integral
-Versión integrada:
+Versión integrada con Matriz Editable para RCV Compras:
 - Plan de cuentas
-- RCV Compras
+- RCV Compras (con editor manual para copiar y pegar)
 - RCV Ventas
 - Bandeja de revisión
 - Reglas contables por RUT
@@ -21,8 +21,6 @@ Versión integrada:
 - Importación de matrices contables
 - SQLite
 - Streamlit
-
-Diseñado para conservar una base SQLite existente mediante migraciones.
 """
 
 import io
@@ -2647,30 +2645,94 @@ if menu == "🏠 Inicio":
 
 
 # ============================================================
-# RCV COMPRAS
+# RCV COMPRAS (Con Opción de Carga CSV o Matriz Editable Manual)
 # ============================================================
 
 elif menu == "📥 RCV Compras":
 
     st.title("📥 Registro de Compras - SII")
 
-    archivo = st.file_uploader(
-        "Cargar RCV de Compras",
-        type=["csv"],
-        key="rcv_compras_file"
-    )
+    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📝 Matriz Editable para Copiar y Pegar"])
 
-    if archivo:
-        try:
-            df_original = leer_csv(archivo)
-            st.success(f"Archivo leído: {len(df_original):,} filas")
+    with pestañas_compras[0]:
+        archivo = st.file_uploader(
+            "Cargar RCV de Compras",
+            type=["csv"],
+            key="rcv_compras_file"
+        )
 
-            df = normalizar_rcv(df_original, "compras")
-            df = preparar_documentos(conn, df, "compras")
+        if archivo:
+            try:
+                df_original = leer_csv(archivo)
+                st.success(f"Archivo leído: {len(df_original):,} filas")
 
-            st.session_state["rcv_compras"] = df
-        except Exception as e:
-            st.error(f"Error: {e}")
+                df = normalizar_rcv(df_original, "compras")
+                df = preparar_documentos(conn, df, "compras")
+
+                st.session_state["rcv_compras"] = df
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    with pestañas_compras[1]:
+        st.info("Aquí puedes copiar filas directamente desde Excel o Google Sheets y pegarlas para cargar tus compras sin depender del formato del SII.")
+        
+        if "df_manual_compras" not in st.session_state:
+            st.session_state.df_manual_compras = pd.DataFrame([
+                {
+                    "tipo_doc": 30,
+                    "folio": "147039",
+                    "fecha_doc": str(date.today()),
+                    "rut": "76123456-7",
+                    "razon_social": "PROVEEDOR EJEMPLO SPA",
+                    "exento": 0.0,
+                    "neto": 130125.0,
+                    "iva": 24724.0,
+                    "total": 154849.0
+                }
+            ])
+
+        col_cfg = {
+            "tipo_doc": st.column_config.NumberColumn("Tipo Doc (ej. 30)", format="%d"),
+            "folio": st.column_config.TextColumn("Folio / Nro"),
+            "fecha_doc": st.column_config.TextColumn("Fecha (YYYY-MM-DD)"),
+            "rut": st.column_config.TextColumn("RUT Proveedor"),
+            "razon_social": st.column_config.TextColumn("Razón Social"),
+            "exento": st.column_config.NumberColumn("Exento", format="%.2f"),
+            "neto": st.column_config.NumberColumn("Neto", format="%.2f"),
+            "iva": st.column_config.NumberColumn("IVA", format="%.2f"),
+            "total": st.column_config.NumberColumn("Total", format="%.2f"),
+        }
+
+        df_edit_manual = st.data_editor(
+            st.session_state.df_manual_compras,
+            column_config=col_cfg,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="editor_manual_compras"
+        )
+        st.session_state.df_manual_compras = df_edit_manual
+
+        if st.button("🔄 Procesar Matriz Manual", type="primary"):
+            try:
+                df_prep = df_edit_manual.copy()
+                df_prep["fecha_doc"] = df_prep["fecha_doc"].apply(fecha_iso)
+                df_prep["neto"] = df_prep["neto"].apply(numero)
+                df_prep["iva"] = df_prep["iva"].apply(numero)
+                df_prep["exento"] = df_prep["exento"].apply(numero)
+                df_prep["total"] = df_prep["total"].apply(numero)
+                df_prep["iva_no_rec"] = 0.0
+                df_prep["neto_af"] = 0.0
+                df_prep["iva_af"] = 0.0
+                df_prep["iva_uso_comun"] = 0.0
+                df_prep["fecha_recepcion"] = df_prep["fecha_doc"]
+                df_prep["ref_type"] = None
+                df_prep["ref_folio"] = ""
+
+                df_procesado = preparar_documentos(conn, df_prep, "compras")
+                st.session_state["rcv_compras"] = df_procesado
+                st.success("¡Matriz manual procesada correctamente! Revisa la bandeja abajo.")
+            except Exception as e:
+                st.error(f"Error procesando matriz manual: {e}")
 
     if "rcv_compras" in st.session_state and isinstance(st.session_state["rcv_compras"], pd.DataFrame):
 
