@@ -215,27 +215,6 @@ def leer_csv(uploaded_file):
     return df.dropna(how="all")
 
 
-def columna(df, *nombres):
-    mapa = {
-        limpiar_texto(c).lower(): c
-        for c in df.columns
-    }
-
-    for nombre in nombres:
-        if nombre.lower() in mapa:
-            return (
-                df[mapa[nombre]]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-            )
-
-    return pd.Series(
-        [""] * len(df),
-        index=df.index
-    )
-
-
 def serie_numero(serie):
     return serie.apply(numero)
 
@@ -888,189 +867,80 @@ def guardar_rol(conn, rol, codigo):
 
 
 # ============================================================
-# RCV
+# RCV (Corregido y ultra flexible)
 # ============================================================
 
 def normalizar_rcv(df, tipo):
-
     compras = tipo == "compras"
 
-    rut_opciones = (
-        ["RUT Proveedor", "Rut Proveedor", "RUT", "Rut"]
-        if compras
-        else ["Rut cliente", "Rut Cliente", "RUT Cliente", "RUT", "Rut"]
-    )
+    # Limpiar espacios en los nombres de las columnas del CSV cargado
+    df.columns = [str(c).strip() for c in df.columns]
+    cols_lower = {c.lower(): c for c in df.columns}
 
-    columnas = [
-        str(c).strip().lower()
-        for c in df.columns
-    ]
+    def buscar_col(*posibles):
+        for p in posibles:
+            if p.lower() in cols_lower:
+                return cols_lower[p.lower()]
+        return None
 
-    encontrado_rut = None
-    for opt in rut_opciones:
-        if opt.lower() in columnas:
-            encontrado_rut = opt
-            break
+    rut_col = buscar_col("RUT Proveedor", "Rut Proveedor", "Rut cliente", "Rut Cliente", "RUT Cliente", "RUT", "Rut")
+    if not rut_col:
+        raise ValueError(f"No encuentro la columna de RUT para {tipo}.")
 
-    if not encontrado_rut:
-        raise ValueError(
-            f"No encuentro la columna de RUT para {tipo}. "
-            "El archivo no parece corresponder al RCV seleccionado."
-        )
+    tipo_doc_col = buscar_col("Tipo Doc", "Tipo Doc.", "Tipo", "Tipo Documento")
+    if not tipo_doc_col:
+        raise ValueError("No encuentro la columna 'Tipo Doc'.")
+
+    folio_col = buscar_col("Folio", "Nro", "Nro.", "Número")
+    fecha_doc_col = buscar_col("Fecha Docto", "Fecha Emision", "Fecha Emisión", "Fecha")
+    fecha_rec_col = buscar_col("Fecha Recepcion", "Fecha Recepción")
+    razon_col = buscar_col("Razon Social", "Razón Social", "Nombre", "Cliente", "Proveedor")
+    exento_col = buscar_col("Monto Exento", "Exento")
+    neto_col = buscar_col("Monto Neto", "Neto")
+    iva_col = buscar_col("Monto IVA Recuperable", "Monto IVA", "IVA", "I.V.A.")
+    total_col = buscar_col("Monto total", "Monto Total", "Total")
 
     resultado = pd.DataFrame()
 
-    resultado["tipo_doc"] = pd.to_numeric(
-        columna(df, "Tipo Doc", "Tipo Doc.", "Tipo", "Tipo Documento"),
-        errors="coerce"
-    )
-
-    resultado["folio"] = columna(
-        df,
-        "Folio",
-        "Nro",
-        "Nro.",
-        "Número"
-    )
-
-    resultado["fecha_doc"] = serie_fecha(
-        columna(
-            df,
-            "Fecha Docto",
-            "Fecha Emision",
-            "Fecha Emisión",
-            "Fecha"
-        )
-    )
-
-    resultado["fecha_recepcion"] = serie_fecha(
-        columna(
-            df,
-            "Fecha Recepcion",
-            "Fecha Recepción"
-        )
-    )
-
-    resultado["rut"] = (
-        columna(
-            df,
-            encontrado_rut
-        )
-        .apply(normalizar_rut)
-    )
-
-    resultado["razon_social"] = columna(
-        df,
-        "Razon Social",
-        "Razón Social",
-        "Nombre",
-        "Cliente",
-        "Proveedor"
-    )
-
-    resultado["exento"] = serie_numero(
-        columna(
-            df,
-            "Monto Exento",
-            "Exento"
-        )
-    )
-
-    resultado["neto"] = serie_numero(
-        columna(
-            df,
-            "Monto Neto",
-            "Neto"
-        )
-    )
-
-    resultado["iva"] = serie_numero(
-        columna(
-            df,
-            "Monto IVA Recuperable"
-            if compras
-            else "Monto IVA",
-            "IVA",
-            "I.V.A."
-        )
-    )
+    resultado["tipo_doc"] = pd.to_numeric(df[tipo_doc_col], errors="coerce") if tipo_doc_col else 0
+    resultado["folio"] = df[folio_col].fillna("").astype(str).str.strip() if folio_col else ""
+    resultado["fecha_doc"] = serie_fecha(df[fecha_doc_col]) if fecha_doc_col else None
+    resultado["fecha_recepcion"] = serie_fecha(df[fecha_rec_col]) if fecha_rec_col else None
+    resultado["rut"] = df[rut_col].fillna("").astype(str).apply(normalizar_rut) if rut_col else ""
+    resultado["razon_social"] = df[razon_col].fillna("").astype(str).str.strip() if razon_col else ""
+    resultado["exento"] = serie_numero(df[exento_col]) if exento_col else 0.0
+    resultado["neto"] = serie_numero(df[neto_col]) if neto_col else 0.0
+    resultado["iva"] = serie_numero(df[iva_col]) if iva_col else 0.0
 
     if compras:
+        iva_nr_col = buscar_col("Monto Iva No Recuperable", "Monto IVA No Recuperable")
+        neto_af_col = buscar_col("Monto Neto Activo Fijo")
+        iva_af_col = buscar_col("IVA Activo Fijo")
+        iva_uc_col = buscar_col("IVA uso Comun", "IVA uso Común")
 
-        resultado["iva_no_rec"] = serie_numero(
-            columna(
-                df,
-                "Monto Iva No Recuperable",
-                "Monto IVA No Recuperable"
-            )
-        )
-
-        resultado["neto_af"] = serie_numero(
-            columna(
-                df,
-                "Monto Neto Activo Fijo"
-            )
-        )
-
-        resultado["iva_af"] = serie_numero(
-            columna(
-                df,
-                "IVA Activo Fijo"
-            )
-        )
-
-        resultado["iva_uso_comun"] = serie_numero(
-            columna(
-                df,
-                "IVA uso Comun",
-                "IVA uso Común"
-            )
-        )
-
+        resultado["iva_no_rec"] = serie_numero(df[iva_nr_col]) if iva_nr_col else 0.0
+        resultado["neto_af"] = serie_numero(df[neto_af_col]) if neto_af_col else 0.0
+        resultado["iva_af"] = serie_numero(df[iva_af_col]) if iva_af_col else 0.0
+        resultado["iva_uso_comun"] = serie_numero(df[iva_uc_col]) if iva_uc_col else 0.0
     else:
-
         resultado["iva_no_rec"] = 0.0
         resultado["neto_af"] = 0.0
         resultado["iva_af"] = 0.0
         resultado["iva_uso_comun"] = 0.0
 
-    resultado["total"] = serie_numero(
-        columna(
-            df,
-            "Monto total",
-            "Monto Total",
-            "Total"
-        )
-    )
+    resultado["total"] = serie_numero(df[total_col]) if total_col else 0.0
 
-    resultado["ref_tipo"] = pd.to_numeric(
-        columna(
-            df,
-            "Tipo Docto. Referencia",
-            "Tipo Doc Referencia"
-        ),
-        errors="coerce"
-    )
+    ref_tipo_col = buscar_col("Tipo Docto. Referencia", "Tipo Doc Referencia")
+    ref_folio_col = buscar_col("Folio Docto. Referencia", "Folio Referencia")
 
-    resultado["ref_folio"] = columna(
-        df,
-        "Folio Docto. Referencia",
-        "Folio Referencia"
-    )
+    resultado["ref_tipo"] = pd.to_numeric(df[ref_tipo_col], errors="coerce") if ref_tipo_col else None
+    resultado["ref_folio"] = df[ref_folio_col].fillna("").astype(str).str.strip() if ref_folio_col else ""
 
-    resultado = resultado[
-        resultado["tipo_doc"].notna()
-    ].copy()
-
-    resultado["tipo_doc"] = (
-        resultado["tipo_doc"]
-        .astype(int)
-    )
+    resultado = resultado[resultado["tipo_doc"].notna()].copy()
+    resultado["tipo_doc"] = resultado["tipo_doc"].astype(int)
 
     if resultado.empty:
-        raise ValueError(
-            "No se encontraron documentos válidos."
-        )
+        raise ValueError("No se encontraron documentos válidos.")
 
     return resultado.reset_index(drop=True)
 
@@ -3565,7 +3435,7 @@ elif menu == "📋 Plan de Cuentas":
 
 elif menu == "⚙️ Reglas Contables":
 
-    st.title("⚙️️ Reglas de clasificación contable")
+    st.title("⚙️ Reglas de clasificación contable")
     st.info(
         """
         Las reglas tienen prioridad sobre la cuenta habitual del
