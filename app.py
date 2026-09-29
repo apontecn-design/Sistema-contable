@@ -886,11 +886,6 @@ def normalizar_rcv(df, tipo):
     resultado = pd.DataFrame()
 
     if compras:
-        # En Compras SII, si hay desfase de columnas por punto y coma extra, mapeamos por posición exacta o búsqueda segura
-        # Estructura típica SII Compras:
-        # 0: Nro, 1: Tipo Doc, 2: Tipo Compra, 3: RUT Proveedor, 4: Razon Social, 5: Folio, 6: Fecha Docto, 7: Fecha Recepcion, 8: Fecha Acuse, 9: Monto Exento, 10: Monto Neto, 11: Monto IVA Recuperable, 12: Monto Iva No Recuperable, 13: Codigo IVA No Rec., 14: Monto Total, 15: Monto Neto Activo Fijo, 16: IVA Activo Fijo, 17: IVA uso Comun
-        
-        # Intentamos primero buscar columnas nombradas de forma flexible:
         rut_col = buscar_col("RUT Proveedor", "Rut Proveedor", "RUT", "Rut")
         tipo_doc_col = buscar_col("Tipo Doc", "Tipo", "Tipo Documento")
         folio_col = buscar_col("Folio", "Nro", "Nro.", "Número")
@@ -910,9 +905,7 @@ def normalizar_rcv(df, tipo):
         ref_tipo_col = buscar_col("Tipo Docto. Referencia", "Tipo Doc Referencia")
         ref_folio_col = buscar_col("Folio Docto. Referencia", "Folio Referencia")
 
-        # Si alguna columna clave falta o se desalineó, usamos índices seguros basados en la posición real del CSV de Compras SII
         if not tipo_doc_col or not folio_col or len(df.columns) > 20:
-            # Mapeo posicional seguro para Compras SII
             cols = df.columns
             resultado["tipo_doc"] = pd.to_numeric(df.iloc[:, 1], errors="coerce")
             resultado["folio"] = df.iloc[:, 5].fillna("").astype(str).str.strip()
@@ -949,7 +942,6 @@ def normalizar_rcv(df, tipo):
             resultado["ref_folio"] = df[ref_folio_col].fillna("").astype(str).str.strip() if ref_folio_col else ""
 
     else:
-        # Ventas
         rut_col = buscar_col("Rut cliente", "RUT Cliente", "Rut Cliente", "RUT", "Rut")
         tipo_doc_col = buscar_col("Tipo Doc", "Tipo", "Tipo Documento")
         folio_col = buscar_col("Folio", "Nro", "Nro.", "Número")
@@ -1302,7 +1294,7 @@ def preparar_documentos(conn, docs, tipo):
 
 
 # ============================================================
-# ASIENTOS
+# ASIENTOS (Corregido con respaldo dinámico para el Debe)
 # ============================================================
 
 def armar_asiento(doc, tipo, cuenta, roles):
@@ -1325,6 +1317,7 @@ def armar_asiento(doc, tipo, cuenta, roles):
         iva_uso = float(doc.iva_uso_comun)
         activo_fijo = float(doc.neto_af)
         exento = float(doc.exento)
+        neto = float(doc.neto)
 
         principal = (
             total
@@ -1334,8 +1327,13 @@ def armar_asiento(doc, tipo, cuenta, roles):
             - iva_uso
             - exento
         )
-        if principal < 0:
-            principal = float(doc.neto) + exento
+        
+        # Respaldo para evitar que el Debe quede en 0.0 si el formato del SII trae los campos alternados
+        if principal <= 0:
+            if neto > 0:
+                principal = neto
+            else:
+                principal = max(0.0, total - iva_recuperable - iva_no_rec - iva_uso)
 
         debe = []
 
