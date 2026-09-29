@@ -2,9 +2,9 @@
 
 """
 SGCI - Sistema de Gestión Contable Integral
-Versión integrada con Matriz Editable para RCV Compras:
+Versión integrada con Plantilla Descargable y Carga de Matriz para RCV Compras:
 - Plan de cuentas
-- RCV Compras (con editor manual para copiar y pegar)
+- RCV Compras (con descarga de plantilla y subida de matriz personalizada)
 - RCV Ventas
 - Bandeja de revisión
 - Reglas contables por RUT
@@ -2561,7 +2561,7 @@ menu = st.sidebar.radio(
         "⚖️ Balance de Comprobación",
         "📊 Conciliación",
         "📋 Plan de Cuentas",
-        "⚙️ Reglas Contables",
+        "⚙️️ Reglas Contables",
         "📦 Lotes",
         "🧰 Matriz Contable",
     ]
@@ -2645,14 +2645,14 @@ if menu == "🏠 Inicio":
 
 
 # ============================================================
-# RCV COMPRAS (Con Opción de Carga CSV o Matriz Editable Manual)
+# RCV COMPRAS (Con Opción de Carga CSV o Plantilla Descargable)
 # ============================================================
 
 elif menu == "📥 RCV Compras":
 
     st.title("📥 Registro de Compras - SII")
 
-    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📝 Matriz Editable para Copiar y Pegar"])
+    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📥 Plantilla Descargable y Carga de Excel"])
 
     with pestañas_compras[0]:
         archivo = st.file_uploader(
@@ -2674,47 +2674,45 @@ elif menu == "📥 RCV Compras":
                 st.error(f"Error: {e}")
 
     with pestañas_compras[1]:
-        st.info("Aquí puedes copiar filas directamente desde Excel o Google Sheets y pegarlas para cargar tus compras sin depender del formato del SII.")
-        
-        if "df_manual_compras" not in st.session_state:
-            st.session_state.df_manual_compras = pd.DataFrame([
-                {
-                    "tipo_doc": 30,
-                    "folio": "147039",
-                    "fecha_doc": str(date.today()),
-                    "rut": "76123456-7",
-                    "razon_social": "PROVEEDOR EJEMPLO SPA",
-                    "exento": 0.0,
-                    "neto": 130125.0,
-                    "iva": 24724.0,
-                    "total": 154849.0
-                }
-            ])
+        st.info("Descarga la plantilla modelo, rellenala en tu Excel con tus compras y súbela aquí adjunta para procesarla de inmediato.")
 
-        col_cfg = {
-            "tipo_doc": st.column_config.NumberColumn("Tipo Doc (ej. 30)", format="%d"),
-            "folio": st.column_config.TextColumn("Folio / Nro"),
-            "fecha_doc": st.column_config.TextColumn("Fecha (YYYY-MM-DD)"),
-            "rut": st.column_config.TextColumn("RUT Proveedor"),
-            "razon_social": st.column_config.TextColumn("Razón Social"),
-            "exento": st.column_config.NumberColumn("Exento", format="%.2f"),
-            "neto": st.column_config.NumberColumn("Neto", format="%.2f"),
-            "iva": st.column_config.NumberColumn("IVA", format="%.2f"),
-            "total": st.column_config.NumberColumn("Total", format="%.2f"),
-        }
+        # Generar DataFrame de ejemplo para la plantilla
+        df_plantilla_modelo = pd.DataFrame([
+            {
+                "tipo_doc": 30,
+                "folio": "147039",
+                "fecha_doc": str(date.today()),
+                "rut": "76123456-7",
+                "razon_social": "PROVEEDOR EJEMPLO SPA",
+                "exento": 0.0,
+                "neto": 130125.0,
+                "iva": 24724.0,
+                "total": 154849.0
+            }
+        ])
 
-        df_edit_manual = st.data_editor(
-            st.session_state.df_manual_compras,
-            column_config=col_cfg,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="editor_manual_compras"
+        csv_plantilla = df_plantilla_modelo.to_csv(index=False, sep=";").encode("utf-8-sig")
+
+        st.download_button(
+            label="📥 Descargar Plantilla Modelo (CSV/Excel)",
+            data=csv_plantilla,
+            file_name="plantilla_rcv_compras.csv",
+            mime="text/csv",
+            type="secondary"
         )
-        st.session_state.df_manual_compras = df_edit_manual
 
-        if st.button("🔄 Procesar Matriz Manual", type="primary"):
+        st.divider()
+
+        archivo_subido = st.file_uploader(
+            "Adjuntar Plantilla Rellenada",
+            type=["csv"],
+            key="archivo_plantilla_compras"
+        )
+
+        if archivo_subido:
             try:
-                df_prep = df_edit_manual.copy()
+                df_subido = leer_csv(archivo_subido)
+                df_prep = df_subido.copy()
                 df_prep["fecha_doc"] = df_prep["fecha_doc"].apply(fecha_iso)
                 df_prep["neto"] = df_prep["neto"].apply(numero)
                 df_prep["iva"] = df_prep["iva"].apply(numero)
@@ -2730,9 +2728,9 @@ elif menu == "📥 RCV Compras":
 
                 df_procesado = preparar_documentos(conn, df_prep, "compras")
                 st.session_state["rcv_compras"] = df_procesado
-                st.success("¡Matriz manual procesada correctamente! Revisa la bandeja abajo.")
+                st.success("¡Plantilla adjuntada y procesada con éxito! Revisa la bandeja de revisión abajo.")
             except Exception as e:
-                st.error(f"Error procesando matriz manual: {e}")
+                st.error(f"Error procesando la plantilla adjunta: {e}")
 
     if "rcv_compras" in st.session_state and isinstance(st.session_state["rcv_compras"], pd.DataFrame):
 
@@ -2913,7 +2911,7 @@ elif menu == "📤 RCV Ventas":
 
         for i in range(len(df)):
             estado = df.loc[i, "estado"]
-            if estado.startswith("🔁") or estado.startswith("❌") or estado.startswith("⚠️️"):
+            if estado.startswith("🔁") or estado.startswith("❌") or estado.startswith("⚠️"):
                 continue
 
             actual = df.loc[i, "cuenta_codigo"]
