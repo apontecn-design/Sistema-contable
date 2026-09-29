@@ -918,35 +918,28 @@ def normalizar_rcv(df, tipo):
             "El archivo no parece corresponder al RCV seleccionado."
         )
 
-    obligatorias = [
-        "Tipo Doc",
-        "Folio",
-        "Fecha Docto",
-        "Monto Total"
-    ]
-
-    for nombre in obligatorias:
-        if nombre.lower() not in columnas:
-            raise ValueError(
-                f"Falta la columna obligatoria '{nombre}'."
-            )
-
     resultado = pd.DataFrame()
 
     resultado["tipo_doc"] = pd.to_numeric(
-        columna(df, "Tipo Doc"),
+        columna(df, "Tipo Doc", "Tipo Doc.", "Tipo", "Tipo Documento"),
         errors="coerce"
     )
 
     resultado["folio"] = columna(
         df,
-        "Folio"
+        "Folio",
+        "Nro",
+        "Nro.",
+        "Número"
     )
 
     resultado["fecha_doc"] = serie_fecha(
         columna(
             df,
-            "Fecha Docto"
+            "Fecha Docto",
+            "Fecha Emision",
+            "Fecha Emisión",
+            "Fecha"
         )
     )
 
@@ -969,20 +962,25 @@ def normalizar_rcv(df, tipo):
     resultado["razon_social"] = columna(
         df,
         "Razon Social",
-        "Razón Social"
+        "Razón Social",
+        "Nombre",
+        "Cliente",
+        "Proveedor"
     )
 
     resultado["exento"] = serie_numero(
         columna(
             df,
-            "Monto Exento"
+            "Monto Exento",
+            "Exento"
         )
     )
 
     resultado["neto"] = serie_numero(
         columna(
             df,
-            "Monto Neto"
+            "Monto Neto",
+            "Neto"
         )
     )
 
@@ -991,7 +989,9 @@ def normalizar_rcv(df, tipo):
             df,
             "Monto IVA Recuperable"
             if compras
-            else "Monto IVA"
+            else "Monto IVA",
+            "IVA",
+            "I.V.A."
         )
     )
 
@@ -1037,7 +1037,8 @@ def normalizar_rcv(df, tipo):
     resultado["total"] = serie_numero(
         columna(
             df,
-            "Monto Total"
+            "Monto Total",
+            "Total"
         )
     )
 
@@ -3392,7 +3393,7 @@ elif menu == "📚 Mayor":
 
 elif menu == "⚖️ Balance de Comprobación":
 
-    st.title("⚖️️ Balance de Comprobación")
+    st.title("⚖ Balance de Comprobación")
 
     col1, col2 = st.columns(2)
 
