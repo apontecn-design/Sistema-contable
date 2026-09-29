@@ -1,558 +1,5345 @@
 # -*- coding: utf-8 -*-
+
 """
-contabilidad.py
-Motor de contabilización del Sistema Contable.
- 
-Aquí vive la lógica que conecta las cargas masivas (RCV del SII y matrices de
-asientos) con el Plan de Cuentas y el Libro Diario. No usa Streamlit, así que
-se puede probar por separado.
+SGCI - Sistema de Gestión Contable Integral
+Versión integrada:
+- Plan de cuentas
+- RCV Compras
+- RCV Ventas
+- Bandeja de revisión
+- Reglas contables por RUT
+- Libro Diario
+- Mayor
+- Balance de comprobación
+- Clientes
+- Proveedores
+- Estados de cuenta
+- Antigüedad de saldos
+- Conciliación auxiliares vs cuentas contables
+- Lotes de importación
+- Deshacer lotes
+- Importación de matrices contables
+- SQLite
+- Streamlit
+
+Diseñado para conservar una base SQLite existente mediante migraciones.
 """
+
 import io
+import os
+import re
 import sqlite3
-from datetime import datetime
- 
+from datetime import datetime, date
+
 import pandas as pd
- 
-# ---------------------------------------------------------------------------
-# Cuentas de enlace: qué cuenta del plan usa cada función del sistema.
-# (descripción, código por defecto). Se pueden cambiar desde Plan de Cuentas.
-# ---------------------------------------------------------------------------
-ROLES = {
-    "clientes": ("Clientes por cobrar (contrapartida de las ventas)", "1.1.03.01"),
-    "iva_credito": ("IVA Crédito Fiscal (compras)", "1.1.03.02"),
-    "proveedores": ("Proveedores por pagar (contrapartida de las compras)", "2.1.01.01"),
-    "iva_debito": ("IVA Débito Fiscal (ventas)", "2.1.01.02"),
-    "gasto_defecto": ("Gasto por defecto (proveedor sin cuenta habitual)", "5.2.01"),
-    "ingreso_defecto": ("Ingreso por defecto (cliente sin cuenta habitual)", "4.1.01"),
-    "activo_fijo": ("Activo fijo (compras de activo fijo)", "1.2.01.01"),
-}
- 
-NOMBRES_DOC = {
-    30: "Factura",
-    32: "Factura no afecta",
-    33: "Factura electrónica",
-    34: "Factura exenta electrónica",
-    55: "Nota de débito",
-    56: "Nota de débito electrónica",
-    60: "Nota de crédito",
-    61: "Nota de crédito electrónica",
-}
-DOC_NORMALES = {30, 32, 33, 34, 55, 56}
-DOC_NOTA_CREDITO = {60, 61}
-DOC_SOPORTADOS = DOC_NORMALES | DOC_NOTA_CREDITO
- 
- 
-def nombre_doc(tipo):
+import streamlit as st
+
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
+DB_FILE = "sgci.db"
+
+st.set_page_config(
+    page_title="SGCI - Sistema Contable",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ============================================================
+# CONEXIÓN
+# ============================================================
+
+def conectar():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+# ============================================================
+# FUNCIONES GENERALES
+# ============================================================
+
+def money(valor):
     try:
-        t = int(tipo)
-    except (TypeError, ValueError):
-        return str(tipo)
-    return NOMBRES_DOC.get(t, f"Documento tipo {t}")
- 
- 
-# ---------------------------------------------------------------------------
-# Base de datos: columnas nuevas, tabla de enlaces, índices y trigger
-# ---------------------------------------------------------------------------
-def _agregar_columna(conn, tabla, columna, tipo):
-    cols = [f[1] for f in conn.execute(f"PRAGMA table_info({tabla})")]
-    if columna not in cols:
-        conn.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}")
- 
- 
-def migrar_db(conn):
-    """Agrega lo necesario a la base existente sin borrar datos. Se puede llamar muchas veces."""
-    for col, tipo in (("codigo_cuenta", "TEXT"), ("asiento_id", "INTEGER"),
-                      ("lote_id", "TEXT"), ("origen", "TEXT")):
-        _agregar_columna(conn, "libro_diario", col, tipo)
-    for tabla in ("compras", "ventas"):
-        for col, tipo in (("tipo_doc", "INTEGER"), ("folio", "TEXT"), ("lote_id", "TEXT")):
-            _agregar_columna(conn, tabla, col, tipo)
-    _agregar_columna(conn, "clientes", "cuenta_defecto", "TEXT")
- 
-    conn.execute("CREATE TABLE IF NOT EXISTS config_cuentas (rol TEXT PRIMARY KEY, codigo TEXT)")
-    for rol, (_, codigo) in ROLES.items():
-        conn.execute("INSERT OR IGNORE INTO config_cuentas (rol, codigo) VALUES (?, ?)", (rol, codigo))
- 
-    # La app (módulo Bancos) usa 'Otros Ingresos', que no existía en el plan.
-    existe = conn.execute("SELECT 1 FROM plan_cuentas WHERE nombre = 'Otros Ingresos'").fetchone()
-    padre = conn.execute("SELECT 1 FROM plan_cuentas WHERE codigo = '4.1'").fetchone()
-    if not existe and padre:
-        conn.execute("INSERT OR IGNORE INTO plan_cuentas (codigo, nombre, categoria, tipo, padre_codigo, nivel) "
-                     "VALUES ('4.1.03', 'Otros Ingresos', 'Nominal', 'Ingresos', '4.1', 3)")
- 
-    # Un mismo documento no puede registrarse dos veces.
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_compras_doc ON compras (proveedor_id, tipo_doc, folio)")
-    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_ventas_doc ON ventas (tipo_doc, folio)")
- 
-    # Todo asiento que se guarde solo con el nombre de la cuenta recibe su código automáticamente.
-    conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS trg_libro_diario_codigo
-        AFTER INSERT ON libro_diario
-        WHEN NEW.codigo_cuenta IS NULL
-        BEGIN
-            UPDATE libro_diario SET codigo_cuenta = (
-                SELECT codigo FROM plan_cuentas WHERE nombre = NEW.cuenta
-                ORDER BY LENGTH(codigo) DESC, codigo LIMIT 1)
-            WHERE id = NEW.id;
-        END
-    """)
-    conn.execute("""
-        UPDATE libro_diario SET codigo_cuenta = (
-            SELECT p.codigo FROM plan_cuentas p WHERE p.nombre = libro_diario.cuenta
-            ORDER BY LENGTH(p.codigo) DESC, p.codigo LIMIT 1)
-        WHERE codigo_cuenta IS NULL
-    """)
-    conn.commit()
- 
- 
-# ---------------------------------------------------------------------------
-# Plan de cuentas
-# ---------------------------------------------------------------------------
-class Plan:
-    """Lee el plan de cuentas. Una cuenta es imputable si no tiene cuentas hijas."""
- 
-    def __init__(self, conn):
-        df = pd.read_sql_query(
-            "SELECT codigo, nombre, categoria, tipo, padre_codigo, nivel FROM plan_cuentas ORDER BY codigo", conn)
-        df["codigo"] = df["codigo"].astype(str)
-        padres = set(df["padre_codigo"].dropna().astype(str))
-        df["imputable"] = ~df["codigo"].isin(padres)
-        self.df = df
-        self.todos = dict(zip(df["codigo"], df["nombre"]))
-        hojas = df[df["imputable"]]
-        self.hojas = dict(zip(hojas["codigo"], hojas["nombre"]))
-        self.por_nombre = {str(n).strip().lower(): c for c, n in self.hojas.items()}
- 
-    def resolver(self, texto):
-        """Devuelve (codigo, nombre) de una cuenta imputable, o None. Acepta código, nombre o 'código - nombre'."""
-        if texto is None or (isinstance(texto, float) and pd.isna(texto)):
-            return None
-        t = str(texto).strip()
-        if not t:
-            return None
-        if t in self.hojas:
-            return t, self.hojas[t]
-        if " - " in t:
-            c = t.split(" - ", 1)[0].strip()
-            if c in self.hojas:
-                return c, self.hojas[c]
-        c = self.por_nombre.get(t.lower())
-        if c:
-            return c, self.hojas[c]
+        return f"${float(valor):,.0f}".replace(",", ".")
+    except Exception:
+        return "$0"
+
+
+def limpiar_texto(valor):
+    if valor is None:
+        return ""
+    return str(valor).strip()
+
+
+def normalizar_rut(rut):
+    rut = limpiar_texto(rut).upper().replace(".", "").replace(" ", "")
+    return rut
+
+
+def validar_rut(rut):
+    """
+    Validador básico de RUT chileno.
+    """
+    rut = normalizar_rut(rut)
+
+    if not rut or "-" not in rut:
+        return False
+
+    cuerpo, dv = rut.rsplit("-", 1)
+
+    if not cuerpo.isdigit() or len(dv) != 1:
+        return False
+
+    suma = 0
+    multiplicador = 2
+
+    for digito in reversed(cuerpo):
+        suma += int(digito) * multiplicador
+        multiplicador += 1
+        if multiplicador > 7:
+            multiplicador = 2
+
+    resto = 11 - (suma % 11)
+
+    if resto == 11:
+        esperado = "0"
+    elif resto == 10:
+        esperado = "K"
+    else:
+        esperado = str(resto)
+
+    return dv.upper() == esperado
+
+
+def fecha_iso(valor):
+    if valor is None:
         return None
- 
- 
-def cuentas_imputables(conn, tipo=None):
-    df = Plan(conn).df
-    df = df[df["imputable"]]
-    if tipo:
-        df = df[df["tipo"] == tipo]
-    df = df.copy()
-    df["etiqueta"] = df["codigo"] + " - " + df["nombre"]
-    return df.reset_index(drop=True)
- 
- 
-def cargar_roles(conn, plan=None):
-    """{rol: (codigo, nombre)} — o None si el código configurado no existe en el plan."""
-    plan = plan or Plan(conn)
-    guardados = dict(conn.execute("SELECT rol, codigo FROM config_cuentas").fetchall())
-    roles = {}
-    for rol, (_, defecto) in ROLES.items():
-        codigo = guardados.get(rol, defecto)
-        roles[rol] = (codigo, plan.todos[codigo]) if codigo in plan.todos else None
-    return roles
- 
- 
-def guardar_rol(conn, rol, codigo):
-    conn.execute("INSERT OR REPLACE INTO config_cuentas (rol, codigo) VALUES (?, ?)", (rol, codigo))
-    conn.commit()
- 
- 
-def movimientos_sin_cuenta(conn):
-    """Movimientos del Libro Diario cuya cuenta no existe en el plan (no aparecen en los reportes)."""
-    return pd.read_sql_query(
-        "SELECT cuenta AS Cuenta, COUNT(*) AS Movimientos, SUM(debe) AS Debe, SUM(haber) AS Haber "
-        "FROM libro_diario WHERE codigo_cuenta IS NULL GROUP BY cuenta", conn)
- 
- 
-# ---------------------------------------------------------------------------
-# Lectura de archivos
-# ---------------------------------------------------------------------------
-def leer_tabla_csv(datos):
-    """Lee un CSV (separador ; , o tab; utf-8 o latin1).
-    index_col=False evita que las columnas se corran cuando cada fila termina en ';' (como el RCV del SII)."""
+
+    s = str(valor).strip()
+
+    if not s:
+        return None
+
+    formatos = [
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%Y/%m/%d",
+    ]
+
+    for formato in formatos:
+        try:
+            return datetime.strptime(s[:10], formato).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    try:
+        d = pd.to_datetime(s, errors="coerce")
+        if pd.isna(d):
+            return None
+        return d.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def numero(valor):
+    if valor is None:
+        return 0.0
+
+    s = str(valor).strip()
+
+    if not s:
+        return 0.0
+
+    s = s.replace("$", "").replace(" ", "")
+
+    # Chile:
+    # 1.234.567,89
+    # 1234567,89
+    if "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        # Si hay varios puntos, normalmente son separadores de miles
+        if s.count(".") > 1:
+            s = s.replace(".", "")
+        else:
+            # Un solo punto puede ser decimal
+            pass
+
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def leer_csv(uploaded_file):
+    datos = uploaded_file.getvalue()
+
+    if not datos:
+        raise ValueError("El archivo está vacío.")
+
     texto = None
+
     for enc in ("utf-8-sig", "latin1"):
         try:
             texto = datos.decode(enc)
             break
         except UnicodeDecodeError:
             continue
-    if not texto or not texto.strip():
-        raise ValueError("El archivo está vacío.")
-    primera = texto.splitlines()[0]
-    sep = max((";", ",", "\t"), key=primera.count)
-    df = pd.read_csv(io.StringIO(texto), sep=sep, dtype=str, index_col=False)
-    df.columns = [str(c).strip() for c in df.columns]
+
+    if texto is None:
+        raise ValueError("No fue posible leer el archivo.")
+
+    primera = texto.splitlines()[0] if texto.splitlines() else ""
+
+    separadores = [";", ",", "\t"]
+
+    sep = max(
+        separadores,
+        key=lambda x: primera.count(x)
+    )
+
+    df = pd.read_csv(
+        io.StringIO(texto),
+        sep=sep,
+        dtype=str,
+        index_col=False
+    )
+
+    df.columns = [
+        limpiar_texto(c)
+        for c in df.columns
+    ]
+
     return df.dropna(how="all")
- 
- 
-def _col(df, *nombres):
-    mapa = {str(c).strip().lower(): c for c in df.columns}
-    for n in nombres:
-        if n.lower() in mapa:
-            return df[mapa[n.lower()]].fillna("").astype(str).str.strip()
-    return pd.Series([""] * len(df), index=df.index)
- 
- 
-def _num(serie):
-    s = serie.fillna("").astype(str).str.strip()
-    s = s.str.replace(r"\.(?=\d{3}(?:\D|$))", "", regex=True).str.replace(",", ".", regex=False)
-    return pd.to_numeric(s, errors="coerce").fillna(0.0)
- 
- 
-def _fecha_iso(serie):
-    s = serie.fillna("").astype(str).str.strip().str.slice(0, 10)
-    iso = pd.to_datetime(s, format="%Y-%m-%d", errors="coerce")
-    dmy = pd.to_datetime(s, format="%d/%m/%Y", errors="coerce")
-    return iso.fillna(dmy).dt.strftime("%Y-%m-%d")
- 
- 
-def normalizar_rcv(df, tipo):
-    """Deja el RCV (compras o ventas) con columnas estándar. tipo: 'compras' | 'ventas'."""
-    compras = tipo == "compras"
-    col_rut = "RUT Proveedor" if compras else "Rut cliente"
-    otra = "Rut cliente" if compras else "RUT Proveedor"
-    cols = [str(c).strip().lower() for c in df.columns]
-    if col_rut.lower() not in cols:
-        if otra.lower() in cols:
-            raise ValueError(f"Este archivo parece ser de {'VENTAS' if compras else 'COMPRAS'}, "
-                             f"pero elegiste {'Compras' if compras else 'Ventas'}. Cambia el tipo de registro.")
-        raise ValueError(f"No encuentro la columna '{col_rut}'. ¿Es el detalle del RCV del SII?")
-    for obligatoria in ("Tipo Doc", "Folio", "Fecha Docto", "Monto Total"):
-        if obligatoria.lower() not in cols:
-            raise ValueError(f"Falta la columna '{obligatoria}' en el archivo.")
- 
-    out = pd.DataFrame({
-        "tipo_doc": pd.to_numeric(_col(df, "Tipo Doc"), errors="coerce"),
-        "folio": _col(df, "Folio"),
-        "fecha_doc": _fecha_iso(_col(df, "Fecha Docto")),
-        "fecha_recepcion": _fecha_iso(_col(df, "Fecha Recepcion", "Fecha Recepción")),
-        "rut": _col(df, col_rut).str.upper(),
-        "razon_social": _col(df, "Razon Social", "Razón Social").str.replace(r"\s+", " ", regex=True),
-        "exento": _num(_col(df, "Monto Exento")),
-        "neto": _num(_col(df, "Monto Neto")),
-        "iva": _num(_col(df, "Monto IVA Recuperable" if compras else "Monto IVA")),
-        "iva_no_rec": _num(_col(df, "Monto Iva No Recuperable")) if compras else 0.0,
-        "neto_af": _num(_col(df, "Monto Neto Activo Fijo")) if compras else 0.0,
-        "iva_af": _num(_col(df, "IVA Activo Fijo")) if compras else 0.0,
-        "iva_uso_comun": _num(_col(df, "IVA uso Comun", "IVA uso Común")) if compras else 0.0,
-        "total": _num(_col(df, "Monto Total")),
-        "ref_tipo": pd.to_numeric(_col(df, "Tipo Docto. Referencia"), errors="coerce"),
-        "ref_folio": _col(df, "Folio Docto. Referencia"),
-    })
-    out = out[out["tipo_doc"].notna()].reset_index(drop=True)
-    if out.empty:
-        raise ValueError("No encontré documentos en el archivo.")
-    out["tipo_doc"] = out["tipo_doc"].astype(int)
-    return out
- 
- 
-# ---------------------------------------------------------------------------
-# Preparación: qué se puede contabilizar y con qué cuenta
-# ---------------------------------------------------------------------------
-def preparar_documentos(conn, docs, tipo):
-    """Agrega estado, cuenta sugerida, signo (+1 / -1 en notas de crédito) y observaciones."""
-    compras = tipo == "compras"
+
+
+def columna(df, *nombres):
+    mapa = {
+        limpiar_texto(c).lower(): c
+        for c in df.columns
+    }
+
+    for nombre in nombres:
+        if nombre.lower() in mapa:
+            return (
+                df[mapa[nombre]]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+            )
+
+    return pd.Series(
+        [""] * len(df),
+        index=df.index
+    )
+
+
+def serie_numero(serie):
+    return serie.apply(numero)
+
+
+def serie_fecha(serie):
+    return serie.apply(fecha_iso)
+
+
+# ============================================================
+# TIPOS DE DOCUMENTOS SII
+# ============================================================
+
+NOMBRES_DOC = {
+    30: "Factura",
+    32: "Factura de compra",
+    33: "Factura electrónica",
+    34: "Factura exenta electrónica",
+    39: "Boleta electrónica",
+    41: "Boleta exenta electrónica",
+    43: "Liquidación factura",
+    46: "Factura de compra electrónica",
+    52: "Guía de despacho",
+    55: "Nota de débito",
+    56: "Nota de débito electrónica",
+    60: "Nota de crédito",
+    61: "Nota de crédito electrónica",
+    801: "Orden de compra",
+}
+
+DOC_NOTA_CREDITO = {60, 61}
+DOC_NOTA_DEBITO = {55, 56}
+
+DOC_SOPORTADOS = {
+    30,
+    32,
+    33,
+    34,
+    46,
+    55,
+    56,
+    60,
+    61,
+}
+
+
+def nombre_documento(tipo):
+    try:
+        tipo = int(tipo)
+    except Exception:
+        return str(tipo)
+
+    return NOMBRES_DOC.get(
+        tipo,
+        f"Documento tipo {tipo}"
+    )
+
+
+# ============================================================
+# ROLES CONTABLES
+# ============================================================
+
+ROLES = {
+    "clientes": (
+        "Clientes por cobrar",
+        "1.1.03.01"
+    ),
+    "iva_credito": (
+        "IVA Crédito Fiscal",
+        "1.1.03.02"
+    ),
+    "proveedores": (
+        "Proveedores por pagar",
+        "2.1.01.01"
+    ),
+    "iva_debito": (
+        "IVA Débito Fiscal",
+        "2.1.01.02"
+    ),
+    "gasto_defecto": (
+        "Gastos generales por defecto",
+        "5.2.01"
+    ),
+    "ingreso_defecto": (
+        "Ingresos por defecto",
+        "4.1.01"
+    ),
+    "activo_fijo": (
+        "Activo fijo",
+        "1.2.01.01"
+    ),
+    "iva_no_recuperable": (
+        "IVA no recuperable",
+        "5.2.02"
+    ),
+    "iva_uso_comun": (
+        "IVA de uso común",
+        "5.2.03"
+    ),
+}
+
+
+# ============================================================
+# ESQUEMA Y MIGRACIONES
+# ============================================================
+
+def tabla_existe(conn, tabla):
+    return conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type='table'
+        AND name=?
+        """,
+        (tabla,)
+    ).fetchone() is not None
+
+
+def columnas_tabla(conn, tabla):
+    if not tabla_existe(conn, tabla):
+        return []
+
+    return [
+        fila[1]
+        for fila in conn.execute(
+            f"PRAGMA table_info({tabla})"
+        ).fetchall()
+    ]
+
+
+def agregar_columna(conn, tabla, columna_nombre, tipo):
+    if columna_nombre not in columnas_tabla(conn, tabla):
+        conn.execute(
+            f"""
+            ALTER TABLE {tabla}
+            ADD COLUMN {columna_nombre} {tipo}
+            """
+        )
+
+
+def crear_esquema(conn):
+
+    # --------------------------------------------------------
+    # EMPRESA
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS empresa (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rut TEXT,
+            razon_social TEXT,
+            giro TEXT,
+            direccion TEXT,
+            comuna TEXT,
+            ciudad TEXT,
+            fecha_creacion TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # PLAN DE CUENTAS
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS plan_cuentas (
+            codigo TEXT PRIMARY KEY,
+            nombre TEXT NOT NULL,
+            categoria TEXT,
+            tipo TEXT,
+            padre_codigo TEXT,
+            nivel INTEGER DEFAULT 1
+        )
+    """)
+
+    # --------------------------------------------------------
+    # CLIENTES
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS clientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rut TEXT UNIQUE,
+            nombre TEXT,
+            razon_social TEXT,
+            email TEXT,
+            telefono TEXT,
+            direccion TEXT,
+            comuna TEXT,
+            ciudad TEXT,
+            cuenta_defecto TEXT,
+            activo INTEGER DEFAULT 1,
+            fecha_creacion TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # PROVEEDORES
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS proveedores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rut TEXT UNIQUE,
+            nombre TEXT,
+            razon_social TEXT,
+            email TEXT,
+            telefono TEXT,
+            direccion TEXT,
+            comuna TEXT,
+            ciudad TEXT,
+            cuenta_defecto TEXT,
+            centro_costo TEXT,
+            activo INTEGER DEFAULT 1,
+            fecha_creacion TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # COMPRAS
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS compras (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            proveedor_id INTEGER,
+            cuenta_gasto TEXT,
+            centro_costo TEXT,
+            monto_neto REAL DEFAULT 0,
+            iva REAL DEFAULT 0,
+            monto_total REAL DEFAULT 0,
+            glosa TEXT,
+            tipo_doc INTEGER,
+            folio TEXT,
+            lote_id TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # VENTAS
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ventas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            cliente_id INTEGER,
+            cuenta_ingreso TEXT,
+            monto_neto REAL DEFAULT 0,
+            iva REAL DEFAULT 0,
+            monto_total REAL DEFAULT 0,
+            glosa TEXT,
+            tipo_doc INTEGER,
+            folio TEXT,
+            lote_id TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # LIBRO DIARIO
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS libro_diario (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            cuenta TEXT,
+            debe REAL DEFAULT 0,
+            haber REAL DEFAULT 0,
+            glosa TEXT,
+            centro_costo TEXT,
+            codigo_cuenta TEXT,
+            asiento_id INTEGER,
+            lote_id TEXT,
+            origen TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # PAGOS CLIENTES
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pagos_clientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            cliente_id INTEGER,
+            monto REAL DEFAULT 0,
+            medio_pago TEXT,
+            cuenta_banco TEXT,
+            glosa TEXT,
+            lote_id TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # PAGOS PROVEEDORES
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS pagos_proveedores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            proveedor_id INTEGER,
+            monto REAL DEFAULT 0,
+            medio_pago TEXT,
+            cuenta_banco TEXT,
+            glosa TEXT,
+            lote_id TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # APLICACIÓN DE PAGOS
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS aplicaciones_clientes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pago_id INTEGER,
+            venta_id INTEGER,
+            monto REAL DEFAULT 0
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS aplicaciones_proveedores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pago_id INTEGER,
+            compra_id INTEGER,
+            monto REAL DEFAULT 0
+        )
+    """)
+
+    # --------------------------------------------------------
+    # REGLAS CONTABLES
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS reglas_contables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tipo TEXT NOT NULL,
+            rut TEXT,
+            patron TEXT,
+            tipo_doc INTEGER,
+            codigo_cuenta TEXT NOT NULL,
+            prioridad INTEGER DEFAULT 100,
+            activa INTEGER DEFAULT 1,
+            descripcion TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # CONFIGURACIÓN DE ROLES
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS config_cuentas (
+            rol TEXT PRIMARY KEY,
+            codigo TEXT
+        )
+    """)
+
+    for rol, (_, codigo) in ROLES.items():
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO config_cuentas
+            (rol, codigo)
+            VALUES (?, ?)
+            """,
+            (rol, codigo)
+        )
+
+    # --------------------------------------------------------
+    # MIGRACIONES DE BASE EXISTENTE
+    # --------------------------------------------------------
+
+    migraciones = {
+        "clientes": [
+            ("razon_social", "TEXT"),
+            ("email", "TEXT"),
+            ("telefono", "TEXT"),
+            ("direccion", "TEXT"),
+            ("comuna", "TEXT"),
+            ("ciudad", "TEXT"),
+            ("cuenta_defecto", "TEXT"),
+            ("activo", "INTEGER DEFAULT 1"),
+            ("fecha_creacion", "TEXT"),
+        ],
+        "proveedores": [
+            ("razon_social", "TEXT"),
+            ("email", "TEXT"),
+            ("telefono", "TEXT"),
+            ("direccion", "TEXT"),
+            ("comuna", "TEXT"),
+            ("ciudad", "TEXT"),
+            ("cuenta_defecto", "TEXT"),
+            ("centro_costo", "TEXT"),
+            ("activo", "INTEGER DEFAULT 1"),
+            ("fecha_creacion", "TEXT"),
+        ],
+        "compras": [
+            ("tipo_doc", "INTEGER"),
+            ("folio", "TEXT"),
+            ("lote_id", "TEXT"),
+        ],
+        "ventas": [
+            ("tipo_doc", "INTEGER"),
+            ("folio", "TEXT"),
+            ("lote_id", "TEXT"),
+        ],
+        "libro_diario": [
+            ("codigo_cuenta", "TEXT"),
+            ("asiento_id", "INTEGER"),
+            ("lote_id", "TEXT"),
+            ("origen", "TEXT"),
+        ],
+    }
+
+    for tabla, cols in migraciones.items():
+        for nombre, tipo in cols:
+            agregar_columna(
+                conn,
+                tabla,
+                nombre,
+                tipo
+            )
+
+    # --------------------------------------------------------
+    # ÍNDICES
+    # --------------------------------------------------------
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_compras_proveedor
+        ON compras(proveedor_id)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_compras_fecha
+        ON compras(fecha)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ventas_cliente
+        ON ventas(cliente_id)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_ventas_fecha
+        ON ventas(fecha)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_diario_fecha
+        ON libro_diario(fecha)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_diario_codigo
+        ON libro_diario(codigo_cuenta)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_diario_asiento
+        ON libro_diario(asiento_id)
+    """)
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_reglas_rut
+        ON reglas_contables(rut)
+    """)
+
+    # --------------------------------------------------------
+    # ÍNDICES ÚNICOS SEGUROS
+    # --------------------------------------------------------
+
+    try:
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            ux_ventas_doc
+            ON ventas(tipo_doc, folio)
+            WHERE tipo_doc IS NOT NULL
+            AND folio IS NOT NULL
+        """)
+    except Exception:
+        pass
+
+    try:
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            ux_compras_doc
+            ON compras(proveedor_id, tipo_doc, folio)
+            WHERE tipo_doc IS NOT NULL
+            AND folio IS NOT NULL
+        """)
+    except Exception:
+        pass
+
+    conn.commit()
+
+
+# ============================================================
+# PLAN DE CUENTAS
+# ============================================================
+
+PLAN_BASE = [
+    ("1", "ACTIVOS", "Activo", "Activo", None, 1),
+
+    ("1.1", "Activo Corriente", "Activo", "Activo", "1", 2),
+
+    ("1.1.01", "Caja", "Activo", "Activo", "1.1", 3),
+    ("1.1.02", "Bancos", "Activo", "Activo", "1.1", 3),
+
+    ("1.1.03", "Cuentas por cobrar", "Activo", "Activo", "1.1", 3),
+
+    ("1.1.03.01", "Clientes", "Activo", "Activo", "1.1.03", 4),
+    ("1.1.03.02", "IVA Crédito Fiscal", "Activo", "Activo", "1.1.03", 4),
+
+    ("1.1.04", "Inventarios", "Activo", "Activo", "1.1", 3),
+
+    ("1.2", "Activo No Corriente", "Activo", "Activo", "1", 2),
+    ("1.2.01", "Propiedades, Planta y Equipos", "Activo", "Activo", "1.2", 3),
+    ("1.2.01.01", "Activo Fijo", "Activo", "Activo", "1.2.01", 4),
+
+    ("2", "PASIVOS", "Pasivo", "Pasivo", None, 1),
+
+    ("2.1", "Pasivo Corriente", "Pasivo", "Pasivo", "2", 2),
+    ("2.1.01", "Cuentas por pagar", "Pasivo", "Pasivo", "2.1", 3),
+
+    ("2.1.01.01", "Proveedores", "Pasivo", "Pasivo", "2.1.01", 4),
+    ("2.1.01.02", "IVA Débito Fiscal", "Pasivo", "Pasivo", "2.1.01", 4),
+
+    ("3", "PATRIMONIO", "Patrimonio", "Patrimonio", None, 1),
+    ("3.1", "Capital", "Patrimonio", "Patrimonio", "3", 2),
+    ("3.1.01", "Capital", "Patrimonio", "Patrimonio", "3.1", 3),
+
+    ("4", "INGRESOS", "Nominal", "Ingresos", None, 1),
+    ("4.1", "Ingresos Operacionales", "Nominal", "Ingresos", "4", 2),
+    ("4.1.01", "Ventas", "Nominal", "Ingresos", "4.1", 3),
+    ("4.1.02", "Servicios", "Nominal", "Ingresos", "4.1", 3),
+    ("4.1.03", "Otros Ingresos", "Nominal", "Ingresos", "4.1", 3),
+
+    ("5", "COSTOS", "Nominal", "Gastos", None, 1),
+    ("5.1", "Costos de Venta", "Nominal", "Gastos", "5", 2),
+    ("5.1.01", "Costo de Ventas", "Nominal", "Gastos", "5.1", 3),
+
+    ("5.2", "GASTOS", "Nominal", "Gastos", None, 1),
+    ("5.2.01", "Gastos Generales", "Nominal", "Gastos", "5.2", 3),
+    ("5.2.02", "IVA No Recuperable", "Nominal", "Gastos", "5.2", 3),
+    ("5.2.03", "IVA Uso Común", "Nominal", "Gastos", "5.2", 3),
+
+    ("6", "RESULTADOS", "Nominal", "Gastos", None, 1),
+    ("6.1", "Gastos Administrativos", "Nominal", "Gastos", "6", 2),
+]
+
+
+def instalar_plan_base(conn):
+    for fila in PLAN_BASE:
+        conn.execute("""
+            INSERT OR IGNORE INTO plan_cuentas
+            (codigo, nombre, categoria, tipo, padre_codigo, nivel)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, fila)
+
+    conn.commit()
+
+
+class Plan:
+
+    def __init__(self, conn):
+
+        self.df = pd.read_sql_query(
+            """
+            SELECT
+                codigo,
+                nombre,
+                categoria,
+                tipo,
+                padre_codigo,
+                nivel
+            FROM plan_cuentas
+            ORDER BY codigo
+            """,
+            conn
+        )
+
+        if self.df.empty:
+            self.todos = {}
+            self.hojas = {}
+            self.por_nombre = {}
+            return
+
+        self.df["codigo"] = self.df["codigo"].astype(str)
+
+        padres = set(
+            self.df["padre_codigo"]
+            .dropna()
+            .astype(str)
+        )
+
+        self.df["imputable"] = ~self.df["codigo"].isin(padres)
+
+        self.todos = dict(
+            zip(
+                self.df["codigo"],
+                self.df["nombre"]
+            )
+        )
+
+        hojas = self.df[
+            self.df["imputable"]
+        ]
+
+        self.hojas = dict(
+            zip(
+                hojas["codigo"],
+                hojas["nombre"]
+            )
+        )
+
+        self.por_nombre = {
+            str(nombre).strip().lower(): codigo
+            for codigo, nombre in self.hojas.items()
+        }
+
+    def resolver(self, texto):
+
+        if texto is None:
+            return None
+
+        t = str(texto).strip()
+
+        if not t:
+            return None
+
+        if t in self.hojas:
+            return t, self.hojas[t]
+
+        if " - " in t:
+
+            codigo = t.split(
+                " - ",
+                1
+            )[0].strip()
+
+            if codigo in self.hojas:
+                return codigo, self.hojas[codigo]
+
+        codigo = self.por_nombre.get(
+            t.lower()
+        )
+
+        if codigo:
+            return codigo, self.hojas[codigo]
+
+        return None
+
+
+def cuentas_imputables(conn):
+
     plan = Plan(conn)
-    roles = cargar_roles(conn, plan)
-    requeridos = ("proveedores", "iva_credito", "gasto_defecto") if compras else ("clientes", "iva_debito", "ingreso_defecto")
-    faltan = [ROLES[r][0] for r in requeridos if roles[r] is None]
-    if faltan:
-        raise ValueError("Estas cuentas de enlace apuntan a un código que no existe en tu plan de cuentas: "
-                         + "; ".join(faltan) + ". Corrígelas en Plan de Cuentas → Cuentas de enlace.")
- 
-    defecto = roles["gasto_defecto" if compras else "ingreso_defecto"][0]
-    tabla = "proveedores" if compras else "clientes"
-    habitual = {}
-    for rut, cta in conn.execute(
-            f"SELECT rut, cuenta_defecto FROM {tabla} WHERE cuenta_defecto IS NOT NULL AND TRIM(cuenta_defecto) <> ''"):
-        r = plan.resolver(cta)
-        if r:
-            habitual[str(rut).strip().upper()] = r[0]
- 
+
+    df = plan.df[
+        plan.df["imputable"]
+    ].copy()
+
+    df["etiqueta"] = (
+        df["codigo"]
+        + " - "
+        + df["nombre"]
+    )
+
+    return df.reset_index(drop=True)
+
+
+# ============================================================
+# ROLES
+# ============================================================
+
+def cargar_roles(conn):
+
+    plan = Plan(conn)
+
+    guardados = dict(
+        conn.execute(
+            """
+            SELECT rol, codigo
+            FROM config_cuentas
+            """
+        ).fetchall()
+    )
+
+    resultado = {}
+
+    for rol, (_, defecto) in ROLES.items():
+
+        codigo = guardados.get(
+            rol,
+            defecto
+        )
+
+        if codigo in plan.todos:
+            resultado[rol] = (
+                codigo,
+                plan.todos[codigo]
+            )
+        else:
+            resultado[rol] = None
+
+    return resultado
+
+
+def guardar_rol(conn, rol, codigo):
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO config_cuentas
+        (rol, codigo)
+        VALUES (?, ?)
+        """,
+        (rol, codigo)
+    )
+
+    conn.commit()
+
+
+# ============================================================
+# RCV
+# ============================================================
+
+def normalizar_rcv(df, tipo):
+
+    compras = tipo == "compras"
+
+    rut_col = (
+        "RUT Proveedor"
+        if compras
+        else "Rut cliente"
+    )
+
+    columnas = [
+        str(c).strip().lower()
+        for c in df.columns
+    ]
+
+    if rut_col.lower() not in columnas:
+
+        raise ValueError(
+            f"No encuentro la columna '{rut_col}'. "
+            "El archivo no parece corresponder al RCV seleccionado."
+        )
+
+    obligatorias = [
+        "Tipo Doc",
+        "Folio",
+        "Fecha Docto",
+        "Monto Total"
+    ]
+
+    for nombre in obligatorias:
+
+        if nombre.lower() not in columnas:
+
+            raise ValueError(
+                f"Falta la columna obligatoria '{nombre}'."
+            )
+
+    resultado = pd.DataFrame()
+
+    resultado["tipo_doc"] = pd.to_numeric(
+        columna(df, "Tipo Doc"),
+        errors="coerce"
+    )
+
+    resultado["folio"] = columna(
+        df,
+        "Folio"
+    )
+
+    resultado["fecha_doc"] = serie_fecha(
+        columna(
+            df,
+            "Fecha Docto"
+        )
+    )
+
+    resultado["fecha_recepcion"] = serie_fecha(
+        columna(
+            df,
+            "Fecha Recepcion",
+            "Fecha Recepción"
+        )
+    )
+
+    resultado["rut"] = (
+        columna(
+            df,
+            rut_col
+        )
+        .apply(normalizar_rut)
+    )
+
+    resultado["razon_social"] = columna(
+        df,
+        "Razon Social",
+        "Razón Social"
+    )
+
+    resultado["exento"] = serie_numero(
+        columna(
+            df,
+            "Monto Exento"
+        )
+    )
+
+    resultado["neto"] = serie_numero(
+        columna(
+            df,
+            "Monto Neto"
+        )
+    )
+
+    resultado["iva"] = serie_numero(
+        columna(
+            df,
+            "Monto IVA Recuperable"
+            if compras
+            else "Monto IVA"
+        )
+    )
+
     if compras:
-        existentes = {(str(r).strip().upper(), int(t), str(f).strip()) for r, t, f in conn.execute(
-            "SELECT p.rut, c.tipo_doc, c.folio FROM compras c JOIN proveedores p ON p.id = c.proveedor_id "
-            "WHERE c.tipo_doc IS NOT NULL AND c.folio IS NOT NULL")}
+
+        resultado["iva_no_rec"] = serie_numero(
+            columna(
+                df,
+                "Monto Iva No Recuperable",
+                "Monto IVA No Recuperable"
+            )
+        )
+
+        resultado["neto_af"] = serie_numero(
+            columna(
+                df,
+                "Monto Neto Activo Fijo"
+            )
+        )
+
+        resultado["iva_af"] = serie_numero(
+            columna(
+                df,
+                "IVA Activo Fijo"
+            )
+        )
+
+        resultado["iva_uso_comun"] = serie_numero(
+            columna(
+                df,
+                "IVA uso Comun",
+                "IVA uso Común"
+            )
+        )
+
     else:
-        existentes = {(int(t), str(f).strip()) for t, f in conn.execute(
-            "SELECT tipo_doc, folio FROM ventas WHERE tipo_doc IS NOT NULL AND folio IS NOT NULL")}
- 
-    estados, cuentas, origenes, signos, observ = [], [], [], [], []
+
+        resultado["iva_no_rec"] = 0.0
+        resultado["neto_af"] = 0.0
+        resultado["iva_af"] = 0.0
+        resultado["iva_uso_comun"] = 0.0
+
+    resultado["total"] = serie_numero(
+        columna(
+            df,
+            "Monto Total"
+        )
+    )
+
+    resultado["ref_tipo"] = pd.to_numeric(
+        columna(
+            df,
+            "Tipo Docto. Referencia",
+            "Tipo Doc Referencia"
+        ),
+        errors="coerce"
+    )
+
+    resultado["ref_folio"] = columna(
+        df,
+        "Folio Docto. Referencia",
+        "Folio Referencia"
+    )
+
+    resultado = resultado[
+        resultado["tipo_doc"].notna()
+    ].copy()
+
+    resultado["tipo_doc"] = (
+        resultado["tipo_doc"]
+        .astype(int)
+    )
+
+    if resultado.empty:
+        raise ValueError(
+            "No se encontraron documentos válidos."
+        )
+
+    return resultado.reset_index(drop=True)
+
+
+# ============================================================
+# REGLAS CONTABLES
+# ============================================================
+
+def buscar_regla(conn, tipo, rut, tipo_doc, razon_social=""):
+
+    rut = normalizar_rut(rut)
+
+    reglas = pd.read_sql_query(
+        """
+        SELECT *
+        FROM reglas_contables
+        WHERE tipo = ?
+        AND activa = 1
+        ORDER BY prioridad DESC, id DESC
+        """,
+        conn,
+        params=(tipo,)
+    )
+
+    if reglas.empty:
+        return None
+
+    razon = limpiar_texto(
+        razon_social
+    ).lower()
+
+    for _, regla in reglas.iterrows():
+
+        regla_rut = normalizar_rut(
+            regla["rut"]
+        )
+
+        regla_tipo_doc = regla["tipo_doc"]
+
+        patron = limpiar_texto(
+            regla["patron"]
+        ).lower()
+
+        if regla_rut and regla_rut != rut:
+            continue
+
+        if pd.notna(regla_tipo_doc):
+
+            try:
+                if int(regla_tipo_doc) != int(tipo_doc):
+                    continue
+            except Exception:
+                continue
+
+        if patron:
+
+            if patron not in razon:
+                continue
+
+        return regla
+
+    return None
+
+
+def cuenta_habitual(conn, tipo, rut):
+
+    tabla = (
+        "proveedores"
+        if tipo == "compras"
+        else "clientes"
+    )
+
+    fila = conn.execute(
+        f"""
+        SELECT cuenta_defecto
+        FROM {tabla}
+        WHERE UPPER(TRIM(rut)) = ?
+        """,
+        (normalizar_rut(rut),)
+    ).fetchone()
+
+    if fila and fila["cuenta_defecto"]:
+        return fila["cuenta_defecto"]
+
+    return None
+
+
+def preparar_documentos(conn, docs, tipo):
+
+    compras = tipo == "compras"
+
+    plan = Plan(conn)
+    roles = cargar_roles(conn)
+
+    rol_defecto = (
+        "gasto_defecto"
+        if compras
+        else "ingreso_defecto"
+    )
+
+    defecto = roles[rol_defecto]
+
+    if defecto is None:
+
+        raise ValueError(
+            "La cuenta por defecto no está configurada."
+        )
+
+    tabla = (
+        "proveedores"
+        if compras
+        else "clientes"
+    )
+
+    existentes = set()
+
+    if compras:
+
+        filas = conn.execute(
+            """
+            SELECT
+                p.rut,
+                c.tipo_doc,
+                c.folio
+            FROM compras c
+            JOIN proveedores p
+                ON p.id = c.proveedor_id
+            """
+        ).fetchall()
+
+        for fila in filas:
+
+            existentes.add(
+                (
+                    normalizar_rut(fila["rut"]),
+                    int(fila["tipo_doc"]),
+                    str(fila["folio"]).strip()
+                )
+            )
+
+    else:
+
+        filas = conn.execute(
+            """
+            SELECT tipo_doc, folio
+            FROM ventas
+            """
+        ).fetchall()
+
+        for fila in filas:
+
+            existentes.add(
+                (
+                    int(fila["tipo_doc"]),
+                    str(fila["folio"]).strip()
+                )
+            )
+
+    resultado = docs.copy()
+
+    estados = []
+    cuentas = []
+    origenes = []
+    signos = []
+    observaciones = []
+
     vistos = set()
+
     for d in docs.itertuples():
-        clave = (d.rut, d.tipo_doc, d.folio) if compras else (d.tipo_doc, d.folio)
+
+        rut = normalizar_rut(d.rut)
+        tipo_doc = int(d.tipo_doc)
+        folio = str(d.folio).strip()
+
+        clave = (
+            (rut, tipo_doc, folio)
+            if compras
+            else
+            (tipo_doc, folio)
+        )
+
         obs = []
-        if pd.isna(d.fecha_doc):
+
+        if not validar_rut(rut):
+            estado = "⚠️ RUT inválido"
+            obs.append(
+                "Revisar RUT."
+            )
+
+        elif not d.fecha_doc:
             estado = "❌ Fecha inválida"
-        elif d.tipo_doc not in DOC_SOPORTADOS:
+
+        elif tipo_doc not in DOC_SOPORTADOS:
             estado = "⚠️ Tipo no soportado"
-            obs.append(f"El tipo {d.tipo_doc} no se contabiliza automáticamente; regístralo con un asiento manual.")
+
         elif d.total == 0:
             estado = "⚠️ Monto cero"
+
         elif clave in existentes:
-            estado = "🔁 Ya registrado"
+            estado = "🔁 Ya contabilizado"
+
         elif clave in vistos:
-            estado = "🔁 Repetido en el archivo"
+            estado = "🔁 Repetido en archivo"
+
         else:
-            estado = "✅ Nuevo"
+            estado = "🟢 Nuevo"
+
         vistos.add(clave)
- 
-        signo = -1 if d.tipo_doc in DOC_NOTA_CREDITO else 1
+
+        signo = (
+            -1
+            if tipo_doc in DOC_NOTA_CREDITO
+            else 1
+        )
+
+        # ----------------------------------------------------
+        # Validación matemática
+        # ----------------------------------------------------
+
         if compras:
-            comp = d.exento + d.neto + d.iva + d.iva_no_rec + d.neto_af + d.iva_af + d.iva_uso_comun
+
+            componentes = (
+                d.exento
+                + d.neto
+                + d.iva
+                + d.iva_no_rec
+                + d.neto_af
+                + d.iva_af
+                + d.iva_uso_comun
+            )
+
         else:
-            comp = d.exento + d.neto + d.iva
-        dif = d.total - comp
-        if abs(dif) > 1:
-            obs.append(f"El total difiere de la suma de los montos en ${dif:,.0f}; se lleva a la cuenta principal.")
+
+            componentes = (
+                d.exento
+                + d.neto
+                + d.iva
+            )
+
+        diferencia = (
+            d.total - componentes
+        )
+
+        if abs(diferencia) > 1:
+
+            obs.append(
+                f"Diferencia entre total y componentes: "
+                f"{money(diferencia)}."
+            )
+
         if d.exento > 0 and d.neto > 0:
-            obs.append("Documento mixto: parte exenta y parte afecta.")
-        if compras and d.iva_uso_comun > 0:
-            obs.append("IVA de uso común: se llevó al gasto; revisa la proporcionalidad.")
+
+            obs.append(
+                "Documento mixto: exento y afecto."
+            )
+
         if compras and d.iva_no_rec > 0:
-            obs.append("IVA no recuperable: se suma al gasto.")
+
+            obs.append(
+                "Contiene IVA no recuperable."
+            )
+
+        if compras and d.iva_uso_comun > 0:
+
+            obs.append(
+                "Contiene IVA de uso común."
+            )
+
         if compras and d.neto_af > 0:
-            obs.append("Incluye activo fijo.")
+
+            obs.append(
+                "Contiene activo fijo."
+            )
+
         if signo < 0:
-            ref = f" (refiere a {nombre_doc(d.ref_tipo)} N° {d.ref_folio})" if d.ref_folio else ""
-            obs.append("Nota de crédito: revierte el asiento" + ref + ".")
- 
-        if d.rut in habitual:
-            cuenta, origen = habitual[d.rut], "Cuenta habitual"
-        else:
-            cuenta, origen = defecto, "Por defecto (revisar)"
-        estados.append(estado); cuentas.append(cuenta); origenes.append(origen)
-        signos.append(signo); observ.append(" ".join(obs))
- 
-    docs = docs.copy()
-    docs["estado"] = estados
-    docs["cuenta_sugerida"] = cuentas
-    docs["cuenta_codigo"] = cuentas
-    docs["cuenta_origen"] = origenes
-    docs["signo"] = signos
-    docs["obs"] = observ
-    return docs
- 
- 
-# ---------------------------------------------------------------------------
-# Asientos
-# ---------------------------------------------------------------------------
+
+            if d.ref_folio:
+
+                obs.append(
+                    "Nota de crédito asociada a "
+                    f"{nombre_documento(d.ref_tipo)} "
+                    f"N° {d.ref_folio}."
+                )
+
+            else:
+
+                obs.append(
+                    "Nota de crédito sin documento de referencia."
+                )
+
+        # ----------------------------------------------------
+        # Determinación de cuenta
+        # ----------------------------------------------------
+
+        cuenta = None
+        origen = None
+
+        regla = buscar_regla(
+            conn,
+            tipo,
+            rut,
+            tipo_doc,
+            d.razon_social
+        )
+
+        if regla:
+
+            cuenta = limpiar_texto(
+                regla["codigo_cuenta"]
+            )
+
+            origen = (
+                f"Regla #{int(regla['id'])}"
+            )
+
+        if not cuenta:
+
+            habitual = cuenta_habitual(
+                conn,
+                tipo,
+                rut
+            )
+
+            if habitual:
+
+                cuenta = habitual
+                origen = "Cuenta habitual"
+
+        if not cuenta:
+
+            cuenta = defecto[0]
+            origen = "Cuenta por defecto"
+
+            if estado == "🟢 Nuevo":
+
+                estado = "🟡 Revisar cuenta"
+
+        if cuenta not in plan.hojas:
+
+            obs.append(
+                "La cuenta sugerida no es imputable "
+                "o no existe en el plan."
+            )
+
+            if estado.startswith("🟢"):
+                estado = "🟡 Revisar cuenta"
+
+        estados.append(estado)
+        cuentas.append(cuenta)
+        origenes.append(origen)
+        signos.append(signo)
+        observaciones.append(
+            " ".join(obs)
+        )
+
+    resultado["estado"] = estados
+    resultado["cuenta_sugerida"] = cuentas
+    resultado["cuenta_codigo"] = cuentas
+    resultado["cuenta_origen"] = origenes
+    resultado["signo"] = signos
+    resultado["observaciones"] = observaciones
+
+    return resultado
+
+
+# ============================================================
+# ASIENTOS
+# ============================================================
+
 def armar_asiento(doc, tipo, cuenta, roles):
-    """Devuelve [(codigo_cuenta, debe, haber), ...] de un documento. Cuadra siempre.
-    Compras: gasto (todo lo que no es IVA con crédito ni activo fijo) + IVA crédito + activo fijo / Proveedores.
-    Ventas: Clientes / Ingreso (total - IVA) + IVA débito. Las notas de crédito invierten el asiento."""
+
     total = float(doc.total)
+
+    if total < 0:
+        raise ValueError(
+            f"El documento {doc.folio} tiene total negativo."
+        )
+
     if tipo == "compras":
-        iva = float(doc.iva) + float(doc.iva_af)
-        neto_af = float(doc.neto_af)
-        principal = total - iva - neto_af
+
+        iva_recuperable = (
+            float(doc.iva)
+            + float(doc.iva_af)
+        )
+
+        iva_no_rec = float(
+            doc.iva_no_rec
+        )
+
+        iva_uso = float(
+            doc.iva_uso_comun
+        )
+
+        activo_fijo = float(
+            doc.neto_af
+        )
+
+        exento = float(
+            doc.exento
+        )
+
+        principal = (
+            total
+            - iva_recuperable
+            - activo_fijo
+        )
+
+        # IVA no recuperable y uso común
+        # deben formar parte del gasto.
         if principal < 0:
-            raise ValueError(f"Documento {doc.folio}: los montos no son coherentes con el total.")
-        if neto_af > 0 and roles["activo_fijo"] is None:
-            raise ValueError("Hay activo fijo en el archivo, pero la cuenta de enlace 'Activo fijo' no existe en tu plan.")
-        debe = [(cuenta, principal)]
-        if neto_af > 0:
-            debe.append((roles["activo_fijo"][0], neto_af))
-        if iva > 0:
-            debe.append((roles["iva_credito"][0], iva))
-        haber = [(roles["proveedores"][0], total)]
+            raise ValueError(
+                f"Documento {doc.folio}: "
+                "montos incoherentes."
+            )
+
+        debe = []
+
+        # Cuenta principal:
+        if principal > 0:
+            debe.append(
+                (cuenta, principal)
+            )
+
+        if activo_fijo > 0:
+
+            if roles["activo_fijo"] is None:
+                raise ValueError(
+                    "No está configurada la cuenta "
+                    "de activo fijo."
+                )
+
+            debe.append(
+                (
+                    roles["activo_fijo"][0],
+                    activo_fijo
+                )
+            )
+
+        if iva_recuperable > 0:
+
+            debe.append(
+                (
+                    roles["iva_credito"][0],
+                    iva_recuperable
+                )
+            )
+
+        if iva_no_rec > 0:
+
+            cuenta_iva_nr = (
+                roles["iva_no_recuperable"]
+            )
+
+            if cuenta_iva_nr is None:
+                raise ValueError(
+                    "No está configurada la cuenta "
+                    "de IVA no recuperable."
+                )
+
+            debe.append(
+                (
+                    cuenta_iva_nr[0],
+                    iva_no_rec
+                )
+            )
+
+        if iva_uso > 0:
+
+            cuenta_iva_uc = (
+                roles["iva_uso_comun"]
+            )
+
+            if cuenta_iva_uc is None:
+                raise ValueError(
+                    "No está configurada la cuenta "
+                    "de IVA de uso común."
+                )
+
+            debe.append(
+                (
+                    cuenta_iva_uc[0],
+                    iva_uso
+                )
+            )
+
+        haber = [
+            (
+                roles["proveedores"][0],
+                total
+            )
+        ]
+
     else:
-        iva = float(doc.iva)
-        principal = total - iva
+
+        iva = float(
+            doc.iva
+        )
+
+        principal = (
+            total - iva
+        )
+
         if principal < 0:
-            raise ValueError(f"Documento {doc.folio}: los montos no son coherentes con el total.")
-        debe = [(roles["clientes"][0], total)]
-        haber = [(cuenta, principal)]
+            raise ValueError(
+                f"Documento {doc.folio}: "
+                "IVA superior al total."
+            )
+
+        debe = [
+            (
+                roles["clientes"][0],
+                total
+            )
+        ]
+
+        haber = []
+
+        if principal > 0:
+
+            haber.append(
+                (
+                    cuenta,
+                    principal
+                )
+            )
+
         if iva > 0:
-            haber.append((roles["iva_debito"][0], iva))
-    if doc.signo < 0:
-        debe, haber = haber, debe
-    lineas = [(c, round(m, 2), 0.0) for c, m in debe if m > 0] + [(c, 0.0, round(m, 2)) for c, m in haber if m > 0]
-    if abs(sum(l[1] for l in lineas) - sum(l[2] for l in lineas)) > 0.01:
-        raise ValueError(f"Documento {doc.folio}: el asiento no cuadra.")
+
+            haber.append(
+                (
+                    roles["iva_debito"][0],
+                    iva
+                )
+            )
+
+    # Nota de crédito = inversión
+    if int(doc.signo) < 0:
+
+        debe, haber = (
+            haber,
+            debe
+        )
+
+    lineas = []
+
+    for codigo, monto in debe:
+
+        if monto > 0:
+
+            lineas.append(
+                (
+                    codigo,
+                    round(monto, 2),
+                    0.0
+                )
+            )
+
+    for codigo, monto in haber:
+
+        if monto > 0:
+
+            lineas.append(
+                (
+                    codigo,
+                    0.0,
+                    round(monto, 2)
+                )
+            )
+
+    total_debe = sum(
+        x[1] for x in lineas
+    )
+
+    total_haber = sum(
+        x[2] for x in lineas
+    )
+
+    if abs(
+        total_debe - total_haber
+    ) > 0.01:
+
+        raise ValueError(
+            f"Documento {doc.folio}: "
+            f"asiento descuadrado. "
+            f"Debe={total_debe}, "
+            f"Haber={total_haber}"
+        )
+
     return lineas
- 
- 
-def _siguiente_asiento(cur):
-    return cur.execute("SELECT COALESCE(MAX(asiento_id), 0) FROM libro_diario").fetchone()[0]
- 
- 
-def contabilizar(conn, tipo, docs, fecha_modo="documento", origen="", recordar=True):
-    """Guarda los documentos (ya filtrados y con 'cuenta_codigo' definitiva) en compras/ventas y Libro Diario.
-    Todo o nada: si algo falla no se guarda nada."""
+
+
+def siguiente_asiento(conn):
+
+    fila = conn.execute(
+        """
+        SELECT COALESCE(
+            MAX(asiento_id),
+            0
+        )
+        FROM libro_diario
+        """
+    ).fetchone()
+
+    return int(
+        fila[0] or 0
+    )
+
+
+# ============================================================
+# CONTABILIZACIÓN
+# ============================================================
+
+def obtener_entidad(
+    conn,
+    tabla,
+    rut,
+    razon_social
+):
+
+    rut = normalizar_rut(rut)
+
+    fila = conn.execute(
+        f"""
+        SELECT id
+        FROM {tabla}
+        WHERE UPPER(TRIM(rut)) = ?
+        """,
+        (rut,)
+    ).fetchone()
+
+    if fila:
+        conn.execute(
+            f"""
+            UPDATE {tabla}
+            SET nombre = COALESCE(
+                NULLIF(?, ''),
+                nombre
+            ),
+            razon_social = COALESCE(
+                NULLIF(?, ''),
+                razon_social
+            )
+            WHERE id = ?
+            """,
+            (
+                razon_social,
+                razon_social,
+                fila["id"]
+            )
+        )
+
+        return fila["id"]
+
+    ahora = datetime.now().isoformat(
+        timespec="seconds"
+    )
+
+    cur = conn.execute(
+        f"""
+        INSERT INTO {tabla}
+        (
+            rut,
+            nombre,
+            razon_social,
+            activo,
+            fecha_creacion
+        )
+        VALUES (?, ?, ?, 1, ?)
+        """,
+        (
+            rut,
+            razon_social,
+            razon_social,
+            ahora
+        )
+    )
+
+    return cur.lastrowid
+
+
+def contabilizar_rcv(
+    conn,
+    tipo,
+    docs,
+    fecha_modo="documento",
+    recordar=True
+):
+
     compras = tipo == "compras"
+
     plan = Plan(conn)
-    roles = cargar_roles(conn, plan)
-    lote = f"{'RCV-COMPRAS' if compras else 'RCV-VENTAS'}-{datetime.now():%Y%m%d-%H%M%S}"
-    origen = origen or ("RCV Compras" if compras else "RCV Ventas")
+    roles = cargar_roles(conn)
+
+    lote = (
+        "RCV-COMPRAS-"
+        if compras
+        else
+        "RCV-VENTAS-"
+    ) + datetime.now().strftime(
+        "%Y%m%d-%H%M%S"
+    )
+
     cur = conn.cursor()
-    asiento = _siguiente_asiento(cur)
-    n_docs = 0
+
+    asiento = siguiente_asiento(
+        conn
+    )
+
+    documentos = 0
     total_debe = 0.0
-    recordadas = 0
+    cuentas_recordadas = 0
+
     try:
+
         for d in docs.itertuples():
+
             if d.cuenta_codigo not in plan.hojas:
-                raise ValueError(f"La cuenta '{d.cuenta_codigo}' del documento {d.folio} no es una cuenta imputable del plan.")
-            nombre_cta = plan.hojas[d.cuenta_codigo]
-            fecha = d.fecha_doc if fecha_modo == "documento" else (d.fecha_recepcion if isinstance(d.fecha_recepcion, str) else d.fecha_doc)
-            glosa = f"{nombre_doc(d.tipo_doc)} N° {d.folio} - {d.razon_social}"
-            lineas = armar_asiento(d, tipo, d.cuenta_codigo, roles)
- 
-            centro = "General / Ninguno"
-            tabla = "proveedores" if compras else "clientes"
-            fila = cur.execute(f"SELECT id FROM {tabla} WHERE UPPER(TRIM(rut)) = ?", (d.rut,)).fetchone()
-            if fila:
-                ent_id = fila[0]
-            else:
-                ent_id = cur.execute(f"INSERT INTO {tabla} (rut, nombre) VALUES (?, ?)", (d.rut, d.razon_social)).lastrowid
-            if compras:
-                cc = cur.execute("SELECT centro_costo FROM proveedores WHERE id = ?", (ent_id,)).fetchone()
-                if cc and cc[0]:
-                    centro = cc[0]
- 
-            s = int(d.signo)
-            iva_doc = float(d.iva) + (float(d.iva_af) if compras else 0.0)
-            if compras:
-                cur.execute(
-                    "INSERT INTO compras (fecha, proveedor_id, cuenta_gasto, centro_costo, monto_neto, iva, monto_total, glosa, tipo_doc, folio, lote_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (fecha, ent_id, nombre_cta, centro, s * (float(d.total) - iva_doc), s * iva_doc, s * float(d.total), glosa, int(d.tipo_doc), str(d.folio), lote))
-            else:
-                cur.execute(
-                    "INSERT INTO ventas (fecha, cliente_id, cuenta_ingreso, monto_neto, iva, monto_total, glosa, tipo_doc, folio, lote_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (fecha, ent_id, nombre_cta, s * (float(d.total) - iva_doc), s * iva_doc, s * float(d.total), glosa, int(d.tipo_doc), str(d.folio), lote))
- 
+
+                raise ValueError(
+                    f"La cuenta "
+                    f"{d.cuenta_codigo} "
+                    f"no es imputable."
+                )
+
+            tabla_entidad = (
+                "proveedores"
+                if compras
+                else
+                "clientes"
+            )
+
+            entidad_id = obtener_entidad(
+                conn,
+                tabla_entidad,
+                d.rut,
+                d.razon_social
+            )
+
+            fecha = (
+                d.fecha_doc
+                if fecha_modo == "documento"
+                else
+                (
+                    d.fecha_recepcion
+                    or d.fecha_doc
+                )
+            )
+
+            glosa = (
+                f"{nombre_documento(d.tipo_doc)} "
+                f"N° {d.folio} - "
+                f"{d.razon_social}"
+            )
+
+            lineas = armar_asiento(
+                d,
+                tipo,
+                d.cuenta_codigo,
+                roles
+            )
+
             asiento += 1
-            for codigo, debe, haber in lineas:
+
+            if compras:
+
+                cuenta_nombre = plan.hojas[
+                    d.cuenta_codigo
+                ]
+
+                centro = "General / Ninguno"
+
+                fila_cc = conn.execute(
+                    """
+                    SELECT centro_costo
+                    FROM proveedores
+                    WHERE id = ?
+                    """,
+                    (entidad_id,)
+                ).fetchone()
+
+                if fila_cc and fila_cc["centro_costo"]:
+                    centro = fila_cc["centro_costo"]
+
                 cur.execute(
-                    "INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo, codigo_cuenta, asiento_id, lote_id, origen) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (fecha, plan.todos[codigo], float(debe), float(haber), glosa, centro, codigo, int(asiento), lote, origen))
+                    """
+                    INSERT INTO compras
+                    (
+                        fecha,
+                        proveedor_id,
+                        cuenta_gasto,
+                        centro_costo,
+                        monto_neto,
+                        iva,
+                        monto_total,
+                        glosa,
+                        tipo_doc,
+                        folio,
+                        lote_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        fecha,
+                        entidad_id,
+                        cuenta_nombre,
+                        centro,
+                        float(d.neto)
+                        + float(d.exento)
+                        + float(d.neto_af),
+                        float(d.iva)
+                        + float(d.iva_af),
+                        int(d.signo)
+                        * float(d.total),
+                        glosa,
+                        int(d.tipo_doc),
+                        str(d.folio),
+                        lote
+                    )
+                )
+
+            else:
+
+                cuenta_nombre = plan.hojas[
+                    d.cuenta_codigo
+                ]
+
+                cur.execute(
+                    """
+                    INSERT INTO ventas
+                    (
+                        fecha,
+                        cliente_id,
+                        cuenta_ingreso,
+                        monto_neto,
+                        iva,
+                        monto_total,
+                        glosa,
+                        tipo_doc,
+                        folio,
+                        lote_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        fecha,
+                        entidad_id,
+                        cuenta_nombre,
+                        float(d.neto)
+                        + float(d.exento),
+                        float(d.iva),
+                        int(d.signo)
+                        * float(d.total),
+                        glosa,
+                        int(d.tipo_doc),
+                        str(d.folio),
+                        lote
+                    )
+                )
+
+            for codigo, debe, haber in lineas:
+
+                cur.execute(
+                    """
+                    INSERT INTO libro_diario
+                    (
+                        fecha,
+                        cuenta,
+                        debe,
+                        haber,
+                        glosa,
+                        centro_costo,
+                        codigo_cuenta,
+                        asiento_id,
+                        lote_id,
+                        origen
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        fecha,
+                        plan.todos[codigo],
+                        debe,
+                        haber,
+                        glosa,
+                        "General / Ninguno",
+                        codigo,
+                        asiento,
+                        lote,
+                        (
+                            "RCV Compras"
+                            if compras
+                            else
+                            "RCV Ventas"
+                        )
+                    )
+                )
+
                 total_debe += debe
-            n_docs += 1
- 
-            if recordar and d.cuenta_codigo != d.cuenta_sugerida:
-                cur.execute(f"UPDATE {tabla} SET cuenta_defecto = ? WHERE id = ?", (d.cuenta_codigo, ent_id))
-                recordadas += 1
+
+            if recordar:
+
+                if d.cuenta_codigo != d.cuenta_sugerida:
+
+                    cur.execute(
+                        f"""
+                        UPDATE {tabla_entidad}
+                        SET cuenta_defecto = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            d.cuenta_codigo,
+                            entidad_id
+                        )
+                    )
+
+                    cuentas_recordadas += 1
+
+            documentos += 1
+
         conn.commit()
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        raise ValueError("Alguno de los documentos ya estaba registrado. No se guardó nada; vuelve a cargar el archivo.")
+
     except Exception:
+
         conn.rollback()
         raise
-    return {"lote": lote, "documentos": n_docs, "total_debe": total_debe, "cuentas_recordadas": recordadas}
- 
- 
-# ---------------------------------------------------------------------------
-# Matrices de asientos (saldos iniciales, históricos)
-# ---------------------------------------------------------------------------
-def validar_asientos(conn, df):
-    """Valida un archivo con columnas fecha, cuenta, debe, haber, glosa (opcionales: asiento, centro_costo).
-    'cuenta' puede ser el código o el nombre. Devuelve (tabla resuelta, lista de errores)."""
-    df = df.copy()
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    faltan = [c for c in ("fecha", "cuenta", "debe", "haber", "glosa") if c not in df.columns]
-    if faltan:
-        return None, [f"Faltan columnas obligatorias: {', '.join(faltan)}."]
- 
+
+    return {
+        "lote": lote,
+        "documentos": documentos,
+        "total_debe": total_debe,
+        "cuentas_recordadas": cuentas_recordadas
+    }
+
+
+# ============================================================
+# PAGOS
+# ============================================================
+
+def registrar_pago_cliente(
+    conn,
+    cliente_id,
+    fecha,
+    monto,
+    medio_pago,
+    cuenta_banco,
+    glosa
+):
+
+    roles = cargar_roles(conn)
     plan = Plan(conn)
-    errores = []
-    out = pd.DataFrame(index=df.index)
-    out["fecha"] = _fecha_iso(df["fecha"])
-    out["cuenta_original"] = df["cuenta"].fillna("").astype(str).str.strip()
-    resuelto = out["cuenta_original"].map(plan.resolver)
-    out["codigo"] = resuelto.map(lambda r: r[0] if r else None)
-    out["cuenta"] = resuelto.map(lambda r: r[1] if r else None)
-    out["debe"] = _num(df["debe"])
-    out["haber"] = _num(df["haber"])
-    out["glosa"] = df["glosa"].fillna("").astype(str)
-    out["centro_costo"] = (df["centro_costo"].fillna("General / Ninguno") if "centro_costo" in df.columns else "General / Ninguno")
-    if "asiento" in df.columns:
-        out["asiento"] = pd.to_numeric(df["asiento"], errors="coerce")
-        if out["asiento"].isna().any():
-            errores.append("La columna 'asiento' tiene filas vacías o con texto.")
-    else:
-        out["asiento"] = 1
- 
-    linea = lambda idx: ", ".join(str(i + 2) for i in idx[:10]) + ("…" if len(idx) > 10 else "")
-    malas = list(out.index[out["fecha"].isna()])
-    if malas:
-        errores.append(f"Fecha inválida (usa AAAA-MM-DD o DD/MM/AAAA) en las líneas: {linea(malas)}.")
-    for nombre in out.loc[out["codigo"].isna(), "cuenta_original"].unique():
-        grupo = [c for c, n in plan.todos.items() if n.strip().lower() == nombre.lower() or c == nombre]
-        if grupo:
-            errores.append(f"'{nombre}' es una cuenta de grupo y no recibe movimientos; usa una subcuenta.")
-        else:
-            errores.append(f"La cuenta '{nombre}' no existe en el plan de cuentas.")
-    malas = list(out.index[(out["debe"] < 0) | (out["haber"] < 0)])
-    if malas:
-        errores.append(f"Hay montos negativos en las líneas: {linea(malas)}.")
-    malas = list(out.index[((out["debe"] > 0) & (out["haber"] > 0)) | ((out["debe"] == 0) & (out["haber"] == 0))])
-    if malas:
-        errores.append(f"Cada línea debe tener monto solo en Debe o solo en Haber (líneas: {linea(malas)}).")
-    if not out["asiento"].isna().any():
-        for n, g in out.groupby("asiento"):
-            if abs(g["debe"].sum() - g["haber"].sum()) >= 0.01:
-                errores.append(f"El asiento {int(n)} está descuadrado: Debe ${g['debe'].sum():,.0f} vs Haber ${g['haber'].sum():,.0f}.")
-    return out, errores
- 
- 
-def guardar_asientos(conn, tabla, origen):
-    """Guarda una tabla ya validada. Rechaza un archivo que ya fue importado (mismo origen)."""
-    if conn.execute("SELECT 1 FROM libro_diario WHERE origen = ? LIMIT 1", (origen,)).fetchone():
-        raise ValueError("Este archivo ya fue importado antes. Si quieres cargarlo de nuevo, deshaz primero su lote.")
-    lote = f"MATRIZ-{datetime.now():%Y%m%d-%H%M%S}"
+
+    if roles["clientes"] is None:
+        raise ValueError(
+            "Cuenta de clientes no configurada."
+        )
+
+    if not cuenta_banco:
+        raise ValueError(
+            "Debe seleccionar una cuenta bancaria."
+        )
+
+    if cuenta_banco not in plan.hojas:
+        raise ValueError(
+            "La cuenta bancaria no es imputable."
+        )
+
+    lote = (
+        "PAGO-CLIENTE-"
+        + datetime.now().strftime(
+            "%Y%m%d-%H%M%S"
+        )
+    )
+
     cur = conn.cursor()
-    base = _siguiente_asiento(cur)
-    orden = {n: i + 1 for i, n in enumerate(sorted(tabla["asiento"].unique()))}
-    try:
-        for r in tabla.itertuples():
-            cur.execute(
-                "INSERT INTO libro_diario (fecha, cuenta, debe, haber, glosa, centro_costo, codigo_cuenta, asiento_id, lote_id, origen) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (r.fecha, r.cuenta, float(r.debe), float(r.haber), r.glosa, r.centro_costo, r.codigo,
-                 int(base + orden[r.asiento]), lote, origen))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    return {"lote": lote, "lineas": len(tabla), "asientos": len(orden)}
- 
- 
-# ---------------------------------------------------------------------------
-# Lotes
-# ---------------------------------------------------------------------------
-def listar_lotes(conn):
+
+    pago_id = cur.execute(
+        """
+        INSERT INTO pagos_clientes
+        (
+            fecha,
+            cliente_id,
+            monto,
+            medio_pago,
+            cuenta_banco,
+            glosa,
+            lote_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fecha,
+            cliente_id,
+            monto,
+            medio_pago,
+            cuenta_banco,
+            glosa,
+            lote
+        )
+    ).lastrowid
+
+    asiento = siguiente_asiento(
+        conn
+    ) + 1
+
+    nombre_banco = plan.hojas[
+        cuenta_banco
+    ]
+
+    nombre_cliente = conn.execute(
+        """
+        SELECT COALESCE(
+            NULLIF(razon_social, ''),
+            nombre
+        )
+        FROM clientes
+        WHERE id = ?
+        """,
+        (cliente_id,)
+    ).fetchone()[0]
+
+    glosa_final = (
+        glosa
+        or f"Pago cliente - {nombre_cliente}"
+    )
+
+    cur.execute(
+        """
+        INSERT INTO libro_diario
+        (
+            fecha,
+            cuenta,
+            debe,
+            haber,
+            glosa,
+            centro_costo,
+            codigo_cuenta,
+            asiento_id,
+            lote_id,
+            origen
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fecha,
+            nombre_banco,
+            monto,
+            0,
+            glosa_final,
+            "General / Ninguno",
+            cuenta_banco,
+            asiento,
+            lote,
+            "Pago de cliente"
+        )
+    )
+
+    cur.execute(
+        """
+        INSERT INTO libro_diario
+        (
+            fecha,
+            cuenta,
+            debe,
+            haber,
+            glosa,
+            centro_costo,
+            codigo_cuenta,
+            asiento_id,
+            lote_id,
+            origen
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fecha,
+            roles["clientes"][1],
+            0,
+            monto,
+            glosa_final,
+            "General / Ninguno",
+            roles["clientes"][0],
+            asiento,
+            lote,
+            "Pago de cliente"
+        )
+    )
+
+    conn.commit()
+
+    return lote
+
+
+def registrar_pago_proveedor(
+    conn,
+    proveedor_id,
+    fecha,
+    monto,
+    medio_pago,
+    cuenta_banco,
+    glosa
+):
+
+    roles = cargar_roles(conn)
+    plan = Plan(conn)
+
+    if roles["proveedores"] is None:
+        raise ValueError(
+            "Cuenta de proveedores no configurada."
+        )
+
+    if cuenta_banco not in plan.hojas:
+        raise ValueError(
+            "La cuenta bancaria no es imputable."
+        )
+
+    lote = (
+        "PAGO-PROVEEDOR-"
+        + datetime.now().strftime(
+            "%Y%m%d-%H%M%S"
+        )
+    )
+
+    cur = conn.cursor()
+
+    pago_id = cur.execute(
+        """
+        INSERT INTO pagos_proveedores
+        (
+            fecha,
+            proveedor_id,
+            monto,
+            medio_pago,
+            cuenta_banco,
+            glosa,
+            lote_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fecha,
+            proveedor_id,
+            monto,
+            medio_pago,
+            cuenta_banco,
+            glosa,
+            lote
+        )
+    ).lastrowid
+
+    asiento = siguiente_asiento(
+        conn
+    ) + 1
+
+    nombre_banco = plan.hojas[
+        cuenta_banco
+    ]
+
+    nombre_proveedor = conn.execute(
+        """
+        SELECT COALESCE(
+            NULLIF(razon_social, ''),
+            nombre
+        )
+        FROM proveedores
+        WHERE id = ?
+        """,
+        (proveedor_id,)
+    ).fetchone()[0]
+
+    glosa_final = (
+        glosa
+        or f"Pago proveedor - {nombre_proveedor}"
+    )
+
+    cur.execute(
+        """
+        INSERT INTO libro_diario
+        (
+            fecha,
+            cuenta,
+            debe,
+            haber,
+            glosa,
+            centro_costo,
+            codigo_cuenta,
+            asiento_id,
+            lote_id,
+            origen
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fecha,
+            roles["proveedores"][1],
+            monto,
+            0,
+            glosa_final,
+            "General / Ninguno",
+            roles["proveedores"][0],
+            asiento,
+            lote,
+            "Pago a proveedor"
+        )
+    )
+
+    cur.execute(
+        """
+        INSERT INTO libro_diario
+        (
+            fecha,
+            cuenta,
+            debe,
+            haber,
+            glosa,
+            centro_costo,
+            codigo_cuenta,
+            asiento_id,
+            lote_id,
+            origen
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fecha,
+            nombre_banco,
+            0,
+            monto,
+            glosa_final,
+            "General / Ninguno",
+            cuenta_banco,
+            asiento,
+            lote,
+            "Pago a proveedor"
+        )
+    )
+
+    conn.commit()
+
+    return lote
+
+
+# ============================================================
+# ESTADOS DE CUENTA
+# ============================================================
+
+def estado_cuenta_cliente(
+    conn,
+    cliente_id,
+    desde=None,
+    hasta=None
+):
+
+    cliente = conn.execute(
+        """
+        SELECT *
+        FROM clientes
+        WHERE id = ?
+        """,
+        (cliente_id,)
+    ).fetchone()
+
+    if not cliente:
+        return pd.DataFrame()
+
+    params = [cliente_id]
+
+    filtro = ""
+
+    if desde:
+        filtro += " AND v.fecha >= ? "
+        params.append(desde)
+
+    if hasta:
+        filtro += " AND v.fecha <= ? "
+        params.append(hasta)
+
+    ventas = pd.read_sql_query(
+        f"""
+        SELECT
+            v.fecha,
+            v.tipo_doc,
+            v.folio,
+            v.glosa,
+            v.monto_total AS cargo,
+            0 AS abono
+        FROM ventas v
+        WHERE v.cliente_id = ?
+        {filtro}
+        ORDER BY v.fecha, v.id
+        """,
+        conn,
+        params=params
+    )
+
+    params = [cliente_id]
+
+    filtro = ""
+
+    if desde:
+        filtro += " AND p.fecha >= ? "
+        params.append(desde)
+
+    if hasta:
+        filtro += " AND p.fecha <= ? "
+        params.append(hasta)
+
+    pagos = pd.read_sql_query(
+        f"""
+        SELECT
+            p.fecha,
+            NULL AS tipo_doc,
+            NULL AS folio,
+            COALESCE(
+                p.glosa,
+                'Pago recibido'
+            ) AS glosa,
+            0 AS cargo,
+            p.monto AS abono
+        FROM pagos_clientes p
+        WHERE p.cliente_id = ?
+        {filtro}
+        ORDER BY p.fecha, p.id
+        """,
+        conn,
+        params=params
+    )
+
+    df = pd.concat(
+        [ventas, pagos],
+        ignore_index=True
+    )
+
+    if df.empty:
+        return df
+
+    df = df.sort_values(
+        ["fecha"]
+    ).reset_index(
+        drop=True
+    )
+
+    df["cargo"] = pd.to_numeric(
+        df["cargo"]
+    )
+
+    df["abono"] = pd.to_numeric(
+        df["abono"]
+    )
+
+    df["saldo"] = (
+        df["cargo"]
+        - df["abono"]
+    ).cumsum()
+
+    df["Documento"] = df.apply(
+        lambda r:
+        (
+            f"{nombre_documento(r['tipo_doc'])} "
+            f"N° {r['folio']}"
+            if pd.notna(r["tipo_doc"])
+            else ""
+        ),
+        axis=1
+    )
+
+    return df
+
+
+def estado_cuenta_proveedor(
+    conn,
+    proveedor_id,
+    desde=None,
+    hasta=None
+):
+
+    proveedor = conn.execute(
+        """
+        SELECT *
+        FROM proveedores
+        WHERE id = ?
+        """,
+        (proveedor_id,)
+    ).fetchone()
+
+    if not proveedor:
+        return pd.DataFrame()
+
+    params = [proveedor_id]
+
+    filtro = ""
+
+    if desde:
+        filtro += " AND c.fecha >= ? "
+        params.append(desde)
+
+    if hasta:
+        filtro += " AND c.fecha <= ? "
+        params.append(hasta)
+
+    compras = pd.read_sql_query(
+        f"""
+        SELECT
+            c.fecha,
+            c.tipo_doc,
+            c.folio,
+            c.glosa,
+            c.monto_total AS cargo,
+            0 AS abono
+        FROM compras c
+        WHERE c.proveedor_id = ?
+        {filtro}
+        ORDER BY c.fecha, c.id
+        """,
+        conn,
+        params=params
+    )
+
+    params = [proveedor_id]
+
+    filtro = ""
+
+    if desde:
+        filtro += " AND p.fecha >= ? "
+        params.append(desde)
+
+    if hasta:
+        filtro += " AND p.fecha <= ? "
+        params.append(hasta)
+
+    pagos = pd.read_sql_query(
+        f"""
+        SELECT
+            p.fecha,
+            NULL AS tipo_doc,
+            NULL AS folio,
+            COALESCE(
+                p.glosa,
+                'Pago realizado'
+            ) AS glosa,
+            0 AS cargo,
+            p.monto AS abono
+        FROM pagos_proveedores p
+        WHERE p.proveedor_id = ?
+        {filtro}
+        ORDER BY p.fecha, p.id
+        """,
+        conn,
+        params=params
+    )
+
+    df = pd.concat(
+        [compras, pagos],
+        ignore_index=True
+    )
+
+    if df.empty:
+        return df
+
+    df = df.sort_values(
+        ["fecha"]
+    ).reset_index(
+        drop=True
+    )
+
+    df["cargo"] = pd.to_numeric(
+        df["cargo"]
+    )
+
+    df["abono"] = pd.to_numeric(
+        df["abono"]
+    )
+
+    df["saldo"] = (
+        df["cargo"]
+        - df["abono"]
+    ).cumsum()
+
+    df["Documento"] = df.apply(
+        lambda r:
+        (
+            f"{nombre_documento(r['tipo_doc'])} "
+            f"N° {r['folio']}"
+            if pd.notna(r["tipo_doc"])
+            else ""
+        ),
+        axis=1
+    )
+
+    return df
+
+
+# ============================================================
+# CONCILIACIÓN
+# ============================================================
+
+def conciliacion_clientes(conn):
+
+    roles = cargar_roles(conn)
+
+    if roles["clientes"] is None:
+        return pd.DataFrame()
+
+    codigo = roles["clientes"][0]
+
+    saldo_contable = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(debe), 0)
+            -
+            COALESCE(SUM(haber), 0)
+        FROM libro_diario
+        WHERE codigo_cuenta = ?
+        """,
+        (codigo,)
+    ).fetchone()[0]
+
+    clientes = pd.read_sql_query(
+        """
+        SELECT
+            c.id,
+            c.rut,
+            COALESCE(
+                NULLIF(c.razon_social, ''),
+                c.nombre
+            ) AS cliente,
+            COALESCE(
+                (
+                    SELECT SUM(v.monto_total)
+                    FROM ventas v
+                    WHERE v.cliente_id = c.id
+                ),
+                0
+            )
+            -
+            COALESCE(
+                (
+                    SELECT SUM(p.monto)
+                    FROM pagos_clientes p
+                    WHERE p.cliente_id = c.id
+                ),
+                0
+            ) AS saldo_auxiliar
+        FROM clientes c
+        ORDER BY cliente
+        """,
+        conn
+    )
+
+    saldo_auxiliar = (
+        clientes["saldo_auxiliar"].sum()
+        if not clientes.empty
+        else 0
+    )
+
+    return pd.DataFrame(
+        [{
+            "Cuenta contable": codigo,
+            "Saldo contable": saldo_contable,
+            "Saldo auxiliar": saldo_auxiliar,
+            "Diferencia":
+                saldo_contable
+                - saldo_auxiliar,
+        }]
+    )
+
+
+def conciliacion_proveedores(conn):
+
+    roles = cargar_roles(conn)
+
+    if roles["proveedores"] is None:
+        return pd.DataFrame()
+
+    codigo = roles["proveedores"][0]
+
+    saldo_contable = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(haber), 0)
+            -
+            COALESCE(SUM(debe), 0)
+        FROM libro_diario
+        WHERE codigo_cuenta = ?
+        """,
+        (codigo,)
+    ).fetchone()[0]
+
+    proveedores = pd.read_sql_query(
+        """
+        SELECT
+            p.id,
+            p.rut,
+            COALESCE(
+                NULLIF(p.razon_social, ''),
+                p.nombre
+            ) AS proveedor,
+            COALESCE(
+                (
+                    SELECT SUM(c.monto_total)
+                    FROM compras c
+                    WHERE c.proveedor_id = p.id
+                ),
+                0
+            )
+            -
+            COALESCE(
+                (
+                    SELECT SUM(pg.monto)
+                    FROM pagos_proveedores pg
+                    WHERE pg.proveedor_id = p.id
+                ),
+                0
+            ) AS saldo_auxiliar
+        FROM proveedores p
+        ORDER BY proveedor
+        """,
+        conn
+    )
+
+    saldo_auxiliar = (
+        proveedores["saldo_auxiliar"].sum()
+        if not proveedores.empty
+        else 0
+    )
+
+    return pd.DataFrame(
+        [{
+            "Cuenta contable": codigo,
+            "Saldo contable": saldo_contable,
+            "Saldo auxiliar": saldo_auxiliar,
+            "Diferencia":
+                saldo_contable
+                - saldo_auxiliar,
+        }]
+    )
+
+
+# ============================================================
+# MAYOR Y BALANCE
+# ============================================================
+
+def obtener_mayor(
+    conn,
+    codigo,
+    desde=None,
+    hasta=None
+):
+
+    plan = Plan(conn)
+
+    if codigo not in plan.todos:
+        return pd.DataFrame()
+
+    filtros = [
+        "codigo_cuenta = ?"
+    ]
+
+    params = [codigo]
+
+    if desde:
+        filtros.append(
+            "fecha >= ?"
+        )
+        params.append(desde)
+
+    if hasta:
+        filtros.append(
+            "fecha <= ?"
+        )
+        params.append(hasta)
+
+    where = " AND ".join(
+        filtros
+    )
+
+    df = pd.read_sql_query(
+        f"""
+        SELECT
+            fecha AS Fecha,
+            asiento_id AS Asiento,
+            glosa AS Glosa,
+            debe AS Debe,
+            haber AS Haber,
+            (debe - haber) AS Movimiento
+        FROM libro_diario
+        WHERE {where}
+        ORDER BY fecha, id
+        """,
+        conn,
+        params=params
+    )
+
+    if not df.empty:
+
+        df["Saldo"] = (
+            df["Movimiento"]
+            .cumsum()
+        )
+
+    return df
+
+
+def balance_comprobacion(
+    conn,
+    desde=None,
+    hasta=None
+):
+
+    filtros = []
+    params = []
+
+    if desde:
+
+        filtros.append(
+            "d.fecha >= ?"
+        )
+        params.append(desde)
+
+    if hasta:
+
+        filtros.append(
+            "d.fecha <= ?"
+        )
+        params.append(hasta)
+
+    where = ""
+
+    if filtros:
+
+        where = (
+            "WHERE "
+            + " AND ".join(filtros)
+        )
+
     return pd.read_sql_query(
-        "SELECT lote_id AS Lote, origen AS Origen, MIN(fecha) AS Desde, MAX(fecha) AS Hasta, "
-        "COUNT(DISTINCT asiento_id) AS Asientos, SUM(debe) AS Total_Debe "
-        "FROM libro_diario WHERE lote_id IS NOT NULL GROUP BY lote_id, origen ORDER BY lote_id DESC", conn)
- 
- 
-def deshacer_lote(conn, lote_id):
+        f"""
+        SELECT
+            p.codigo AS Codigo,
+            p.nombre AS Cuenta,
+            p.tipo AS Tipo,
+            COALESCE(SUM(d.debe), 0) AS Debe,
+            COALESCE(SUM(d.haber), 0) AS Haber,
+            COALESCE(SUM(d.debe), 0)
+            -
+            COALESCE(SUM(d.haber), 0)
+            AS Saldo
+        FROM plan_cuentas p
+        LEFT JOIN libro_diario d
+            ON d.codigo_cuenta = p.codigo
+        {where}
+        GROUP BY
+            p.codigo,
+            p.nombre,
+            p.tipo
+        HAVING
+            ABS(Debe) > 0.001
+            OR ABS(Haber) > 0.001
+        ORDER BY p.codigo
+        """,
+        conn,
+        params=params
+    )
+
+
+# ============================================================
+# LOTES
+# ============================================================
+
+def listar_lotes(conn):
+
+    return pd.read_sql_query(
+        """
+        SELECT
+            lote_id AS Lote,
+            origen AS Origen,
+            MIN(fecha) AS Desde,
+            MAX(fecha) AS Hasta,
+            COUNT(
+                DISTINCT asiento_id
+            ) AS Asientos,
+            SUM(debe) AS Total_Debe,
+            SUM(haber) AS Total_Haber
+        FROM libro_diario
+        WHERE lote_id IS NOT NULL
+        GROUP BY
+            lote_id,
+            origen
+        ORDER BY lote_id DESC
+        """,
+        conn
+    )
+
+
+def deshacer_lote(conn, lote):
+
     cur = conn.cursor()
+
     try:
+
         borrados = {}
-        for tabla in ("libro_diario", "compras", "ventas"):
-            borrados[tabla] = cur.execute(f"DELETE FROM {tabla} WHERE lote_id = ?", (lote_id,)).rowcount
+
+        for tabla in (
+            "libro_diario",
+            "compras",
+            "ventas",
+            "pagos_clientes",
+            "pagos_proveedores",
+        ):
+
+            resultado = cur.execute(
+                f"""
+                DELETE FROM {tabla}
+                WHERE lote_id = ?
+                """,
+                (lote,)
+            )
+
+            borrados[tabla] = (
+                resultado.rowcount
+            )
+
         conn.commit()
+
+        return borrados
+
     except Exception:
+
         conn.rollback()
         raise
-    return borrados
- 
+
+
+# ============================================================
+# REGLAS CONTABLES UI
+# ============================================================
+
+def guardar_regla(
+    conn,
+    tipo,
+    rut,
+    patron,
+    tipo_doc,
+    codigo,
+    prioridad,
+    descripcion
+):
+
+    conn.execute(
+        """
+        INSERT INTO reglas_contables
+        (
+            tipo,
+            rut,
+            patron,
+            tipo_doc,
+            codigo_cuenta,
+            prioridad,
+            activa,
+            descripcion
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+        """,
+        (
+            tipo,
+            normalizar_rut(rut),
+            patron,
+            tipo_doc,
+            codigo,
+            prioridad,
+            descripcion
+        )
+    )
+
+    conn.commit()
+
+
+# ============================================================
+# INICIALIZACIÓN
+# ============================================================
+
+conn = conectar()
+
+crear_esquema(conn)
+instalar_plan_base(conn)
+
+# Actualizar roles después de instalar plan
+roles_actuales = cargar_roles(conn)
+
+if "config_cuentas" not in st.session_state:
+    st.session_state["config_cuentas"] = roles_actuales
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title("📊 SGCI")
+
+st.sidebar.caption(
+    "Sistema de Gestión Contable Integral"
+)
+
+menu = st.sidebar.radio(
+    "Módulo",
+    [
+        "🏠 Inicio",
+        "📥 RCV Compras",
+        "📤 RCV Ventas",
+        "👥 Clientes",
+        "🏢 Proveedores",
+        "💵 Pagos",
+        "📒 Libro Diario",
+        "📚 Mayor",
+        "⚖️ Balance de Comprobación",
+        "📊 Conciliación",
+        "📋 Plan de Cuentas",
+        "⚙️ Reglas Contables",
+        "📦 Lotes",
+        "🧰 Matriz Contable",
+    ]
+)
+
+
+# ============================================================
+# INICIO
+# ============================================================
+
+if menu == "🏠 Inicio":
+
+    st.title("📊 SGCI")
+    st.subheader(
+        "Sistema de Gestión Contable Integral"
+    )
+
+    diario = pd.read_sql_query(
+        """
+        SELECT
+            COALESCE(SUM(debe),0) AS debe,
+            COALESCE(SUM(haber),0) AS haber,
+            COUNT(*) AS movimientos
+        FROM libro_diario
+        """,
+        conn
+    ).iloc[0]
+
+    clientes = conn.execute(
+        "SELECT COUNT(*) FROM clientes"
+    ).fetchone()[0]
+
+    proveedores = conn.execute(
+        "SELECT COUNT(*) FROM proveedores"
+    ).fetchone()[0]
+
+    facturas = conn.execute(
+        """
+        SELECT
+            (
+                SELECT COUNT(*)
+                FROM compras
+            )
+            +
+            (
+                SELECT COUNT(*)
+                FROM ventas
+            )
+        """
+    ).fetchone()[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric(
+        "Movimientos",
+        int(diario["movimientos"])
+    )
+
+    c2.metric(
+        "Clientes",
+        clientes
+    )
+
+    c3.metric(
+        "Proveedores",
+        proveedores
+    )
+
+    c4.metric(
+        "Documentos",
+        facturas
+    )
+
+    st.divider()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        st.subheader(
+            "Control de cuadre"
+        )
+
+        diferencia = (
+            float(diario["debe"])
+            - float(diario["haber"])
+        )
+
+        if abs(diferencia) < 0.01:
+
+            st.success(
+                "🟢 Libro Diario cuadrado"
+            )
+
+        else:
+
+            st.error(
+                f"🔴 Diferencia: {money(diferencia)}"
+            )
+
+        st.write(
+            f"Debe: **{money(diario['debe'])}**"
+        )
+
+        st.write(
+            f"Haber: **{money(diario['haber'])}**"
+        )
+
+    with col2:
+
+        st.subheader(
+            "Estado del sistema"
+        )
+
+        st.success(
+            "Base de datos conectada"
+        )
+
+        st.write(
+            f"Base: `{DB_FILE}`"
+        )
+
+        st.write(
+            f"Fecha: {date.today().strftime('%d/%m/%Y')}"
+        )
+
+    st.divider()
+
+    st.info(
+        """
+        Flujo recomendado:
+
+        1. Cargar RCV.
+        2. Revisar documentos.
+        3. Confirmar cuentas contables.
+        4. Contabilizar.
+        5. Revisar auxiliares.
+        6. Conciliar clientes/proveedores.
+        7. Revisar Libro Diario y Balance.
+        """
+    )
+
+
+# ============================================================
+# RCV COMPRAS
+# ============================================================
+
+elif menu == "📥 RCV Compras":
+
+    st.title(
+        "📥 Registro de Compras - SII"
+    )
+
+    archivo = st.file_uploader(
+        "Cargar RCV de Compras",
+        type=["csv"],
+        key="rcv_compras"
+    )
+
+    if archivo:
+
+        try:
+
+            df_original = leer_csv(
+                archivo
+            )
+
+            st.success(
+                f"Archivo leído: "
+                f"{len(df_original):,} filas"
+            )
+
+            df = normalizar_rcv(
+                df_original,
+                "compras"
+            )
+
+            df = preparar_documentos(
+                conn,
+                df,
+                "compras"
+            )
+
+            st.session_state[
+                "rcv_compras"
+            ] = df
+
+        except Exception as e:
+
+            st.error(
+                f"Error: {e}"
+            )
+
+    if "rcv_compras" in st.session_state:
+
+        df = st.session_state[
+            "rcv_compras"
+        ].copy()
+
+        st.divider()
+
+        st.subheader(
+            "Resumen de importación"
+        )
+
+        total = df["total"].sum()
+        neto = df["neto"].sum()
+        iva = df["iva"].sum()
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
+            "Documentos",
+            len(df)
+        )
+
+        c2.metric(
+            "Neto",
+            money(neto)
+        )
+
+        c3.metric(
+            "IVA",
+            money(iva)
+        )
+
+        c4.metric(
+            "Total",
+            money(total)
+        )
+
+        st.divider()
+
+        st.subheader(
+            "Bandeja de revisión"
+        )
+
+        columnas = [
+            "estado",
+            "fecha_doc",
+            "rut",
+            "razon_social",
+            "tipo_doc",
+            "folio",
+            "neto",
+            "iva",
+            "total",
+            "cuenta_codigo",
+            "cuenta_origen",
+            "observaciones",
+        ]
+
+        mostrar = df[
+            [
+                c for c in columnas
+                if c in df.columns
+            ]
+        ].copy()
+
+        mostrar = mostrar.rename(
+            columns={
+                "estado": "Estado",
+                "fecha_doc": "Fecha",
+                "rut": "RUT",
+                "razon_social": "Proveedor",
+                "tipo_doc": "Tipo",
+                "folio": "Folio",
+                "neto": "Neto",
+                "iva": "IVA",
+                "total": "Total",
+                "cuenta_codigo": "Cuenta",
+                "cuenta_origen": "Origen cuenta",
+                "observaciones": "Observaciones",
+            }
+        )
+
+        st.dataframe(
+            mostrar,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.divider()
+
+        st.subheader(
+            "Revisión y asignación de cuentas"
+        )
+
+        opciones = cuentas_imputables(
+            conn
+        )
+
+        etiquetas = opciones[
+            "etiqueta"
+        ].tolist()
+
+        for i in range(len(df)):
+
+            estado = df.loc[
+                i,
+                "estado"
+            ]
+
+            if (
+                estado.startswith("🔁")
+                or estado.startswith("❌")
+                or estado.startswith("⚠️")
+            ):
+                continue
+
+            cuenta_actual = df.loc[
+                i,
+                "cuenta_codigo"
+            ]
+
+            if cuenta_actual in opciones[
+                "codigo"
+            ].values:
+
+                indice = opciones[
+                    "codigo"
+                ].tolist().index(
+                    cuenta_actual
+                )
+
+            else:
+
+                indice = 0
+
+            nueva = st.selectbox(
+                f"{df.loc[i, 'fecha_doc']} | "
+                f"{df.loc[i, 'razon_social']} | "
+                f"Doc. {df.loc[i, 'folio']}",
+                etiquetas,
+                index=indice,
+                key=f"compra_cta_{i}"
+            )
+
+            codigo = nueva.split(
+                " - ",
+                1
+            )[0]
+
+            df.loc[
+                i,
+                "cuenta_codigo"
+            ] = codigo
+
+        st.session_state[
+            "rcv_compras"
+        ] = df
+
+        validos = df[
+            df["estado"].isin(
+                [
+                    "🟢 Nuevo",
+                    "🟡 Revisar cuenta"
+                ]
+            )
+        ].copy()
+
+        st.divider()
+
+        if not validos.empty:
+
+            st.warning(
+                f"{len(validos)} documento(s) "
+                "listos para contabilizar."
+            )
+
+            if st.button(
+                "✅ CONTABILIZAR COMPRAS",
+                type="primary"
+            ):
+
+                try:
+
+                    resultado = contabilizar_rcv(
+                        conn,
+                        "compras",
+                        validos
+                    )
+
+                    st.success(
+                        f"Se contabilizaron "
+                        f"{resultado['documentos']} "
+                        "documentos."
+                    )
+
+                    del st.session_state[
+                        "rcv_compras"
+                    ]
+
+                except Exception as e:
+
+                    st.error(
+                        f"No se contabilizó el lote: {e}"
+                    )
+
+
+# ============================================================
+# RCV VENTAS
+# ============================================================
+
+elif menu == "📤 RCV Ventas":
+
+    st.title(
+        "📤 Registro de Ventas - SII"
+    )
+
+    archivo = st.file_uploader(
+        "Cargar RCV de Ventas",
+        type=["csv"],
+        key="rcv_ventas"
+    )
+
+    if archivo:
+
+        try:
+
+            df_original = leer_csv(
+                archivo
+            )
+
+            df = normalizar_rcv(
+                df_original,
+                "ventas"
+            )
+
+            df = preparar_documentos(
+                conn,
+                df,
+                "ventas"
+            )
+
+            st.session_state[
+                "rcv_ventas"
+            ] = df
+
+            st.success(
+                f"{len(df):,} documentos encontrados."
+            )
+
+        except Exception as e:
+
+            st.error(
+                f"Error: {e}"
+            )
+
+    if "rcv_ventas" in st.session_state:
+
+        df = st.session_state[
+            "rcv_ventas"
+        ].copy()
+
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric(
+            "Documentos",
+            len(df)
+        )
+
+        c2.metric(
+            "Neto",
+            money(df["neto"].sum())
+        )
+
+        c3.metric(
+            "IVA",
+            money(df["iva"].sum())
+        )
+
+        c4.metric(
+            "Total",
+            money(df["total"].sum())
+        )
+
+        st.divider()
+
+        st.subheader(
+            "Bandeja de revisión"
+        )
+
+        mostrar = df[
+            [
+                "estado",
+                "fecha_doc",
+                "rut",
+                "razon_social",
+                "tipo_doc",
+                "folio",
+                "neto",
+                "iva",
+                "total",
+                "cuenta_codigo",
+                "cuenta_origen",
+                "observaciones",
+            ]
+        ].rename(
+            columns={
+                "estado": "Estado",
+                "fecha_doc": "Fecha",
+                "rut": "RUT",
+                "razon_social": "Cliente",
+                "tipo_doc": "Tipo",
+                "folio": "Folio",
+                "neto": "Neto",
+                "iva": "IVA",
+                "total": "Total",
+                "cuenta_codigo": "Cuenta",
+                "cuenta_origen": "Origen cuenta",
+                "observaciones": "Observaciones",
+            }
+        )
+
+        st.dataframe(
+            mostrar,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.subheader(
+            "Asignación de cuentas de ingreso"
+        )
+
+        opciones = cuentas_imputables(
+            conn
+        )
+
+        etiquetas = opciones[
+            "etiqueta"
+        ].tolist()
+
+        for i in range(len(df)):
+
+            estado = df.loc[
+                i,
+                "estado"
+            ]
+
+            if (
+                estado.startswith("🔁")
+                or estado.startswith("❌")
+                or estado.startswith("⚠️")
+            ):
+                continue
+
+            actual = df.loc[
+                i,
+                "cuenta_codigo"
+            ]
+
+            if actual in opciones[
+                "codigo"
+            ].values:
+
+                indice = opciones[
+                    "codigo"
+                ].tolist().index(
+                    actual
+                )
+
+            else:
+
+                indice = 0
+
+            nueva = st.selectbox(
+                f"{df.loc[i, 'fecha_doc']} | "
+                f"{df.loc[i, 'razon_social']} | "
+                f"Doc. {df.loc[i, 'folio']}",
+                etiquetas,
+                index=indice,
+                key=f"venta_cta_{i}"
+            )
+
+            df.loc[
+                i,
+                "cuenta_codigo"
+            ] = nueva.split(
+                " - ",
+                1
+            )[0]
+
+        st.session_state[
+            "rcv_ventas"
+        ] = df
+
+        validos = df[
+            df["estado"].isin(
+                [
+                    "🟢 Nuevo",
+                    "🟡 Revisar cuenta"
+                ]
+            )
+        ].copy()
+
+        if not validos.empty:
+
+            if st.button(
+                "✅ CONTABILIZAR VENTAS",
+                type="primary"
+            ):
+
+                try:
+
+                    resultado = contabilizar_rcv(
+                        conn,
+                        "ventas",
+                        validos
+                    )
+
+                    st.success(
+                        f"Se contabilizaron "
+                        f"{resultado['documentos']} "
+                        "documentos."
+                    )
+
+                    del st.session_state[
+                        "rcv_ventas"
+                    ]
+
+                except Exception as e:
+
+                    st.error(
+                        f"No se contabilizó el lote: {e}"
+                    )
+
+
+# ============================================================
+# CLIENTES
+# ============================================================
+
+elif menu == "👥 Clientes":
+
+    st.title(
+        "👥 Clientes"
+    )
+
+    pestañas = st.tabs(
+        [
+            "Listado",
+            "Estado de cuenta",
+            "Nuevo cliente",
+        ]
+    )
+
+    with pestañas[0]:
+
+        df = pd.read_sql_query(
+            """
+            SELECT
+                id,
+                rut AS RUT,
+                COALESCE(
+                    NULLIF(razon_social, ''),
+                    nombre
+                ) AS Cliente,
+                email AS Email,
+                telefono AS Teléfono,
+                cuenta_defecto AS Cuenta
+            FROM clientes
+            ORDER BY Cliente
+            """,
+            conn
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with pestañas[1]:
+
+        clientes = conn.execute(
+            """
+            SELECT
+                id,
+                rut,
+                COALESCE(
+                    NULLIF(razon_social, ''),
+                    nombre
+                ) AS nombre
+            FROM clientes
+            ORDER BY nombre
+            """
+        ).fetchall()
+
+        if clientes:
+
+            opciones = {
+                f"{x['rut']} - {x['nombre']}":
+                    x["id"]
+                for x in clientes
+            }
+
+            seleccionado = st.selectbox(
+                "Cliente",
+                list(opciones.keys())
+            )
+
+            cliente_id = opciones[
+                seleccionado
+            ]
+
+            df = estado_cuenta_cliente(
+                conn,
+                cliente_id
+            )
+
+            if df.empty:
+
+                st.info(
+                    "El cliente no tiene movimientos."
+                )
+
+            else:
+
+                cargo = df["cargo"].sum()
+                abono = df["abono"].sum()
+                saldo = df.iloc[-1]["saldo"]
+
+                c1, c2, c3 = st.columns(3)
+
+                c1.metric(
+                    "Facturado",
+                    money(cargo)
+                )
+
+                c2.metric(
+                    "Pagado",
+                    money(abono)
+                )
+
+                c3.metric(
+                    "Saldo",
+                    money(saldo)
+                )
+
+                mostrar = df[
+                    [
+                        "fecha",
+                        "Documento",
+                        "glosa",
+                        "cargo",
+                        "abono",
+                        "saldo",
+                    ]
+                ].rename(
+                    columns={
+                        "fecha": "Fecha",
+                        "Documento": "Documento",
+                        "glosa": "Glosa",
+                        "cargo": "Cargo",
+                        "abono": "Abono",
+                        "saldo": "Saldo",
+                    }
+                )
+
+                st.dataframe(
+                    mostrar,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+    with pestañas[2]:
+
+        with st.form(
+            "nuevo_cliente"
+        ):
+
+            rut = st.text_input(
+                "RUT"
+            )
+
+            nombre = st.text_input(
+                "Razón social"
+            )
+
+            email = st.text_input(
+                "Email"
+            )
+
+            telefono = st.text_input(
+                "Teléfono"
+            )
+
+            if st.form_submit_button(
+                "Guardar cliente"
+            ):
+
+                if not validar_rut(rut):
+
+                    st.error(
+                        "RUT inválido."
+                    )
+
+                elif not nombre.strip():
+
+                    st.error(
+                        "Debe indicar razón social."
+                    )
+
+                else:
+
+                    try:
+
+                        conn.execute(
+                            """
+                            INSERT INTO clientes
+                            (
+                                rut,
+                                nombre,
+                                razon_social,
+                                email,
+                                telefono,
+                                activo,
+                                fecha_creacion
+                            )
+                            VALUES (?, ?, ?, ?, ?, 1, ?)
+                            """,
+                            (
+                                normalizar_rut(rut),
+                                nombre,
+                                nombre,
+                                email,
+                                telefono,
+                                datetime.now().isoformat()
+                            )
+                        )
+
+                        conn.commit()
+
+                        st.success(
+                            "Cliente creado."
+                        )
+
+                    except Exception as e:
+
+                        st.error(str(e))
+
+
+# ============================================================
+# PROVEEDORES
+# ============================================================
+
+elif menu == "🏢 Proveedores":
+
+    st.title(
+        "🏢 Proveedores"
+    )
+
+    pestañas = st.tabs(
+        [
+            "Listado",
+            "Estado de cuenta",
+            "Nuevo proveedor",
+        ]
+    )
+
+    with pestañas[0]:
+
+        df = pd.read_sql_query(
+            """
+            SELECT
+                id,
+                rut AS RUT,
+                COALESCE(
+                    NULLIF(razon_social, ''),
+                    nombre
+                ) AS Proveedor,
+                email AS Email,
+                telefono AS Teléfono,
+                cuenta_defecto AS Cuenta
+            FROM proveedores
+            ORDER BY Proveedor
+            """,
+            conn
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with pestañas[1]:
+
+        proveedores = conn.execute(
+            """
+            SELECT
+                id,
+                rut,
+                COALESCE(
+                    NULLIF(razon_social, ''),
+                    nombre
+                ) AS nombre
+            FROM proveedores
+            ORDER BY nombre
+            """
+        ).fetchall()
+
+        if proveedores:
+
+            opciones = {
+                f"{x['rut']} - {x['nombre']}":
+                    x["id"]
+                for x in proveedores
+            }
+
+            seleccionado = st.selectbox(
+                "Proveedor",
+                list(opciones.keys())
+            )
+
+            proveedor_id = opciones[
+                seleccionado
+            ]
+
+            df = estado_cuenta_proveedor(
+                conn,
+                proveedor_id
+            )
+
+            if df.empty:
+
+                st.info(
+                    "El proveedor no tiene movimientos."
+                )
+
+            else:
+
+                cargo = df["cargo"].sum()
+                abono = df["abono"].sum()
+                saldo = df.iloc[-1]["saldo"]
+
+                c1, c2, c3 = st.columns(3)
+
+                c1.metric(
+                    "Compras",
+                    money(cargo)
+                )
+
+                c2.metric(
+                    "Pagado",
+                    money(abono)
+                )
+
+                c3.metric(
+                    "Saldo",
+                    money(saldo)
+                )
+
+                st.dataframe(
+                    df[
+                        [
+                            "fecha",
+                            "Documento",
+                            "glosa",
+                            "cargo",
+                            "abono",
+                            "saldo",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+    with pestañas[2]:
+
+        with st.form(
+            "nuevo_proveedor"
+        ):
+
+            rut = st.text_input(
+                "RUT"
+            )
+
+            nombre = st.text_input(
+                "Razón social"
+            )
+
+            email = st.text_input(
+                "Email"
+            )
+
+            telefono = st.text_input(
+                "Teléfono"
+            )
+
+            if st.form_submit_button(
+                "Guardar proveedor"
+            ):
+
+                if not validar_rut(rut):
+
+                    st.error(
+                        "RUT inválido."
+                    )
+
+                elif not nombre.strip():
+
+                    st.error(
+                        "Debe indicar razón social."
+                    )
+
+                else:
+
+                    try:
+
+                        conn.execute(
+                            """
+                            INSERT INTO proveedores
+                            (
+                                rut,
+                                nombre,
+                                razon_social,
+                                email,
+                                telefono,
+                                activo,
+                                fecha_creacion
+                            )
+                            VALUES (?, ?, ?, ?, ?, 1, ?)
+                            """,
+                            (
+                                normalizar_rut(rut),
+                                nombre,
+                                nombre,
+                                email,
+                                telefono,
+                                datetime.now().isoformat()
+                            )
+                        )
+
+                        conn.commit()
+
+                        st.success(
+                            "Proveedor creado."
+                        )
+
+                    except Exception as e:
+
+                        st.error(str(e))
+
+
+# ============================================================
+# PAGOS
+# ============================================================
+
+elif menu == "💵 Pagos":
+
+    st.title(
+        "💵 Pagos y cobranzas"
+    )
+
+    pestañas = st.tabs(
+        [
+            "Cobranza clientes",
+            "Pago proveedores",
+        ]
+    )
+
+    cuentas = cuentas_imputables(
+        conn
+    )
+
+    cuentas_banco = cuentas[
+        cuentas["codigo"].str.startswith(
+            "1.1.02"
+        )
+    ]
+
+    # --------------------------------------------------------
+    # CLIENTES
+    # --------------------------------------------------------
+
+    with pestañas[0]:
+
+        clientes = conn.execute(
+            """
+            SELECT id, rut,
+            COALESCE(
+                NULLIF(razon_social, ''),
+                nombre
+            ) AS nombre
+            FROM clientes
+            ORDER BY nombre
+            """
+        ).fetchall()
+
+        if clientes:
+
+            opciones = {
+                f"{x['rut']} - {x['nombre']}":
+                    x["id"]
+                for x in clientes
+            }
+
+            with st.form(
+                "pago_cliente"
+            ):
+
+                seleccionado = st.selectbox(
+                    "Cliente",
+                    list(opciones.keys())
+                )
+
+                fecha_pago = st.date_input(
+                    "Fecha",
+                    date.today()
+                )
+
+                monto_pago = st.number_input(
+                    "Monto",
+                    min_value=0.0,
+                    step=1000.0
+                )
+
+                medio = st.selectbox(
+                    "Medio de pago",
+                    [
+                        "Transferencia",
+                        "Cheque",
+                        "Efectivo",
+                        "Tarjeta",
+                        "Otro",
+                    ]
+                )
+
+                if cuentas_banco.empty:
+
+                    st.warning(
+                        "No existen cuentas bajo 1.1.02."
+                    )
+
+                    cuenta_banco = None
+
+                else:
+
+                    opciones_banco = dict(
+                        zip(
+                            cuentas_banco["etiqueta"],
+                            cuentas_banco["codigo"]
+                        )
+                    )
+
+                    cuenta_banco_label = st.selectbox(
+                        "Cuenta bancaria",
+                        list(opciones_banco.keys())
+                    )
+
+                    cuenta_banco = opciones_banco[
+                        cuenta_banco_label
+                    ]
+
+                glosa = st.text_input(
+                    "Glosa"
+                )
+
+                guardar = st.form_submit_button(
+                    "Registrar cobranza"
+                )
+
+                if guardar:
+
+                    try:
+
+                        lote = registrar_pago_cliente(
+                            conn,
+                            opciones[seleccionado],
+                            fecha_pago.strftime(
+                                "%Y-%m-%d"
+                            ),
+                            monto_pago,
+                            medio,
+                            cuenta_banco,
+                            glosa
+                        )
+
+                        st.success(
+                            f"Pago registrado. "
+                            f"Lote: {lote}"
+                        )
+
+                    except Exception as e:
+
+                        st.error(str(e))
+
+    # --------------------------------------------------------
+    # PROVEEDORES
+    # --------------------------------------------------------
+
+    with pestañas[1]:
+
+        proveedores = conn.execute(
+            """
+            SELECT id, rut,
+            COALESCE(
+                NULLIF(razon_social, ''),
+                nombre
+            ) AS nombre
+            FROM proveedores
+            ORDER BY nombre
+            """
+        ).fetchall()
+
+        if proveedores:
+
+            opciones = {
+                f"{x['rut']} - {x['nombre']}":
+                    x["id"]
+                for x in proveedores
+            }
+
+            with st.form(
+                "pago_proveedor"
+            ):
+
+                seleccionado = st.selectbox(
+                    "Proveedor",
+                    list(opciones.keys())
+                )
+
+                fecha_pago = st.date_input(
+                    "Fecha",
+                    date.today(),
+                    key="fecha_pago_proveedor"
+                )
+
+                monto_pago = st.number_input(
+                    "Monto",
+                    min_value=0.0,
+                    step=1000.0,
+                    key="monto_pago_proveedor"
+                )
+
+                medio = st.selectbox(
+                    "Medio de pago",
+                    [
+                        "Transferencia",
+                        "Cheque",
+                        "Efectivo",
+                        "Tarjeta",
+                        "Otro",
+                    ],
+                    key="medio_proveedor"
+                )
+
+                if cuentas_banco.empty:
+
+                    st.warning(
+                        "No existen cuentas bajo 1.1.02."
+                    )
+
+                    cuenta_banco = None
+
+                else:
+
+                    opciones_banco = dict(
+                        zip(
+                            cuentas_banco["etiqueta"],
+                            cuentas_banco["codigo"]
+                        )
+                    )
+
+                    cuenta_label = st.selectbox(
+                        "Cuenta bancaria",
+                        list(opciones_banco.keys()),
+                        key="cuenta_proveedor"
+                    )
+
+                    cuenta_banco = opciones_banco[
+                        cuenta_label
+                    ]
+
+                glosa = st.text_input(
+                    "Glosa",
+                    key="glosa_proveedor"
+                )
+
+                if st.form_submit_button(
+                    "Registrar pago"
+                ):
+
+                    try:
+
+                        lote = registrar_pago_proveedor(
+                            conn,
+                            opciones[seleccionado],
+                            fecha_pago.strftime(
+                                "%Y-%m-%d"
+                            ),
+                            monto_pago,
+                            medio,
+                            cuenta_banco,
+                            glosa
+                        )
+
+                        st.success(
+                            f"Pago registrado. "
+                            f"Lote: {lote}"
+                        )
+
+                    except Exception as e:
+
+                        st.error(str(e))
+
+
+# ============================================================
+# LIBRO DIARIO
+# ============================================================
+
+elif menu == "📒 Libro Diario":
+
+    st.title(
+        "📒 Libro Diario"
+    )
+
+    df = pd.read_sql_query(
+        """
+        SELECT
+            fecha AS Fecha,
+            asiento_id AS Asiento,
+            codigo_cuenta AS Código,
+            cuenta AS Cuenta,
+            debe AS Debe,
+            haber AS Haber,
+            glosa AS Glosa,
+            origen AS Origen
+        FROM libro_diario
+        ORDER BY
+            fecha DESC,
+            asiento_id DESC,
+            id DESC
+        """,
+        conn
+    )
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ============================================================
+# MAYOR
+# ============================================================
+
+elif menu == "📚 Mayor":
+
+    st.title(
+        "📚 Libro Mayor"
+    )
+
+    cuentas = cuentas_imputables(
+        conn
+    )
+
+    opciones = dict(
+        zip(
+            cuentas["etiqueta"],
+            cuentas["codigo"]
+        )
+    )
+
+    seleccion = st.selectbox(
+        "Cuenta",
+        list(opciones.keys())
+    )
+
+    codigo = opciones[
+        seleccion
+    ]
+
+    df = obtener_mayor(
+        conn,
+        codigo
+    )
+
+    if df.empty:
+
+        st.info(
+            "La cuenta no tiene movimientos."
+        )
+
+    else:
+
+        saldo = df.iloc[-1]["Saldo"]
+
+        st.metric(
+            "Saldo",
+            money(saldo)
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+# ============================================================
+# BALANCE DE COMPROBACIÓN
+# ============================================================
+
+elif menu == "⚖️ Balance de Comprobación":
+
+    st.title(
+        "⚖️ Balance de Comprobación"
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        desde = st.date_input(
+            "Desde",
+            date(
+                date.today().year,
+                1,
+                1
+            )
+        )
+
+    with col2:
+
+        hasta = st.date_input(
+            "Hasta",
+            date.today()
+        )
+
+    df = balance_comprobacion(
+        conn,
+        desde.strftime("%Y-%m-%d"),
+        hasta.strftime("%Y-%m-%d")
+    )
+
+    if not df.empty:
+
+        debe = df["Debe"].sum()
+        haber = df["Haber"].sum()
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "Debe",
+            money(debe)
+        )
+
+        c2.metric(
+            "Haber",
+            money(haber)
+        )
+
+        c3.metric(
+            "Diferencia",
+            money(debe - haber)
+        )
+
+        if abs(debe - haber) < 0.01:
+
+            st.success(
+                "🟢 Balance cuadrado."
+            )
+
+        else:
+
+            st.error(
+                "🔴 Existe diferencia."
+            )
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+# ============================================================
+# CONCILIACIÓN
+# ============================================================
+
+elif menu == "📊 Conciliación":
+
+    st.title(
+        "📊 Conciliación de auxiliares"
+    )
+
+    pestañas = st.tabs(
+        [
+            "Clientes",
+            "Proveedores",
+        ]
+    )
+
+    with pestañas[0]:
+
+        df = conciliacion_clientes(
+            conn
+        )
+
+        if df.empty:
+
+            st.warning(
+                "No se pudo determinar la cuenta de clientes."
+            )
+
+        else:
+
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            diferencia = df.iloc[0][
+                "Diferencia"
+            ]
+
+            if abs(diferencia) < 0.01:
+
+                st.success(
+                    "🟢 Auxiliar de clientes conciliado."
+                )
+
+            else:
+
+                st.error(
+                    f"🔴 Diferencia: "
+                    f"{money(diferencia)}"
+                )
+
+    with pestañas[1]:
+
+        df = conciliacion_proveedores(
+            conn
+        )
+
+        if df.empty:
+
+            st.warning(
+                "No se pudo determinar la cuenta de proveedores."
+            )
+
+        else:
+
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            diferencia = df.iloc[0][
+                "Diferencia"
+            ]
+
+            if abs(diferencia) < 0.01:
+
+                st.success(
+                    "🟢 Auxiliar de proveedores conciliado."
+                )
+
+            else:
+
+                st.error(
+                    f"🔴 Diferencia: "
+                    f"{money(diferencia)}"
+                )
+
+
+# ============================================================
+# PLAN DE CUENTAS
+# ============================================================
+
+elif menu == "📋 Plan de Cuentas":
+
+    st.title(
+        "📋 Plan de Cuentas"
+    )
+
+    pestañas = st.tabs(
+        [
+            "Plan",
+            "Cuentas de enlace",
+            "Nueva cuenta",
+        ]
+    )
+
+    with pestañas[0]:
+
+        df = pd.read_sql_query(
+            """
+            SELECT
+                codigo AS Código,
+                nombre AS Cuenta,
+                categoria AS Categoría,
+                tipo AS Tipo,
+                padre_codigo AS Padre,
+                nivel AS Nivel
+            FROM plan_cuentas
+            ORDER BY codigo
+            """,
+            conn
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with pestañas[1]:
+
+        roles = cargar_roles(
+            conn
+        )
+
+        for rol, (descripcion, defecto) in ROLES.items():
+
+            actual = roles.get(
+                rol
+            )
+
+            opciones = cuentas_imputables(
+                conn
+            )
+
+            mapa = dict(
+                zip(
+                    opciones["etiqueta"],
+                    opciones["codigo"]
+                )
+            )
+
+            codigo_actual = (
+                actual[0]
+                if actual
+                else defecto
+            )
+
+            etiquetas = list(
+                mapa.keys()
+            )
+
+            seleccionado = None
+
+            for etiqueta in etiquetas:
+
+                if etiqueta.startswith(
+                    codigo_actual + " - "
+                ):
+
+                    seleccionado = etiqueta
+                    break
+
+            if seleccionado is None:
+                seleccionado = etiquetas[0]
+
+            nuevo = st.selectbox(
+                descripcion,
+                etiquetas,
+                index=etiquetas.index(
+                    seleccionado
+                ),
+                key=f"rol_{rol}"
+            )
+
+            if st.button(
+                f"Guardar {descripcion}",
+                key=f"guardar_rol_{rol}"
+            ):
+
+                guardar_rol(
+                    conn,
+                    rol,
+                    mapa[nuevo]
+                )
+
+                st.success(
+                    "Configuración guardada."
+                )
+
+    with pestañas[2]:
+
+        with st.form(
+            "nueva_cuenta"
+        ):
+
+            codigo = st.text_input(
+                "Código"
+            )
+
+            nombre = st.text_input(
+                "Nombre"
+            )
+
+            categoria = st.selectbox(
+                "Categoría",
+                [
+                    "Activo",
+                    "Pasivo",
+                    "Patrimonio",
+                    "Nominal",
+                ]
+            )
+
+            tipo = st.selectbox(
+                "Tipo",
+                [
+                    "Activo",
+                    "Pasivo",
+                    "Patrimonio",
+                    "Ingresos",
+                    "Gastos",
+                ]
+            )
+
+            padre = st.text_input(
+                "Código padre"
+            )
+
+            nivel = st.number_input(
+                "Nivel",
+                min_value=1,
+                max_value=10,
+                value=3
+            )
+
+            if st.form_submit_button(
+                "Crear cuenta"
+            ):
+
+                try:
+
+                    conn.execute(
+                        """
+                        INSERT INTO plan_cuentas
+                        (
+                            codigo,
+                            nombre,
+                            categoria,
+                            tipo,
+                            padre_codigo,
+                            nivel
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            codigo.strip(),
+                            nombre.strip(),
+                            categoria,
+                            tipo,
+                            padre.strip()
+                            or None,
+                            nivel
+                        )
+                    )
+
+                    conn.commit()
+
+                    st.success(
+                        "Cuenta creada."
+                    )
+
+                except Exception as e:
+
+                    st.error(str(e))
+
+
+# ============================================================
+# REGLAS CONTABLES
+# ============================================================
+
+elif menu == "⚙️ Reglas Contables":
+
+    st.title(
+        "⚙️ Reglas de clasificación contable"
+    )
+
+    st.info(
+        """
+        Las reglas tienen prioridad sobre la cuenta habitual del
+        cliente/proveedor. Esto permite que el SGCI aprenda la
+        clasificación contable de cada empresa.
+        """
+    )
+
+    cuentas = cuentas_imputables(
+        conn
+    )
+
+    mapa_cuentas = dict(
+        zip(
+            cuentas["etiqueta"],
+            cuentas["codigo"]
+        )
+    )
+
+    with st.form(
+        "nueva_regla"
+    ):
+
+        tipo = st.selectbox(
+            "Tipo",
+            [
+                "compras",
+                "ventas",
+            ]
+        )
+
+        rut = st.text_input(
+            "RUT específico (opcional)"
+        )
+
+        patron = st.text_input(
+            "Texto que debe contener la razón social (opcional)"
+        )
+
+        tipo_doc = st.number_input(
+            "Tipo de documento (0 = cualquiera)",
+            min_value=0,
+            max_value=999,
+            value=0
+        )
+
+        cuenta_label = st.selectbox(
+            "Cuenta contable",
+            list(mapa_cuentas.keys())
+        )
+
+        prioridad = st.number_input(
+            "Prioridad",
+            min_value=1,
+            max_value=1000,
+            value=100
+        )
+
+        descripcion = st.text_input(
+            "Descripción"
+        )
+
+        if st.form_submit_button(
+            "Guardar regla"
+        ):
+
+            guardar_regla(
+                conn,
+                tipo,
+                rut,
+                patron,
+                None if tipo_doc == 0 else tipo_doc,
+                mapa_cuentas[cuenta_label],
+                prioridad,
+                descripcion
+            )
+
+            st.success(
+                "Regla guardada."
+            )
+
+    st.divider()
+
+    reglas = pd.read_sql_query(
+        """
+        SELECT
+            r.id AS ID,
+            r.tipo AS Tipo,
+            r.rut AS RUT,
+            r.patron AS Patrón,
+            r.tipo_doc AS Tipo_Doc,
+            r.codigo_cuenta AS Cuenta,
+            p.nombre AS Nombre_Cuenta,
+            r.prioridad AS Prioridad,
+            r.activa AS Activa,
+            r.descripcion AS Descripción
+        FROM reglas_contables r
+        LEFT JOIN plan_cuentas p
+            ON p.codigo = r.codigo_cuenta
+        ORDER BY
+            r.tipo,
+            r.prioridad DESC
+        """,
+        conn
+    )
+
+    st.dataframe(
+        reglas,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ============================================================
+# LOTES
+# ============================================================
+
+elif menu == "📦 Lotes":
+
+    st.title(
+        "📦 Lotes de contabilización"
+    )
+
+    df = listar_lotes(
+        conn
+    )
+
+    if df.empty:
+
+        st.info(
+            "No existen lotes."
+        )
+
+    else:
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.divider()
+
+        lote = st.selectbox(
+            "Seleccionar lote",
+            df["Lote"].tolist()
+        )
+
+        st.warning(
+            "Deshacer un lote elimina los movimientos "
+            "contables y documentos asociados a ese lote."
+        )
+
+        if st.button(
+            "🗑️ DESHACER LOTE",
+            type="secondary"
+        ):
+
+            try:
+
+                resultado = deshacer_lote(
+                    conn,
+                    lote
+                )
+
+                st.success(
+                    f"Lote eliminado: "
+                    f"{resultado}"
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"No fue posible eliminar el lote: {e}"
+                )
+
+
+# ============================================================
+# MATRIZ CONTABLE
+# ============================================================
+
+elif menu == "🧰 Matriz Contable":
+
+    st.title(
+        "🧰 Importación de matriz contable"
+    )
+
+    st.info(
+        """
+        Formato esperado:
+
+        fecha | cuenta | debe | haber | glosa
+
+        Opcionales:
+        asiento | centro_costo
+        """
+    )
+
+    archivo = st.file_uploader(
+        "Cargar matriz contable",
+        type=["csv"],
+        key="matriz"
+    )
+
+    if archivo:
+
+        try:
+
+            df = leer_csv(
+                archivo
+            )
+
+            df.columns = [
+                str(c).strip().lower()
+                for c in df.columns
+            ]
+
+            obligatorias = [
+                "fecha",
+                "cuenta",
+                "debe",
+                "haber",
+                "glosa"
+            ]
+
+            faltantes = [
+                c
+                for c in obligatorias
+                if c not in df.columns
+            ]
+
+            if faltantes:
+
+                st.error(
+                    "Faltan columnas: "
+                    + ", ".join(faltantes)
+                )
+
+            else:
+
+                plan = Plan(
+                    conn
+                )
+
+                resultado = pd.DataFrame()
+
+                resultado["fecha"] = (
+                    df["fecha"]
+                    .apply(fecha_iso)
+                )
+
+                resultado["cuenta_original"] = (
+                    df["cuenta"]
+                    .astype(str)
+                    .str.strip()
+                )
+
+                resuelto = resultado[
+                    "cuenta_original"
+                ].apply(
+                    plan.resolver
+                )
+
+                resultado["codigo"] = resuelto.apply(
+                    lambda x:
+                    x[0]
+                    if x
+                    else None
+                )
+
+                resultado["cuenta"] = resuelto.apply(
+                    lambda x:
+                    x[1]
+                    if x
+                    else None
+                )
+
+                resultado["debe"] = (
+                    df["debe"]
+                    .apply(numero)
+                )
+
+                resultado["haber"] = (
+                    df["haber"]
+                    .apply(numero)
+                )
+
+                resultado["glosa"] = (
+                    df["glosa"]
+                    .fillna("")
+                    .astype(str)
+                )
+
+                if "centro_costo" in df.columns:
+
+                    resultado["centro_costo"] = (
+                        df["centro_costo"]
+                        .fillna(
+                            "General / Ninguno"
+                        )
+                    )
+
+                else:
+
+                    resultado[
+                        "centro_costo"
+                    ] = "General / Ninguno"
+
+                if "asiento" in df.columns:
+
+                    resultado["asiento"] = (
+                        pd.to_numeric(
+                            df["asiento"],
+                            errors="coerce"
+                        )
+                    )
+
+                else:
+
+                    resultado["asiento"] = 1
+
+                errores = []
+
+                for i, fila in resultado.iterrows():
+
+                    if not fila["fecha"]:
+
+                        errores.append(
+                            f"Línea {i+2}: fecha inválida."
+                        )
+
+                    if not fila["codigo"]:
+
+                        errores.append(
+                            f"Línea {i+2}: cuenta "
+                            f"'{fila['cuenta_original']}' "
+                            "no encontrada."
+                        )
+
+                    if (
+                        fila["debe"] > 0
+                        and fila["haber"] > 0
+                    ):
+
+                        errores.append(
+                            f"Línea {i+2}: "
+                            "Debe y Haber simultáneos."
+                        )
+
+                    if (
+                        fila["debe"] == 0
+                        and fila["haber"] == 0
+                    ):
+
+                        errores.append(
+                            f"Línea {i+2}: "
+                            "Debe y Haber están en cero."
+                        )
+
+                for asiento_id, grupo in resultado.groupby(
+                    "asiento"
+                ):
+
+                    if abs(
+                        grupo["debe"].sum()
+                        -
+                        grupo["haber"].sum()
+                    ) > 0.01:
+
+                        errores.append(
+                            f"Asiento {asiento_id}: "
+                            "descuadrado."
+                        )
+
+                if errores:
+
+                    st.error(
+                        "\n".join(
+                            errores[:30]
+                        )
+                    )
+
+                else:
+
+                    st.success(
+                        "Matriz validada correctamente."
+                    )
+
+                    st.dataframe(
+                        resultado,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    if st.button(
+                        "✅ IMPORTAR MATRIZ",
+                        type="primary"
+                    ):
+
+                        lote = (
+                            "MATRIZ-"
+                            + datetime.now().strftime(
+                                "%Y%m%d-%H%M%S"
+                            )
+                        )
+
+                        cur = conn.cursor()
+
+                        base = siguiente_asiento(
+                            conn
+                        )
+
+                        mapa_asientos = {
+                            n: i + 1
+                            for i, n in enumerate(
+                                sorted(
+                                    resultado[
+                                        "asiento"
+                                    ].unique()
+                                )
+                            )
+                        }
+
+                        try:
+
+                            for fila in resultado.itertuples():
+
+                                asiento = (
+                                    base
+                                    + mapa_asientos[
+                                        fila.asiento
+                                    ]
+                                )
+
+                                cur.execute(
+                                    """
+                                    INSERT INTO libro_diario
+                                    (
+                                        fecha,
+                                        cuenta,
+                                        debe,
+                                        haber,
+                                        glosa,
+                                        centro_costo,
+                                        codigo_cuenta,
+                                        asiento_id,
+                                        lote_id,
+                                        origen
+                                    )
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        fila.fecha,
+                                        fila.cuenta,
+                                        fila.debe,
+                                        fila.haber,
+                                        fila.glosa,
+                                        fila.centro_costo,
+                                        fila.codigo,
+                                        asiento,
+                                        lote,
+                                        "Matriz contable"
+                                    )
+                                )
+
+                            conn.commit()
+
+                            st.success(
+                                f"Matriz importada. "
+                                f"Lote: {lote}"
+                            )
+
+                        except Exception as e:
+
+                            conn.rollback()
+
+                            st.error(
+                                f"Error: {e}"
+                            )
+
+        except Exception as e:
+
+            st.error(
+                f"Error leyendo matriz: {e}"
+            )
+
+
+# ============================================================
+# PIE
+# ============================================================
+
+st.sidebar.divider()
+
+st.sidebar.caption(
+    "SGCI • Sistema de Gestión Contable Integral"
+)
+
+st.sidebar.caption(
+    "Motor contable + auxiliares + RCV + conciliación"
+)
+
+conn.close()
