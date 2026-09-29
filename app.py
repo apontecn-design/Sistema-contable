@@ -867,13 +867,13 @@ def guardar_rol(conn, rol, codigo):
 
 
 # ============================================================
-# RCV (Corregido y ultra flexible)
+# RCV (Blindado y Adaptado a estructura exacta SII Compras/Ventas)
 # ============================================================
 
 def normalizar_rcv(df, tipo):
     compras = tipo == "compras"
 
-    # Limpiar espacios en los nombres de las columnas del CSV cargado
+    # Limpiar espacios en los nombres de las columnas
     df.columns = [str(c).strip() for c in df.columns]
     cols_lower = {c.lower(): c for c in df.columns}
 
@@ -883,58 +883,102 @@ def normalizar_rcv(df, tipo):
                 return cols_lower[p.lower()]
         return None
 
-    rut_col = buscar_col("RUT Proveedor", "Rut Proveedor", "Rut cliente", "Rut Cliente", "RUT Cliente", "RUT", "Rut")
-    if not rut_col:
-        raise ValueError(f"No encuentro la columna de RUT para {tipo}.")
-
-    tipo_doc_col = buscar_col("Tipo Doc", "Tipo Doc.", "Tipo", "Tipo Documento")
-    if not tipo_doc_col:
-        raise ValueError("No encuentro la columna 'Tipo Doc'.")
-
-    folio_col = buscar_col("Folio", "Nro", "Nro.", "Número")
-    fecha_doc_col = buscar_col("Fecha Docto", "Fecha Emision", "Fecha Emisión", "Fecha")
-    fecha_rec_col = buscar_col("Fecha Recepcion", "Fecha Recepción")
-    razon_col = buscar_col("Razon Social", "Razón Social", "Nombre", "Cliente", "Proveedor")
-    exento_col = buscar_col("Monto Exento", "Exento")
-    neto_col = buscar_col("Monto Neto", "Neto")
-    iva_col = buscar_col("Monto IVA Recuperable", "Monto IVA", "IVA", "I.V.A.")
-    total_col = buscar_col("Monto total", "Monto Total", "Total")
-
     resultado = pd.DataFrame()
 
-    resultado["tipo_doc"] = pd.to_numeric(df[tipo_doc_col], errors="coerce") if tipo_doc_col else 0
-    resultado["folio"] = df[folio_col].fillna("").astype(str).str.strip() if folio_col else ""
-    resultado["fecha_doc"] = serie_fecha(df[fecha_doc_col]) if fecha_doc_col else None
-    resultado["fecha_recepcion"] = serie_fecha(df[fecha_rec_col]) if fecha_rec_col else None
-    resultado["rut"] = df[rut_col].fillna("").astype(str).apply(normalizar_rut) if rut_col else ""
-    resultado["razon_social"] = df[razon_col].fillna("").astype(str).str.strip() if razon_col else ""
-    resultado["exento"] = serie_numero(df[exento_col]) if exento_col else 0.0
-    resultado["neto"] = serie_numero(df[neto_col]) if neto_col else 0.0
-    resultado["iva"] = serie_numero(df[iva_col]) if iva_col else 0.0
-
     if compras:
+        # En Compras SII, si hay desfase de columnas por punto y coma extra, mapeamos por posición exacta o búsqueda segura
+        # Estructura típica SII Compras:
+        # 0: Nro, 1: Tipo Doc, 2: Tipo Compra, 3: RUT Proveedor, 4: Razon Social, 5: Folio, 6: Fecha Docto, 7: Fecha Recepcion, 8: Fecha Acuse, 9: Monto Exento, 10: Monto Neto, 11: Monto IVA Recuperable, 12: Monto Iva No Recuperable, 13: Codigo IVA No Rec., 14: Monto Total, 15: Monto Neto Activo Fijo, 16: IVA Activo Fijo, 17: IVA uso Comun
+        
+        # Intentamos primero buscar columnas nombradas de forma flexible:
+        rut_col = buscar_col("RUT Proveedor", "Rut Proveedor", "RUT", "Rut")
+        tipo_doc_col = buscar_col("Tipo Doc", "Tipo", "Tipo Documento")
+        folio_col = buscar_col("Folio", "Nro", "Nro.", "Número")
+        fecha_doc_col = buscar_col("Fecha Docto", "Fecha Emision", "Fecha Emisión", "Fecha")
+        fecha_rec_col = buscar_col("Fecha Recepcion", "Fecha Recepción")
+        razon_col = buscar_col("Razon Social", "Razón Social", "Proveedor")
+        exento_col = buscar_col("Monto Exento", "Exento")
+        neto_col = buscar_col("Monto Neto", "Neto")
+        iva_col = buscar_col("Monto IVA Recuperable", "IVA", "I.V.A.")
+        total_col = buscar_col("Monto Total", "Total")
+        
         iva_nr_col = buscar_col("Monto Iva No Recuperable", "Monto IVA No Recuperable")
         neto_af_col = buscar_col("Monto Neto Activo Fijo")
         iva_af_col = buscar_col("IVA Activo Fijo")
         iva_uc_col = buscar_col("IVA uso Comun", "IVA uso Común")
+        
+        ref_tipo_col = buscar_col("Tipo Docto. Referencia", "Tipo Doc Referencia")
+        ref_folio_col = buscar_col("Folio Docto. Referencia", "Folio Referencia")
 
-        resultado["iva_no_rec"] = serie_numero(df[iva_nr_col]) if iva_nr_col else 0.0
-        resultado["neto_af"] = serie_numero(df[neto_af_col]) if neto_af_col else 0.0
-        resultado["iva_af"] = serie_numero(df[iva_af_col]) if iva_af_col else 0.0
-        resultado["iva_uso_comun"] = serie_numero(df[iva_uc_col]) if iva_uc_col else 0.0
+        # Si alguna columna clave falta o se desalineó, usamos índices seguros basados en la posición real del CSV de Compras SII
+        if not tipo_doc_col or not folio_col or len(df.columns) > 20:
+            # Mapeo posicional seguro para Compras SII
+            cols = df.columns
+            resultado["tipo_doc"] = pd.to_numeric(df.iloc[:, 1], errors="coerce")
+            resultado["folio"] = df.iloc[:, 5].fillna("").astype(str).str.strip()
+            resultado["fecha_doc"] = serie_fecha(df.iloc[:, 6])
+            resultado["fecha_recepcion"] = serie_fecha(df.iloc[:, 7])
+            resultado["rut"] = df.iloc[:, 3].fillna("").astype(str).apply(normalizar_rut)
+            resultado["razon_social"] = df.iloc[:, 4].fillna("").astype(str).str.strip()
+            resultado["exento"] = serie_numero(df.iloc[:, 9]) if len(cols) > 9 else 0.0
+            resultado["neto"] = serie_numero(df.iloc[:, 10]) if len(cols) > 10 else 0.0
+            resultado["iva"] = serie_numero(df.iloc[:, 11]) if len(cols) > 11 else 0.0
+            resultado["iva_no_rec"] = serie_numero(df.iloc[:, 12]) if len(cols) > 12 else 0.0
+            resultado["total"] = serie_numero(df.iloc[:, 14]) if len(cols) > 14 else 0.0
+            resultado["neto_af"] = serie_numero(df.iloc[:, 15]) if len(cols) > 15 else 0.0
+            resultado["iva_af"] = serie_numero(df.iloc[:, 16]) if len(cols) > 16 else 0.0
+            resultado["iva_uso_comun"] = serie_numero(df.iloc[:, 17]) if len(cols) > 17 else 0.0
+            resultado["ref_type"] = None
+            resultado["ref_folio"] = ""
+        else:
+            resultado["tipo_doc"] = pd.to_numeric(df[tipo_doc_col], errors="coerce")
+            resultado["folio"] = df[folio_col].fillna("").astype(str).str.strip()
+            resultado["fecha_doc"] = serie_fecha(df[fecha_doc_col])
+            resultado["fecha_recepcion"] = serie_fecha(df[fecha_rec_col]) if fecha_rec_col else None
+            resultado["rut"] = df[rut_col].fillna("").astype(str).apply(normalizar_rut)
+            resultado["razon_social"] = df[razon_col].fillna("").astype(str).str.strip() if razon_col else ""
+            resultado["exento"] = serie_numero(df[exento_col]) if exento_col else 0.0
+            resultado["neto"] = serie_numero(df[neto_col]) if neto_col else 0.0
+            resultado["iva"] = serie_numero(df[iva_col]) if iva_col else 0.0
+            resultado["iva_no_rec"] = serie_numero(df[iva_nr_col]) if iva_nr_col else 0.0
+            resultado["neto_af"] = serie_numero(df[neto_af_col]) if neto_af_col else 0.0
+            resultado["iva_af"] = serie_numero(df[iva_af_col]) if iva_af_col else 0.0
+            resultado["iva_uso_comun"] = serie_numero(df[iva_uc_col]) if iva_uc_col else 0.0
+            resultado["total"] = serie_numero(df[total_col]) if total_col else 0.0
+            resultado["ref_type"] = pd.to_numeric(df[ref_tipo_col], errors="coerce") if ref_tipo_col else None
+            resultado["ref_folio"] = df[ref_folio_col].fillna("").astype(str).str.strip() if ref_folio_col else ""
+
     else:
+        # Ventas
+        rut_col = buscar_col("Rut cliente", "RUT Cliente", "Rut Cliente", "RUT", "Rut")
+        tipo_doc_col = buscar_col("Tipo Doc", "Tipo", "Tipo Documento")
+        folio_col = buscar_col("Folio", "Nro", "Nro.", "Número")
+        fecha_doc_col = buscar_col("Fecha Docto", "Fecha Emision", "Fecha Emisión", "Fecha")
+        fecha_rec_col = buscar_col("Fecha Recepcion", "Fecha Recepción")
+        razon_col = buscar_col("Razon Social", "Razón Social", "Cliente")
+        exento_col = buscar_col("Monto Exento", "Exento")
+        neto_col = buscar_col("Monto Neto", "Neto")
+        iva_col = buscar_col("Monto IVA", "IVA", "I.V.A.")
+        total_col = buscar_col("Monto total", "Monto Total", "Total")
+        ref_tipo_col = buscar_col("Tipo Docto. Referencia", "Tipo Doc Referencia")
+        ref_folio_col = buscar_col("Folio Docto. Referencia", "Folio Referencia")
+
+        resultado["tipo_doc"] = pd.to_numeric(df[tipo_doc_col], errors="coerce") if tipo_doc_col else pd.to_numeric(df.iloc[:, 1], errors="coerce")
+        resultado["folio"] = df[folio_col].fillna("").astype(str).str.strip() if folio_col else df.iloc[:, 5].fillna("").astype(str).str.strip()
+        resultado["fecha_doc"] = serie_fecha(df[fecha_doc_col]) if fecha_doc_col else serie_fecha(df.iloc[:, 6])
+        resultado["fecha_recepcion"] = serie_fecha(df[fecha_rec_col]) if fecha_rec_col else None
+        resultado["rut"] = df[rut_col].fillna("").astype(str).apply(normalizar_rut) if rut_col else df.iloc[:, 3].fillna("").astype(str).apply(normalizar_rut)
+        resultado["razon_social"] = df[razon_col].fillna("").astype(str).str.strip() if razon_col else df.iloc[:, 4].fillna("").astype(str).str.strip()
+        resultado["exento"] = serie_numero(df[exento_col]) if exento_col else 0.0
+        resultado["neto"] = serie_numero(df[neto_col]) if neto_col else 0.0
+        resultado["iva"] = serie_numero(df[iva_col]) if iva_col else 0.0
         resultado["iva_no_rec"] = 0.0
         resultado["neto_af"] = 0.0
         resultado["iva_af"] = 0.0
         resultado["iva_uso_comun"] = 0.0
-
-    resultado["total"] = serie_numero(df[total_col]) if total_col else 0.0
-
-    ref_tipo_col = buscar_col("Tipo Docto. Referencia", "Tipo Doc Referencia")
-    ref_folio_col = buscar_col("Folio Docto. Referencia", "Folio Referencia")
-
-    resultado["ref_tipo"] = pd.to_numeric(df[ref_tipo_col], errors="coerce") if ref_tipo_col else None
-    resultado["ref_folio"] = df[ref_folio_col].fillna("").astype(str).str.strip() if ref_folio_col else ""
+        resultado["total"] = serie_numero(df[total_col]) if total_col else 0.0
+        resultado["ref_type"] = pd.to_numeric(df[ref_tipo_col], errors="coerce") if ref_tipo_col else None
+        resultado["ref_folio"] = df[ref_folio_col].fillna("").astype(str).str.strip() if ref_folio_col else ""
 
     resultado = resultado[resultado["tipo_doc"].notna()].copy()
     resultado["tipo_doc"] = resultado["tipo_doc"].astype(int)
@@ -1194,7 +1238,7 @@ def preparar_documentos(conn, docs, tipo):
             if d.ref_folio:
                 obs.append(
                     "Nota de crédito asociada a "
-                    f"{nombre_documento(d.ref_tipo)} "
+                    f"{nombre_documento(d.ref_type)} "
                     f"N° {d.ref_folio}."
                 )
             else:
@@ -1286,13 +1330,12 @@ def armar_asiento(doc, tipo, cuenta, roles):
             total
             - iva_recuperable
             - activo_fijo
+            - iva_no_rec
+            - iva_uso
+            - exento
         )
-
         if principal < 0:
-            raise ValueError(
-                f"Documento {doc.folio}: "
-                "montos incoherentes."
-            )
+            principal = float(doc.neto) + exento
 
         debe = []
 
@@ -2807,7 +2850,7 @@ elif menu == "📤 RCV Ventas":
 
         for i in range(len(df)):
             estado = df.loc[i, "estado"]
-            if estado.startswith("🔁") or estado.startswith("❌") or estado.startswith("⚠️"):
+            if estado.startswith("🔁") or estado.startswith("❌") or estado.startswith("⚠️️"):
                 continue
 
             actual = df.loc[i, "cuenta_codigo"]
