@@ -159,17 +159,12 @@ def numero(valor):
 
     s = s.replace("$", "").replace(" ", "")
 
-    # Chile:
-    # 1.234.567,89
-    # 1234567,89
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
     else:
-        # Si hay varios puntos, normalmente son separadores de miles
         if s.count(".") > 1:
             s = s.replace(".", "")
         else:
-            # Un solo punto puede ser decimal
             pass
 
     try:
@@ -382,10 +377,6 @@ def agregar_columna(conn, tabla, columna_nombre, tipo):
 
 def crear_esquema(conn):
 
-    # --------------------------------------------------------
-    # EMPRESA
-    # --------------------------------------------------------
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS empresa (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,10 +390,6 @@ def crear_esquema(conn):
         )
     """)
 
-    # --------------------------------------------------------
-    # PLAN DE CUENTAS
-    # --------------------------------------------------------
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS plan_cuentas (
             codigo TEXT PRIMARY KEY,
@@ -413,10 +400,6 @@ def crear_esquema(conn):
             nivel INTEGER DEFAULT 1
         )
     """)
-
-    # --------------------------------------------------------
-    # CLIENTES
-    # --------------------------------------------------------
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS clientes (
@@ -434,10 +417,6 @@ def crear_esquema(conn):
             fecha_creacion TEXT
         )
     """)
-
-    # --------------------------------------------------------
-    # PROVEEDORES
-    # --------------------------------------------------------
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS proveedores (
@@ -457,10 +436,6 @@ def crear_esquema(conn):
         )
     """)
 
-    # --------------------------------------------------------
-    # COMPRAS
-    # --------------------------------------------------------
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS compras (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -478,10 +453,6 @@ def crear_esquema(conn):
         )
     """)
 
-    # --------------------------------------------------------
-    # VENTAS
-    # --------------------------------------------------------
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ventas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -497,10 +468,6 @@ def crear_esquema(conn):
             lote_id TEXT
         )
     """)
-
-    # --------------------------------------------------------
-    # LIBRO DIARIO
-    # --------------------------------------------------------
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS libro_diario (
@@ -518,10 +485,6 @@ def crear_esquema(conn):
         )
     """)
 
-    # --------------------------------------------------------
-    # PAGOS CLIENTES
-    # --------------------------------------------------------
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pagos_clientes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -535,10 +498,6 @@ def crear_esquema(conn):
         )
     """)
 
-    # --------------------------------------------------------
-    # PAGOS PROVEEDORES
-    # --------------------------------------------------------
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pagos_proveedores (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -551,10 +510,6 @@ def crear_esquema(conn):
             lote_id TEXT
         )
     """)
-
-    # --------------------------------------------------------
-    # APLICACIÓN DE PAGOS
-    # --------------------------------------------------------
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS aplicaciones_clientes (
@@ -574,10 +529,6 @@ def crear_esquema(conn):
         )
     """)
 
-    # --------------------------------------------------------
-    # REGLAS CONTABLES
-    # --------------------------------------------------------
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS reglas_contables (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -591,10 +542,6 @@ def crear_esquema(conn):
             descripcion TEXT
         )
     """)
-
-    # --------------------------------------------------------
-    # CONFIGURACIÓN DE ROLES
-    # --------------------------------------------------------
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS config_cuentas (
@@ -612,10 +559,6 @@ def crear_esquema(conn):
             """,
             (rol, codigo)
         )
-
-    # --------------------------------------------------------
-    # MIGRACIONES DE BASE EXISTENTE
-    # --------------------------------------------------------
 
     migraciones = {
         "clientes": [
@@ -668,10 +611,6 @@ def crear_esquema(conn):
                 tipo
             )
 
-    # --------------------------------------------------------
-    # ÍNDICES
-    # --------------------------------------------------------
-
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_compras_proveedor
         ON compras(proveedor_id)
@@ -712,10 +651,6 @@ def crear_esquema(conn):
         ON reglas_contables(rut)
     """)
 
-    # --------------------------------------------------------
-    # ÍNDICES ÚNICOS SEGUROS
-    # --------------------------------------------------------
-
     try:
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS
@@ -747,50 +682,36 @@ def crear_esquema(conn):
 
 PLAN_BASE = [
     ("1", "ACTIVOS", "Activo", "Activo", None, 1),
-
     ("1.1", "Activo Corriente", "Activo", "Activo", "1", 2),
-
     ("1.1.01", "Caja", "Activo", "Activo", "1.1", 3),
     ("1.1.02", "Bancos", "Activo", "Activo", "1.1", 3),
-
     ("1.1.03", "Cuentas por cobrar", "Activo", "Activo", "1.1", 3),
-
     ("1.1.03.01", "Clientes", "Activo", "Activo", "1.1.03", 4),
     ("1.1.03.02", "IVA Crédito Fiscal", "Activo", "Activo", "1.1.03", 4),
-
     ("1.1.04", "Inventarios", "Activo", "Activo", "1.1", 3),
-
     ("1.2", "Activo No Corriente", "Activo", "Activo", "1", 2),
     ("1.2.01", "Propiedades, Planta y Equipos", "Activo", "Activo", "1.2", 3),
     ("1.2.01.01", "Activo Fijo", "Activo", "Activo", "1.2.01", 4),
-
     ("2", "PASIVOS", "Pasivo", "Pasivo", None, 1),
-
     ("2.1", "Pasivo Corriente", "Pasivo", "Pasivo", "2", 2),
     ("2.1.01", "Cuentas por pagar", "Pasivo", "Pasivo", "2.1", 3),
-
     ("2.1.01.01", "Proveedores", "Pasivo", "Pasivo", "2.1.01", 4),
     ("2.1.01.02", "IVA Débito Fiscal", "Pasivo", "Pasivo", "2.1.01", 4),
-
     ("3", "PATRIMONIO", "Patrimonio", "Patrimonio", None, 1),
     ("3.1", "Capital", "Patrimonio", "Patrimonio", "3", 2),
     ("3.1.01", "Capital", "Patrimonio", "Patrimonio", "3.1", 3),
-
     ("4", "INGRESOS", "Nominal", "Ingresos", None, 1),
     ("4.1", "Ingresos Operacionales", "Nominal", "Ingresos", "4", 2),
     ("4.1.01", "Ventas", "Nominal", "Ingresos", "4.1", 3),
     ("4.1.02", "Servicios", "Nominal", "Ingresos", "4.1", 3),
     ("4.1.03", "Otros Ingresos", "Nominal", "Ingresos", "4.1", 3),
-
     ("5", "COSTOS", "Nominal", "Gastos", None, 1),
     ("5.1", "Costos de Venta", "Nominal", "Gastos", "5", 2),
     ("5.1.01", "Costo de Ventas", "Nominal", "Gastos", "5.1", 3),
-
     ("5.2", "GASTOS", "Nominal", "Gastos", None, 1),
     ("5.2.01", "Gastos Generales", "Nominal", "Gastos", "5.2", 3),
     ("5.2.02", "IVA No Recuperable", "Nominal", "Gastos", "5.2", 3),
     ("5.2.03", "IVA Uso Común", "Nominal", "Gastos", "5.2", 3),
-
     ("6", "RESULTADOS", "Nominal", "Gastos", None, 1),
     ("6.1", "Gastos Administrativos", "Nominal", "Gastos", "6", 2),
 ]
@@ -974,10 +895,10 @@ def normalizar_rcv(df, tipo):
 
     compras = tipo == "compras"
 
-    rut_col = (
-        "RUT Proveedor"
+    rut_opciones = (
+        ["RUT Proveedor", "Rut Proveedor", "RUT", "Rut"]
         if compras
-        else "Rut cliente"
+        else ["Rut Cliente", "RUT Cliente", "RUT", "Rut"]
     )
 
     columnas = [
@@ -985,10 +906,15 @@ def normalizar_rcv(df, tipo):
         for c in df.columns
     ]
 
-    if rut_col.lower() not in columnas:
+    encontrado_rut = None
+    for opt in rut_opciones:
+        if opt.lower() in columnas:
+            encontrado_rut = opt
+            break
 
+    if not encontrado_rut:
         raise ValueError(
-            f"No encuentro la columna '{rut_col}'. "
+            f"No encuentro la columna de RUT para {tipo}. "
             "El archivo no parece corresponder al RCV seleccionado."
         )
 
@@ -1000,9 +926,7 @@ def normalizar_rcv(df, tipo):
     ]
 
     for nombre in obligatorias:
-
         if nombre.lower() not in columnas:
-
             raise ValueError(
                 f"Falta la columna obligatoria '{nombre}'."
             )
@@ -1037,7 +961,7 @@ def normalizar_rcv(df, tipo):
     resultado["rut"] = (
         columna(
             df,
-            rut_col
+            encontrado_rut
         )
         .apply(normalizar_rut)
     )
@@ -1192,7 +1116,6 @@ def buscar_regla(conn, tipo, rut, tipo_doc, razon_social=""):
             continue
 
         if pd.notna(regla_tipo_doc):
-
             try:
                 if int(regla_tipo_doc) != int(tipo_doc):
                     continue
@@ -1200,7 +1123,6 @@ def buscar_regla(conn, tipo, rut, tipo_doc, razon_social=""):
                 continue
 
         if patron:
-
             if patron not in razon:
                 continue
 
@@ -1248,16 +1170,9 @@ def preparar_documentos(conn, docs, tipo):
     defecto = roles[rol_defecto]
 
     if defecto is None:
-
         raise ValueError(
             "La cuenta por defecto no está configurada."
         )
-
-    tabla = (
-        "proveedores"
-        if compras
-        else "clientes"
-    )
 
     existentes = set()
 
@@ -1272,18 +1187,21 @@ def preparar_documentos(conn, docs, tipo):
             FROM compras c
             JOIN proveedores p
                 ON p.id = c.proveedor_id
+            WHERE c.tipo_doc IS NOT NULL AND c.folio IS NOT NULL AND p.rut IS NOT NULL
             """
         ).fetchall()
 
         for fila in filas:
-
-            existentes.add(
-                (
-                    normalizar_rut(fila["rut"]),
-                    int(fila["tipo_doc"]),
-                    str(fila["folio"]).strip()
+            try:
+                existentes.add(
+                    (
+                        normalizar_rut(fila["rut"]),
+                        int(fila["tipo_doc"]),
+                        str(fila["folio"]).strip()
+                    )
                 )
-            )
+            except Exception:
+                pass
 
     else:
 
@@ -1291,17 +1209,20 @@ def preparar_documentos(conn, docs, tipo):
             """
             SELECT tipo_doc, folio
             FROM ventas
+            WHERE tipo_doc IS NOT NULL AND folio IS NOT NULL
             """
         ).fetchall()
 
         for fila in filas:
-
-            existentes.add(
-                (
-                    int(fila["tipo_doc"]),
-                    str(fila["folio"]).strip()
+            try:
+                existentes.add(
+                    (
+                        int(fila["tipo_doc"]),
+                        str(fila["folio"]).strip()
+                    )
                 )
-            )
+            except Exception:
+                pass
 
     resultado = docs.copy()
 
@@ -1330,9 +1251,7 @@ def preparar_documentos(conn, docs, tipo):
 
         if not validar_rut(rut):
             estado = "⚠️ RUT inválido"
-            obs.append(
-                "Revisar RUT."
-            )
+            obs.append("Revisar RUT.")
 
         elif not d.fecha_doc:
             estado = "❌ Fecha inválida"
@@ -1360,12 +1279,7 @@ def preparar_documentos(conn, docs, tipo):
             else 1
         )
 
-        # ----------------------------------------------------
-        # Validación matemática
-        # ----------------------------------------------------
-
         if compras:
-
             componentes = (
                 d.exento
                 + d.neto
@@ -1375,9 +1289,7 @@ def preparar_documentos(conn, docs, tipo):
                 + d.iva_af
                 + d.iva_uso_comun
             )
-
         else:
-
             componentes = (
                 d.exento
                 + d.neto
@@ -1389,55 +1301,32 @@ def preparar_documentos(conn, docs, tipo):
         )
 
         if abs(diferencia) > 1:
-
             obs.append(
                 f"Diferencia entre total y componentes: "
                 f"{money(diferencia)}."
             )
 
         if d.exento > 0 and d.neto > 0:
-
-            obs.append(
-                "Documento mixto: exento y afecto."
-            )
+            obs.append("Documento mixto: exento y afecto.")
 
         if compras and d.iva_no_rec > 0:
-
-            obs.append(
-                "Contiene IVA no recuperable."
-            )
+            obs.append("Contiene IVA no recuperable.")
 
         if compras and d.iva_uso_comun > 0:
-
-            obs.append(
-                "Contiene IVA de uso común."
-            )
+            obs.append("Contiene IVA de uso común.")
 
         if compras and d.neto_af > 0:
-
-            obs.append(
-                "Contiene activo fijo."
-            )
+            obs.append("Contiene activo fijo.")
 
         if signo < 0:
-
             if d.ref_folio:
-
                 obs.append(
                     "Nota de crédito asociada a "
                     f"{nombre_documento(d.ref_tipo)} "
                     f"N° {d.ref_folio}."
                 )
-
             else:
-
-                obs.append(
-                    "Nota de crédito sin documento de referencia."
-                )
-
-        # ----------------------------------------------------
-        # Determinación de cuenta
-        # ----------------------------------------------------
+                obs.append("Nota de crédito sin documento de referencia.")
 
         cuenta = None
         origen = None
@@ -1451,44 +1340,32 @@ def preparar_documentos(conn, docs, tipo):
         )
 
         if regla:
-
             cuenta = limpiar_texto(
                 regla["codigo_cuenta"]
             )
-
-            origen = (
-                f"Regla #{int(regla['id'])}"
-            )
+            origen = f"Regla #{int(regla['id'])}"
 
         if not cuenta:
-
             habitual = cuenta_habitual(
                 conn,
                 tipo,
                 rut
             )
-
             if habitual:
-
                 cuenta = habitual
                 origen = "Cuenta habitual"
 
         if not cuenta:
-
             cuenta = defecto[0]
             origen = "Cuenta por defecto"
-
             if estado == "🟢 Nuevo":
-
                 estado = "🟡 Revisar cuenta"
 
         if cuenta not in plan.hojas:
-
             obs.append(
                 "La cuenta sugerida no es imputable "
                 "o no existe en el plan."
             )
-
             if estado.startswith("🟢"):
                 estado = "🟡 Revisar cuenta"
 
@@ -1496,9 +1373,7 @@ def preparar_documentos(conn, docs, tipo):
         cuentas.append(cuenta)
         origenes.append(origen)
         signos.append(signo)
-        observaciones.append(
-            " ".join(obs)
-        )
+        observaciones.append(" ".join(obs))
 
     resultado["estado"] = estados
     resultado["cuenta_sugerida"] = cuentas
@@ -1530,21 +1405,10 @@ def armar_asiento(doc, tipo, cuenta, roles):
             + float(doc.iva_af)
         )
 
-        iva_no_rec = float(
-            doc.iva_no_rec
-        )
-
-        iva_uso = float(
-            doc.iva_uso_comun
-        )
-
-        activo_fijo = float(
-            doc.neto_af
-        )
-
-        exento = float(
-            doc.exento
-        )
+        iva_no_rec = float(doc.iva_no_rec)
+        iva_uso = float(doc.iva_uso_comun)
+        activo_fijo = float(doc.neto_af)
+        exento = float(doc.exento)
 
         principal = (
             total
@@ -1552,8 +1416,6 @@ def armar_asiento(doc, tipo, cuenta, roles):
             - activo_fijo
         )
 
-        # IVA no recuperable y uso común
-        # deben formar parte del gasto.
         if principal < 0:
             raise ValueError(
                 f"Documento {doc.folio}: "
@@ -1562,90 +1424,35 @@ def armar_asiento(doc, tipo, cuenta, roles):
 
         debe = []
 
-        # Cuenta principal:
         if principal > 0:
-            debe.append(
-                (cuenta, principal)
-            )
+            debe.append((cuenta, principal))
 
         if activo_fijo > 0:
-
             if roles["activo_fijo"] is None:
-                raise ValueError(
-                    "No está configurada la cuenta "
-                    "de activo fijo."
-                )
-
-            debe.append(
-                (
-                    roles["activo_fijo"][0],
-                    activo_fijo
-                )
-            )
+                raise ValueError("No está configurada la cuenta de activo fijo.")
+            debe.append((roles["activo_fijo"][0], activo_fijo))
 
         if iva_recuperable > 0:
-
-            debe.append(
-                (
-                    roles["iva_credito"][0],
-                    iva_recuperable
-                )
-            )
+            debe.append((roles["iva_credito"][0], iva_recuperable))
 
         if iva_no_rec > 0:
-
-            cuenta_iva_nr = (
-                roles["iva_no_recuperable"]
-            )
-
+            cuenta_iva_nr = roles["iva_no_recuperable"]
             if cuenta_iva_nr is None:
-                raise ValueError(
-                    "No está configurada la cuenta "
-                    "de IVA no recuperable."
-                )
-
-            debe.append(
-                (
-                    cuenta_iva_nr[0],
-                    iva_no_rec
-                )
-            )
+                raise ValueError("No está configurada la cuenta de IVA no recuperable.")
+            debe.append((cuenta_iva_nr[0], iva_no_rec))
 
         if iva_uso > 0:
-
-            cuenta_iva_uc = (
-                roles["iva_uso_comun"]
-            )
-
+            cuenta_iva_uc = roles["iva_uso_comun"]
             if cuenta_iva_uc is None:
-                raise ValueError(
-                    "No está configurada la cuenta "
-                    "de IVA de uso común."
-                )
+                raise ValueError("No está configurada la cuenta de IVA de uso común.")
+            debe.append((cuenta_iva_uc[0], iva_uso))
 
-            debe.append(
-                (
-                    cuenta_iva_uc[0],
-                    iva_uso
-                )
-            )
-
-        haber = [
-            (
-                roles["proveedores"][0],
-                total
-            )
-        ]
+        haber = [(roles["proveedores"][0], total)]
 
     else:
 
-        iva = float(
-            doc.iva
-        )
-
-        principal = (
-            total - iva
-        )
+        iva = float(doc.iva)
+        principal = total - iva
 
         if principal < 0:
             raise ValueError(
@@ -1653,79 +1460,32 @@ def armar_asiento(doc, tipo, cuenta, roles):
                 "IVA superior al total."
             )
 
-        debe = [
-            (
-                roles["clientes"][0],
-                total
-            )
-        ]
-
+        debe = [(roles["clientes"][0], total)]
         haber = []
 
         if principal > 0:
-
-            haber.append(
-                (
-                    cuenta,
-                    principal
-                )
-            )
+            haber.append((cuenta, principal))
 
         if iva > 0:
+            haber.append((roles["iva_debito"][0], iva))
 
-            haber.append(
-                (
-                    roles["iva_debito"][0],
-                    iva
-                )
-            )
-
-    # Nota de crédito = inversión
     if int(doc.signo) < 0:
-
-        debe, haber = (
-            haber,
-            debe
-        )
+        debe, haber = haber, debe
 
     lineas = []
 
     for codigo, monto in debe:
-
         if monto > 0:
-
-            lineas.append(
-                (
-                    codigo,
-                    round(monto, 2),
-                    0.0
-                )
-            )
+            lineas.append((codigo, round(monto, 2), 0.0))
 
     for codigo, monto in haber:
-
         if monto > 0:
+            lineas.append((codigo, 0.0, round(monto, 2)))
 
-            lineas.append(
-                (
-                    codigo,
-                    0.0,
-                    round(monto, 2)
-                )
-            )
+    total_debe = sum(x[1] for x in lineas)
+    total_haber = sum(x[2] for x in lineas)
 
-    total_debe = sum(
-        x[1] for x in lineas
-    )
-
-    total_haber = sum(
-        x[2] for x in lineas
-    )
-
-    if abs(
-        total_debe - total_haber
-    ) > 0.01:
-
+    if abs(total_debe - total_haber) > 0.01:
         raise ValueError(
             f"Documento {doc.folio}: "
             f"asiento descuadrado. "
@@ -1748,9 +1508,7 @@ def siguiente_asiento(conn):
         """
     ).fetchone()
 
-    return int(
-        fila[0] or 0
-    )
+    return int(fila[0] or 0)
 
 
 # ============================================================
@@ -1795,12 +1553,9 @@ def obtener_entidad(
                 fila["id"]
             )
         )
-
         return fila["id"]
 
-    ahora = datetime.now().isoformat(
-        timespec="seconds"
-    )
+    ahora = datetime.now().isoformat(timespec="seconds")
 
     cur = conn.execute(
         f"""
@@ -1841,17 +1596,11 @@ def contabilizar_rcv(
     lote = (
         "RCV-COMPRAS-"
         if compras
-        else
-        "RCV-VENTAS-"
-    ) + datetime.now().strftime(
-        "%Y%m%d-%H%M%S"
-    )
+        else "RCV-VENTAS-"
+    ) + datetime.now().strftime("%Y%m%d-%H%M%S")
 
     cur = conn.cursor()
-
-    asiento = siguiente_asiento(
-        conn
-    )
+    asiento = siguiente_asiento(conn)
 
     documentos = 0
     total_debe = 0.0
@@ -1862,18 +1611,14 @@ def contabilizar_rcv(
         for d in docs.itertuples():
 
             if d.cuenta_codigo not in plan.hojas:
-
                 raise ValueError(
-                    f"La cuenta "
-                    f"{d.cuenta_codigo} "
-                    f"no es imputable."
+                    f"La cuenta {d.cuenta_codigo} no es imputable."
                 )
 
             tabla_entidad = (
                 "proveedores"
                 if compras
-                else
-                "clientes"
+                else "clientes"
             )
 
             entidad_id = obtener_entidad(
@@ -1886,11 +1631,7 @@ def contabilizar_rcv(
             fecha = (
                 d.fecha_doc
                 if fecha_modo == "documento"
-                else
-                (
-                    d.fecha_recepcion
-                    or d.fecha_doc
-                )
+                else (d.fecha_recepcion or d.fecha_doc)
             )
 
             glosa = (
@@ -1910,10 +1651,7 @@ def contabilizar_rcv(
 
             if compras:
 
-                cuenta_nombre = plan.hojas[
-                    d.cuenta_codigo
-                ]
-
+                cuenta_nombre = plan.hojas[d.cuenta_codigo]
                 centro = "General / Ninguno"
 
                 fila_cc = conn.execute(
@@ -1951,13 +1689,9 @@ def contabilizar_rcv(
                         entidad_id,
                         cuenta_nombre,
                         centro,
-                        float(d.neto)
-                        + float(d.exento)
-                        + float(d.neto_af),
-                        float(d.iva)
-                        + float(d.iva_af),
-                        int(d.signo)
-                        * float(d.total),
+                        float(d.neto) + float(d.exento) + float(d.neto_af),
+                        float(d.iva) + float(d.iva_af),
+                        int(d.signo) * float(d.total),
                         glosa,
                         int(d.tipo_doc),
                         str(d.folio),
@@ -1967,9 +1701,7 @@ def contabilizar_rcv(
 
             else:
 
-                cuenta_nombre = plan.hojas[
-                    d.cuenta_codigo
-                ]
+                cuenta_nombre = plan.hojas[d.cuenta_codigo]
 
                 cur.execute(
                     """
@@ -1992,11 +1724,9 @@ def contabilizar_rcv(
                         fecha,
                         entidad_id,
                         cuenta_nombre,
-                        float(d.neto)
-                        + float(d.exento),
+                        float(d.neto) + float(d.exento),
                         float(d.iva),
-                        int(d.signo)
-                        * float(d.total),
+                        int(d.signo) * float(d.total),
                         glosa,
                         int(d.tipo_doc),
                         str(d.folio),
@@ -2036,8 +1766,7 @@ def contabilizar_rcv(
                         (
                             "RCV Compras"
                             if compras
-                            else
-                            "RCV Ventas"
+                            else "RCV Ventas"
                         )
                     )
                 )
@@ -2045,9 +1774,7 @@ def contabilizar_rcv(
                 total_debe += debe
 
             if recordar:
-
                 if d.cuenta_codigo != d.cuenta_sugerida:
-
                     cur.execute(
                         f"""
                         UPDATE {tabla_entidad}
@@ -2059,7 +1786,6 @@ def contabilizar_rcv(
                             entidad_id
                         )
                     )
-
                     cuentas_recordadas += 1
 
             documentos += 1
@@ -2067,7 +1793,6 @@ def contabilizar_rcv(
         conn.commit()
 
     except Exception:
-
         conn.rollback()
         raise
 
@@ -2097,30 +1822,18 @@ def registrar_pago_cliente(
     plan = Plan(conn)
 
     if roles["clientes"] is None:
-        raise ValueError(
-            "Cuenta de clientes no configurada."
-        )
+        raise ValueError("Cuenta de clientes no configurada.")
 
     if not cuenta_banco:
-        raise ValueError(
-            "Debe seleccionar una cuenta bancaria."
-        )
+        raise ValueError("Debe seleccionar una cuenta bancaria.")
 
     if cuenta_banco not in plan.hojas:
-        raise ValueError(
-            "La cuenta bancaria no es imputable."
-        )
+        raise ValueError("La cuenta bancaria no es imputable.")
 
-    lote = (
-        "PAGO-CLIENTE-"
-        + datetime.now().strftime(
-            "%Y%m%d-%H%M%S"
-        )
-    )
-
+    lote = "PAGO-CLIENTE-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     cur = conn.cursor()
 
-    pago_id = cur.execute(
+    cur.execute(
         """
         INSERT INTO pagos_clientes
         (
@@ -2143,15 +1856,10 @@ def registrar_pago_cliente(
             glosa,
             lote
         )
-    ).lastrowid
+    )
 
-    asiento = siguiente_asiento(
-        conn
-    ) + 1
-
-    nombre_banco = plan.hojas[
-        cuenta_banco
-    ]
+    asiento = siguiente_asiento(conn) + 1
+    nombre_banco = plan.hojas[cuenta_banco]
 
     nombre_cliente = conn.execute(
         """
@@ -2165,10 +1873,7 @@ def registrar_pago_cliente(
         (cliente_id,)
     ).fetchone()[0]
 
-    glosa_final = (
-        glosa
-        or f"Pago cliente - {nombre_cliente}"
-    )
+    glosa_final = glosa or f"Pago cliente - {nombre_cliente}"
 
     cur.execute(
         """
@@ -2233,7 +1938,6 @@ def registrar_pago_cliente(
     )
 
     conn.commit()
-
     return lote
 
 
@@ -2251,25 +1955,15 @@ def registrar_pago_proveedor(
     plan = Plan(conn)
 
     if roles["proveedores"] is None:
-        raise ValueError(
-            "Cuenta de proveedores no configurada."
-        )
+        raise ValueError("Cuenta de proveedores no configurada.")
 
     if cuenta_banco not in plan.hojas:
-        raise ValueError(
-            "La cuenta bancaria no es imputable."
-        )
+        raise ValueError("La cuenta bancaria no es imputable.")
 
-    lote = (
-        "PAGO-PROVEEDOR-"
-        + datetime.now().strftime(
-            "%Y%m%d-%H%M%S"
-        )
-    )
-
+    lote = "PAGO-PROVEEDOR-" + datetime.now().strftime("%Y%m%d-%H%M%S")
     cur = conn.cursor()
 
-    pago_id = cur.execute(
+    cur.execute(
         """
         INSERT INTO pagos_proveedores
         (
@@ -2292,15 +1986,10 @@ def registrar_pago_proveedor(
             glosa,
             lote
         )
-    ).lastrowid
+    )
 
-    asiento = siguiente_asiento(
-        conn
-    ) + 1
-
-    nombre_banco = plan.hojas[
-        cuenta_banco
-    ]
+    asiento = siguiente_asiento(conn) + 1
+    nombre_banco = plan.hojas[cuenta_banco]
 
     nombre_proveedor = conn.execute(
         """
@@ -2314,10 +2003,7 @@ def registrar_pago_proveedor(
         (proveedor_id,)
     ).fetchone()[0]
 
-    glosa_final = (
-        glosa
-        or f"Pago proveedor - {nombre_proveedor}"
-    )
+    glosa_final = glosa or f"Pago proveedor - {nombre_proveedor}"
 
     cur.execute(
         """
@@ -2382,7 +2068,6 @@ def registrar_pago_proveedor(
     )
 
     conn.commit()
-
     return lote
 
 
@@ -2410,7 +2095,6 @@ def estado_cuenta_cliente(
         return pd.DataFrame()
 
     params = [cliente_id]
-
     filtro = ""
 
     if desde:
@@ -2440,7 +2124,6 @@ def estado_cuenta_cliente(
     )
 
     params = [cliente_id]
-
     filtro = ""
 
     if desde:
@@ -2472,38 +2155,19 @@ def estado_cuenta_cliente(
         params=params
     )
 
-    df = pd.concat(
-        [ventas, pagos],
-        ignore_index=True
-    )
+    df = pd.concat([ventas, pagos], ignore_index=True)
 
     if df.empty:
         return df
 
-    df = df.sort_values(
-        ["fecha"]
-    ).reset_index(
-        drop=True
-    )
-
-    df["cargo"] = pd.to_numeric(
-        df["cargo"]
-    )
-
-    df["abono"] = pd.to_numeric(
-        df["abono"]
-    )
-
-    df["saldo"] = (
-        df["cargo"]
-        - df["abono"]
-    ).cumsum()
+    df = df.sort_values(["fecha"]).reset_index(drop=True)
+    df["cargo"] = pd.to_numeric(df["cargo"])
+    df["abono"] = pd.to_numeric(df["abono"])
+    df["saldo"] = (df["cargo"] - df["abono"]).cumsum()
 
     df["Documento"] = df.apply(
-        lambda r:
-        (
-            f"{nombre_documento(r['tipo_doc'])} "
-            f"N° {r['folio']}"
+        lambda r: (
+            f"{nombre_documento(r['tipo_doc'])} N° {r['folio']}"
             if pd.notna(r["tipo_doc"])
             else ""
         ),
@@ -2533,7 +2197,6 @@ def estado_cuenta_proveedor(
         return pd.DataFrame()
 
     params = [proveedor_id]
-
     filtro = ""
 
     if desde:
@@ -2563,7 +2226,6 @@ def estado_cuenta_proveedor(
     )
 
     params = [proveedor_id]
-
     filtro = ""
 
     if desde:
@@ -2595,38 +2257,19 @@ def estado_cuenta_proveedor(
         params=params
     )
 
-    df = pd.concat(
-        [compras, pagos],
-        ignore_index=True
-    )
+    df = pd.concat([compras, pagos], ignore_index=True)
 
     if df.empty:
         return df
 
-    df = df.sort_values(
-        ["fecha"]
-    ).reset_index(
-        drop=True
-    )
-
-    df["cargo"] = pd.to_numeric(
-        df["cargo"]
-    )
-
-    df["abono"] = pd.to_numeric(
-        df["abono"]
-    )
-
-    df["saldo"] = (
-        df["cargo"]
-        - df["abono"]
-    ).cumsum()
+    df = df.sort_values(["fecha"]).reset_index(drop=True)
+    df["cargo"] = pd.to_numeric(df["cargo"])
+    df["abono"] = pd.to_numeric(df["abono"])
+    df["saldo"] = (df["cargo"] - df["abono"]).cumsum()
 
     df["Documento"] = df.apply(
-        lambda r:
-        (
-            f"{nombre_documento(r['tipo_doc'])} "
-            f"N° {r['folio']}"
+        lambda r: (
+            f"{nombre_documento(r['tipo_doc'])} N° {r['folio']}"
             if pd.notna(r["tipo_doc"])
             else ""
         ),
@@ -2643,7 +2286,6 @@ def estado_cuenta_proveedor(
 def conciliacion_clientes(conn):
 
     roles = cargar_roles(conn)
-
     if roles["clientes"] is None:
         return pd.DataFrame()
 
@@ -2693,20 +2335,14 @@ def conciliacion_clientes(conn):
         conn
     )
 
-    saldo_auxiliar = (
-        clientes["saldo_auxiliar"].sum()
-        if not clientes.empty
-        else 0
-    )
+    saldo_auxiliar = clientes["saldo_auxiliar"].sum() if not clientes.empty else 0
 
     return pd.DataFrame(
         [{
             "Cuenta contable": codigo,
             "Saldo contable": saldo_contable,
             "Saldo auxiliar": saldo_auxiliar,
-            "Diferencia":
-                saldo_contable
-                - saldo_auxiliar,
+            "Diferencia": saldo_contable - saldo_auxiliar,
         }]
     )
 
@@ -2714,7 +2350,6 @@ def conciliacion_clientes(conn):
 def conciliacion_proveedores(conn):
 
     roles = cargar_roles(conn)
-
     if roles["proveedores"] is None:
         return pd.DataFrame()
 
@@ -2764,20 +2399,14 @@ def conciliacion_proveedores(conn):
         conn
     )
 
-    saldo_auxiliar = (
-        proveedores["saldo_auxiliar"].sum()
-        if not proveedores.empty
-        else 0
-    )
+    saldo_auxiliar = proveedores["saldo_auxiliar"].sum() if not proveedores.empty else 0
 
     return pd.DataFrame(
         [{
             "Cuenta contable": codigo,
             "Saldo contable": saldo_contable,
             "Saldo auxiliar": saldo_auxiliar,
-            "Diferencia":
-                saldo_contable
-                - saldo_auxiliar,
+            "Diferencia": saldo_contable - saldo_auxiliar,
         }]
     )
 
@@ -2794,31 +2423,21 @@ def obtener_mayor(
 ):
 
     plan = Plan(conn)
-
     if codigo not in plan.todos:
         return pd.DataFrame()
 
-    filtros = [
-        "codigo_cuenta = ?"
-    ]
-
+    filtros = ["codigo_cuenta = ?"]
     params = [codigo]
 
     if desde:
-        filtros.append(
-            "fecha >= ?"
-        )
+        filtros.append("fecha >= ?")
         params.append(desde)
 
     if hasta:
-        filtros.append(
-            "fecha <= ?"
-        )
+        filtros.append("fecha <= ?")
         params.append(hasta)
 
-    where = " AND ".join(
-        filtros
-    )
+    where = " AND ".join(filtros)
 
     df = pd.read_sql_query(
         f"""
@@ -2838,11 +2457,7 @@ def obtener_mayor(
     )
 
     if not df.empty:
-
-        df["Saldo"] = (
-            df["Movimiento"]
-            .cumsum()
-        )
+        df["Saldo"] = df["Movimiento"].cumsum()
 
     return df
 
@@ -2857,27 +2472,16 @@ def balance_comprobacion(
     params = []
 
     if desde:
-
-        filtros.append(
-            "d.fecha >= ?"
-        )
+        filtros.append("d.fecha >= ?")
         params.append(desde)
 
     if hasta:
-
-        filtros.append(
-            "d.fecha <= ?"
-        )
+        filtros.append("d.fecha <= ?")
         params.append(hasta)
 
     where = ""
-
     if filtros:
-
-        where = (
-            "WHERE "
-            + " AND ".join(filtros)
-        )
+        where = "WHERE " + " AND ".join(filtros)
 
     return pd.read_sql_query(
         f"""
@@ -2922,9 +2526,7 @@ def listar_lotes(conn):
             origen AS Origen,
             MIN(fecha) AS Desde,
             MAX(fecha) AS Hasta,
-            COUNT(
-                DISTINCT asiento_id
-            ) AS Asientos,
+            COUNT(DISTINCT asiento_id) AS Asientos,
             SUM(debe) AS Total_Debe,
             SUM(haber) AS Total_Haber
         FROM libro_diario
@@ -2941,11 +2543,8 @@ def listar_lotes(conn):
 def deshacer_lote(conn, lote):
 
     cur = conn.cursor()
-
     try:
-
         borrados = {}
-
         for tabla in (
             "libro_diario",
             "compras",
@@ -2953,7 +2552,6 @@ def deshacer_lote(conn, lote):
             "pagos_clientes",
             "pagos_proveedores",
         ):
-
             resultado = cur.execute(
                 f"""
                 DELETE FROM {tabla}
@@ -2961,17 +2559,11 @@ def deshacer_lote(conn, lote):
                 """,
                 (lote,)
             )
-
-            borrados[tabla] = (
-                resultado.rowcount
-            )
+            borrados[tabla] = resultado.rowcount
 
         conn.commit()
-
         return borrados
-
     except Exception:
-
         conn.rollback()
         raise
 
@@ -3016,7 +2608,6 @@ def guardar_regla(
             descripcion
         )
     )
-
     conn.commit()
 
 
@@ -3029,7 +2620,6 @@ conn = conectar()
 crear_esquema(conn)
 instalar_plan_base(conn)
 
-# Actualizar roles después de instalar plan
 roles_actuales = cargar_roles(conn)
 
 if "config_cuentas" not in st.session_state:
@@ -3041,10 +2631,7 @@ if "config_cuentas" not in st.session_state:
 # ============================================================
 
 st.sidebar.title("📊 SGCI")
-
-st.sidebar.caption(
-    "Sistema de Gestión Contable Integral"
-)
+st.sidebar.caption("Sistema de Gestión Contable Integral")
 
 menu = st.sidebar.radio(
     "Módulo",
@@ -3074,9 +2661,7 @@ menu = st.sidebar.radio(
 if menu == "🏠 Inicio":
 
     st.title("📊 SGCI")
-    st.subheader(
-        "Sistema de Gestión Contable Integral"
-    )
+    st.subheader("Sistema de Gestión Contable Integral")
 
     diario = pd.read_sql_query(
         """
@@ -3089,110 +2674,51 @@ if menu == "🏠 Inicio":
         conn
     ).iloc[0]
 
-    clientes = conn.execute(
-        "SELECT COUNT(*) FROM clientes"
-    ).fetchone()[0]
-
-    proveedores = conn.execute(
-        "SELECT COUNT(*) FROM proveedores"
-    ).fetchone()[0]
+    clientes = conn.execute("SELECT COUNT(*) FROM clientes").fetchone()[0]
+    proveedores = conn.execute("SELECT COUNT(*) FROM proveedores").fetchone()[0]
 
     facturas = conn.execute(
         """
         SELECT
-            (
-                SELECT COUNT(*)
-                FROM compras
-            )
+            (SELECT COUNT(*) FROM compras)
             +
-            (
-                SELECT COUNT(*)
-                FROM ventas
-            )
+            (SELECT COUNT(*) FROM ventas)
         """
     ).fetchone()[0]
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric(
-        "Movimientos",
-        int(diario["movimientos"])
-    )
-
-    c2.metric(
-        "Clientes",
-        clientes
-    )
-
-    c3.metric(
-        "Proveedores",
-        proveedores
-    )
-
-    c4.metric(
-        "Documentos",
-        facturas
-    )
+    c1.metric("Movimientos", int(diario["movimientos"]))
+    c2.metric("Clientes", clientes)
+    c3.metric("Proveedores", proveedores)
+    c4.metric("Documentos", facturas)
 
     st.divider()
 
     col1, col2 = st.columns(2)
 
     with col1:
-
-        st.subheader(
-            "Control de cuadre"
-        )
-
-        diferencia = (
-            float(diario["debe"])
-            - float(diario["haber"])
-        )
+        st.subheader("Control de cuadre")
+        diferencia = float(diario["debe"]) - float(diario["haber"])
 
         if abs(diferencia) < 0.01:
-
-            st.success(
-                "🟢 Libro Diario cuadrado"
-            )
-
+            st.success("🟢 Libro Diario cuadrado")
         else:
+            st.error(f"🔴 Diferencia: {money(diferencia)}")
 
-            st.error(
-                f"🔴 Diferencia: {money(diferencia)}"
-            )
-
-        st.write(
-            f"Debe: **{money(diario['debe'])}**"
-        )
-
-        st.write(
-            f"Haber: **{money(diario['haber'])}**"
-        )
+        st.write(f"Debe: **{money(diario['debe'])}**")
+        st.write(f"Haber: **{money(diario['haber'])}**")
 
     with col2:
-
-        st.subheader(
-            "Estado del sistema"
-        )
-
-        st.success(
-            "Base de datos conectada"
-        )
-
-        st.write(
-            f"Base: `{DB_FILE}`"
-        )
-
-        st.write(
-            f"Fecha: {date.today().strftime('%d/%m/%Y')}"
-        )
+        st.subheader("Estado del sistema")
+        st.success("Base de datos conectada")
+        st.write(f"Base: `{DB_FILE}`")
+        st.write(f"Fecha: {date.today().strftime('%d/%m/%Y')}")
 
     st.divider()
-
     st.info(
         """
         Flujo recomendado:
-
         1. Cargar RCV.
         2. Revisar documentos.
         3. Confirmar cuentas contables.
@@ -3210,9 +2736,7 @@ if menu == "🏠 Inicio":
 
 elif menu == "📥 RCV Compras":
 
-    st.title(
-        "📥 Registro de Compras - SII"
-    )
+    st.title("📥 Registro de Compras - SII")
 
     archivo = st.file_uploader(
         "Cargar RCV de Compras",
@@ -3221,82 +2745,36 @@ elif menu == "📥 RCV Compras":
     )
 
     if archivo:
-
         try:
+            df_original = leer_csv(archivo)
+            st.success(f"Archivo leído: {len(df_original):,} filas")
 
-            df_original = leer_csv(
-                archivo
-            )
+            df = normalizar_rcv(df_original, "compras")
+            df = preparar_documentos(conn, df, "compras")
 
-            st.success(
-                f"Archivo leído: "
-                f"{len(df_original):,} filas"
-            )
-
-            df = normalizar_rcv(
-                df_original,
-                "compras"
-            )
-
-            df = preparar_documentos(
-                conn,
-                df,
-                "compras"
-            )
-
-            st.session_state[
-                "rcv_compras"
-            ] = df
-
+            st.session_state["rcv_compras"] = df
         except Exception as e:
-
-            st.error(
-                f"Error: {e}"
-            )
+            st.error(f"Error: {e}")
 
     if "rcv_compras" in st.session_state:
 
-        df = st.session_state[
-            "rcv_compras"
-        ].copy()
+        df = st.session_state["rcv_compras"].copy()
 
         st.divider()
-
-        st.subheader(
-            "Resumen de importación"
-        )
+        st.subheader("Resumen de importación")
 
         total = df["total"].sum()
         neto = df["neto"].sum()
         iva = df["iva"].sum()
 
         c1, c2, c3, c4 = st.columns(4)
-
-        c1.metric(
-            "Documentos",
-            len(df)
-        )
-
-        c2.metric(
-            "Neto",
-            money(neto)
-        )
-
-        c3.metric(
-            "IVA",
-            money(iva)
-        )
-
-        c4.metric(
-            "Total",
-            money(total)
-        )
+        c1.metric("Documentos", len(df))
+        c2.metric("Neto", money(neto))
+        c3.metric("IVA", money(iva))
+        c4.metric("Total", money(total))
 
         st.divider()
-
-        st.subheader(
-            "Bandeja de revisión"
-        )
+        st.subheader("Bandeja de revisión")
 
         columnas = [
             "estado",
@@ -3313,13 +2791,7 @@ elif menu == "📥 RCV Compras":
             "observaciones",
         ]
 
-        mostrar = df[
-            [
-                c for c in columnas
-                if c in df.columns
-            ]
-        ].copy()
-
+        mostrar = df[[c for c in columnas if c in df.columns]].copy()
         mostrar = mostrar.rename(
             columns={
                 "estado": "Estado",
@@ -3337,128 +2809,51 @@ elif menu == "📥 RCV Compras":
             }
         )
 
-        st.dataframe(
-            mostrar,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(mostrar, use_container_width=True, hide_index=True)
 
         st.divider()
+        st.subheader("Revisión y asignación de cuentas")
 
-        st.subheader(
-            "Revisión y asignación de cuentas"
-        )
-
-        opciones = cuentas_imputables(
-            conn
-        )
-
-        etiquetas = opciones[
-            "etiqueta"
-        ].tolist()
+        opciones = cuentas_imputables(conn)
+        etiquetas = opciones["etiqueta"].tolist()
 
         for i in range(len(df)):
-
-            estado = df.loc[
-                i,
-                "estado"
-            ]
-
-            if (
-                estado.startswith("🔁")
-                or estado.startswith("❌")
-                or estado.startswith("⚠️")
-            ):
+            estado = df.loc[i, "estado"]
+            if estado.startswith("🔁") or estado.startswith("❌") or estado.startswith("⚠️"):
                 continue
 
-            cuenta_actual = df.loc[
-                i,
-                "cuenta_codigo"
-            ]
-
-            if cuenta_actual in opciones[
-                "codigo"
-            ].values:
-
-                indice = opciones[
-                    "codigo"
-                ].tolist().index(
-                    cuenta_actual
-                )
-
+            cuenta_actual = df.loc[i, "cuenta_codigo"]
+            if cuenta_actual in opciones["codigo"].values:
+                indice = opciones["codigo"].tolist().index(cuenta_actual)
             else:
-
                 indice = 0
 
             nueva = st.selectbox(
-                f"{df.loc[i, 'fecha_doc']} | "
-                f"{df.loc[i, 'razon_social']} | "
-                f"Doc. {df.loc[i, 'folio']}",
+                f"{df.loc[i, 'fecha_doc']} | {df.loc[i, 'razon_social']} | Doc. {df.loc[i, 'folio']}",
                 etiquetas,
                 index=indice,
                 key=f"compra_cta_{i}"
             )
 
-            codigo = nueva.split(
-                " - ",
-                1
-            )[0]
+            codigo = nueva.split(" - ", 1)[0]
+            df.loc[i, "cuenta_codigo"] = codigo
 
-            df.loc[
-                i,
-                "cuenta_codigo"
-            ] = codigo
+        st.session_state["rcv_compras"] = df
 
-        st.session_state[
-            "rcv_compras"
-        ] = df
-
-        validos = df[
-            df["estado"].isin(
-                [
-                    "🟢 Nuevo",
-                    "🟡 Revisar cuenta"
-                ]
-            )
-        ].copy()
+        validos = df[df["estado"].isin(["🟢 Nuevo", "🟡 Revisar cuenta"])].copy()
 
         st.divider()
 
         if not validos.empty:
+            st.warning(f"{len(validos)} documento(s) listos para contabilizar.")
 
-            st.warning(
-                f"{len(validos)} documento(s) "
-                "listos para contabilizar."
-            )
-
-            if st.button(
-                "✅ CONTABILIZAR COMPRAS",
-                type="primary"
-            ):
-
+            if st.button("✅ CONTABILIZAR COMPRAS", type="primary"):
                 try:
-
-                    resultado = contabilizar_rcv(
-                        conn,
-                        "compras",
-                        validos
-                    )
-
-                    st.success(
-                        f"Se contabilizaron "
-                        f"{resultado['documentos']} "
-                        "documentos."
-                    )
-
-                    del st.session_state[
-                        "rcv_compras"
-                    ]
-
+                    resultado = contabilizar_rcv(conn, "compras", validos)
+                    st.success(f"Se contabilizaron {resultado['documentos']} documentos.")
+                    del st.session_state["rcv_compras"]
                 except Exception as e:
-
-                    st.error(
-                        f"No se contabilizó el lote: {e}"
-                    )
+                    st.error(f"No se contabilizó el lote: {e}")
 
 
 # ============================================================
@@ -3467,9 +2862,7 @@ elif menu == "📥 RCV Compras":
 
 elif menu == "📤 RCV Ventas":
 
-    st.title(
-        "📤 Registro de Ventas - SII"
-    )
+    st.title("📤 Registro de Ventas - SII")
 
     archivo = st.file_uploader(
         "Cargar RCV de Ventas",
@@ -3478,71 +2871,28 @@ elif menu == "📤 RCV Ventas":
     )
 
     if archivo:
-
         try:
+            df_original = leer_csv(archivo)
+            df = normalizar_rcv(df_original, "ventas")
+            df = preparar_documentos(conn, df, "ventas")
 
-            df_original = leer_csv(
-                archivo
-            )
-
-            df = normalizar_rcv(
-                df_original,
-                "ventas"
-            )
-
-            df = preparar_documentos(
-                conn,
-                df,
-                "ventas"
-            )
-
-            st.session_state[
-                "rcv_ventas"
-            ] = df
-
-            st.success(
-                f"{len(df):,} documentos encontrados."
-            )
-
+            st.session_state["rcv_ventas"] = df
+            st.success(f"{len(df):,} documentos encontrados.")
         except Exception as e:
-
-            st.error(
-                f"Error: {e}"
-            )
+            st.error(f"Error: {e}")
 
     if "rcv_ventas" in st.session_state:
 
-        df = st.session_state[
-            "rcv_ventas"
-        ].copy()
+        df = st.session_state["rcv_ventas"].copy()
 
         c1, c2, c3, c4 = st.columns(4)
-
-        c1.metric(
-            "Documentos",
-            len(df)
-        )
-
-        c2.metric(
-            "Neto",
-            money(df["neto"].sum())
-        )
-
-        c3.metric(
-            "IVA",
-            money(df["iva"].sum())
-        )
-
-        c4.metric(
-            "Total",
-            money(df["total"].sum())
-        )
+        c1.metric("Documentos", len(df))
+        c2.metric("Neto", money(df["neto"].sum()))
+        c3.metric("IVA", money(df["iva"].sum()))
+        c4.metric("Total", money(df["total"].sum()))
 
         st.divider()
-
-        st.subheader(
-            "Bandeja de revisión"
-        )
+        st.subheader("Bandeja de revisión")
 
         mostrar = df[
             [
@@ -3576,117 +2926,45 @@ elif menu == "📤 RCV Ventas":
             }
         )
 
-        st.dataframe(
-            mostrar,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(mostrar, use_container_width=True, hide_index=True)
 
-        st.subheader(
-            "Asignación de cuentas de ingreso"
-        )
+        st.subheader("Asignación de cuentas de ingreso")
 
-        opciones = cuentas_imputables(
-            conn
-        )
-
-        etiquetas = opciones[
-            "etiqueta"
-        ].tolist()
+        opciones = cuentas_imputables(conn)
+        etiquetas = opciones["etiqueta"].tolist()
 
         for i in range(len(df)):
-
-            estado = df.loc[
-                i,
-                "estado"
-            ]
-
-            if (
-                estado.startswith("🔁")
-                or estado.startswith("❌")
-                or estado.startswith("⚠️")
-            ):
+            estado = df.loc[i, "estado"]
+            if estado.startswith("🔁") or estado.startswith("❌") or estado.startswith("⚠️"):
                 continue
 
-            actual = df.loc[
-                i,
-                "cuenta_codigo"
-            ]
-
-            if actual in opciones[
-                "codigo"
-            ].values:
-
-                indice = opciones[
-                    "codigo"
-                ].tolist().index(
-                    actual
-                )
-
+            actual = df.loc[i, "cuenta_codigo"]
+            if actual in opciones["codigo"].values:
+                indice = opciones["codigo"].tolist().index(actual)
             else:
-
                 indice = 0
 
             nueva = st.selectbox(
-                f"{df.loc[i, 'fecha_doc']} | "
-                f"{df.loc[i, 'razon_social']} | "
-                f"Doc. {df.loc[i, 'folio']}",
+                f"{df.loc[i, 'fecha_doc']} | {df.loc[i, 'razon_social']} | Doc. {df.loc[i, 'folio']}",
                 etiquetas,
                 index=indice,
                 key=f"venta_cta_{i}"
             )
 
-            df.loc[
-                i,
-                "cuenta_codigo"
-            ] = nueva.split(
-                " - ",
-                1
-            )[0]
+            df.loc[i, "cuenta_codigo"] = nueva.split(" - ", 1)[0]
 
-        st.session_state[
-            "rcv_ventas"
-        ] = df
+        st.session_state["rcv_ventas"] = df
 
-        validos = df[
-            df["estado"].isin(
-                [
-                    "🟢 Nuevo",
-                    "🟡 Revisar cuenta"
-                ]
-            )
-        ].copy()
+        validos = df[df["estado"].isin(["🟢 Nuevo", "🟡 Revisar cuenta"])].copy()
 
         if not validos.empty:
-
-            if st.button(
-                "✅ CONTABILIZAR VENTAS",
-                type="primary"
-            ):
-
+            if st.button("✅ CONTABILIZAR VENTAS", type="primary"):
                 try:
-
-                    resultado = contabilizar_rcv(
-                        conn,
-                        "ventas",
-                        validos
-                    )
-
-                    st.success(
-                        f"Se contabilizaron "
-                        f"{resultado['documentos']} "
-                        "documentos."
-                    )
-
-                    del st.session_state[
-                        "rcv_ventas"
-                    ]
-
+                    resultado = contabilizar_rcv(conn, "ventas", validos)
+                    st.success(f"Se contabilizaron {resultado['documentos']} documentos.")
+                    del st.session_state["rcv_ventas"]
                 except Exception as e:
-
-                    st.error(
-                        f"No se contabilizó el lote: {e}"
-                    )
+                    st.error(f"No se contabilizó el lote: {e}")
 
 
 # ============================================================
@@ -3695,20 +2973,11 @@ elif menu == "📤 RCV Ventas":
 
 elif menu == "👥 Clientes":
 
-    st.title(
-        "👥 Clientes"
-    )
+    st.title("👥 Clientes")
 
-    pestañas = st.tabs(
-        [
-            "Listado",
-            "Estado de cuenta",
-            "Nuevo cliente",
-        ]
-    )
+    pestañas = st.tabs(["Listado", "Estado de cuenta", "Nuevo cliente"])
 
     with pestañas[0]:
-
         df = pd.read_sql_query(
             """
             SELECT
@@ -3726,15 +2995,9 @@ elif menu == "👥 Clientes":
             """,
             conn
         )
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
     with pestañas[1]:
-
         clientes = conn.execute(
             """
             SELECT
@@ -3750,55 +3013,23 @@ elif menu == "👥 Clientes":
         ).fetchall()
 
         if clientes:
+            opciones = {f"{x['rut']} - {x['nombre']}": x["id"] for x in clientes}
+            seleccionado = st.selectbox("Cliente", list(opciones.keys()))
+            cliente_id = opciones[seleccionado]
 
-            opciones = {
-                f"{x['rut']} - {x['nombre']}":
-                    x["id"]
-                for x in clientes
-            }
-
-            seleccionado = st.selectbox(
-                "Cliente",
-                list(opciones.keys())
-            )
-
-            cliente_id = opciones[
-                seleccionado
-            ]
-
-            df = estado_cuenta_cliente(
-                conn,
-                cliente_id
-            )
+            df = estado_cuenta_cliente(conn, cliente_id)
 
             if df.empty:
-
-                st.info(
-                    "El cliente no tiene movimientos."
-                )
-
+                st.info("El cliente no tiene movimientos.")
             else:
-
                 cargo = df["cargo"].sum()
                 abono = df["abono"].sum()
                 saldo = df.iloc[-1]["saldo"]
 
                 c1, c2, c3 = st.columns(3)
-
-                c1.metric(
-                    "Facturado",
-                    money(cargo)
-                )
-
-                c2.metric(
-                    "Pagado",
-                    money(abono)
-                )
-
-                c3.metric(
-                    "Saldo",
-                    money(saldo)
-                )
+                c1.metric("Facturado", money(cargo))
+                c2.metric("Pagado", money(abono))
+                c3.metric("Saldo", money(saldo))
 
                 mostrar = df[
                     [
@@ -3820,54 +3051,22 @@ elif menu == "👥 Clientes":
                     }
                 )
 
-                st.dataframe(
-                    mostrar,
-                    use_container_width=True,
-                    hide_index=True
-                )
+                st.dataframe(mostrar, use_container_width=True, hide_index=True)
 
     with pestañas[2]:
+        with st.form("nuevo_cliente"):
+            rut = st.text_input("RUT")
+            nombre = st.text_input("Razón social")
+            email = st.text_input("Email")
+            telefono = st.text_input("Teléfono")
 
-        with st.form(
-            "nuevo_cliente"
-        ):
-
-            rut = st.text_input(
-                "RUT"
-            )
-
-            nombre = st.text_input(
-                "Razón social"
-            )
-
-            email = st.text_input(
-                "Email"
-            )
-
-            telefono = st.text_input(
-                "Teléfono"
-            )
-
-            if st.form_submit_button(
-                "Guardar cliente"
-            ):
-
+            if st.form_submit_button("Guardar cliente"):
                 if not validar_rut(rut):
-
-                    st.error(
-                        "RUT inválido."
-                    )
-
+                    st.error("RUT inválido.")
                 elif not nombre.strip():
-
-                    st.error(
-                        "Debe indicar razón social."
-                    )
-
+                    st.error("Debe indicar razón social.")
                 else:
-
                     try:
-
                         conn.execute(
                             """
                             INSERT INTO clientes
@@ -3891,15 +3090,9 @@ elif menu == "👥 Clientes":
                                 datetime.now().isoformat()
                             )
                         )
-
                         conn.commit()
-
-                        st.success(
-                            "Cliente creado."
-                        )
-
+                        st.success("Cliente creado.")
                     except Exception as e:
-
                         st.error(str(e))
 
 
@@ -3909,20 +3102,11 @@ elif menu == "👥 Clientes":
 
 elif menu == "🏢 Proveedores":
 
-    st.title(
-        "🏢 Proveedores"
-    )
+    st.title("🏢 Proveedores")
 
-    pestañas = st.tabs(
-        [
-            "Listado",
-            "Estado de cuenta",
-            "Nuevo proveedor",
-        ]
-    )
+    pestañas = st.tabs(["Listado", "Estado de cuenta", "Nuevo proveedor"])
 
     with pestañas[0]:
-
         df = pd.read_sql_query(
             """
             SELECT
@@ -3940,15 +3124,9 @@ elif menu == "🏢 Proveedores":
             """,
             conn
         )
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
     with pestañas[1]:
-
         proveedores = conn.execute(
             """
             SELECT
@@ -3964,55 +3142,23 @@ elif menu == "🏢 Proveedores":
         ).fetchall()
 
         if proveedores:
+            opciones = {f"{x['rut']} - {x['nombre']}": x["id"] for x in proveedores}
+            seleccionado = st.selectbox("Proveedor", list(opciones.keys()))
+            proveedor_id = opciones[seleccionado]
 
-            opciones = {
-                f"{x['rut']} - {x['nombre']}":
-                    x["id"]
-                for x in proveedores
-            }
-
-            seleccionado = st.selectbox(
-                "Proveedor",
-                list(opciones.keys())
-            )
-
-            proveedor_id = opciones[
-                seleccionado
-            ]
-
-            df = estado_cuenta_proveedor(
-                conn,
-                proveedor_id
-            )
+            df = estado_cuenta_proveedor(conn, proveedor_id)
 
             if df.empty:
-
-                st.info(
-                    "El proveedor no tiene movimientos."
-                )
-
+                st.info("El proveedor no tiene movimientos.")
             else:
-
                 cargo = df["cargo"].sum()
                 abono = df["abono"].sum()
                 saldo = df.iloc[-1]["saldo"]
 
                 c1, c2, c3 = st.columns(3)
-
-                c1.metric(
-                    "Compras",
-                    money(cargo)
-                )
-
-                c2.metric(
-                    "Pagado",
-                    money(abono)
-                )
-
-                c3.metric(
-                    "Saldo",
-                    money(saldo)
-                )
+                c1.metric("Compras", money(cargo))
+                c2.metric("Pagado", money(abono))
+                c3.metric("Saldo", money(saldo))
 
                 st.dataframe(
                     df[
@@ -4030,47 +3176,19 @@ elif menu == "🏢 Proveedores":
                 )
 
     with pestañas[2]:
+        with st.form("nuevo_proveedor"):
+            rut = st.text_input("RUT")
+            nombre = st.text_input("Razón social")
+            email = st.text_input("Email")
+            telefono = st.text_input("Teléfono")
 
-        with st.form(
-            "nuevo_proveedor"
-        ):
-
-            rut = st.text_input(
-                "RUT"
-            )
-
-            nombre = st.text_input(
-                "Razón social"
-            )
-
-            email = st.text_input(
-                "Email"
-            )
-
-            telefono = st.text_input(
-                "Teléfono"
-            )
-
-            if st.form_submit_button(
-                "Guardar proveedor"
-            ):
-
+            if st.form_submit_button("Guardar proveedor"):
                 if not validar_rut(rut):
-
-                    st.error(
-                        "RUT inválido."
-                    )
-
+                    st.error("RUT inválido.")
                 elif not nombre.strip():
-
-                    st.error(
-                        "Debe indicar razón social."
-                    )
-
+                    st.error("Debe indicar razón social.")
                 else:
-
                     try:
-
                         conn.execute(
                             """
                             INSERT INTO proveedores
@@ -4094,15 +3212,9 @@ elif menu == "🏢 Proveedores":
                                 datetime.now().isoformat()
                             )
                         )
-
                         conn.commit()
-
-                        st.success(
-                            "Proveedor creado."
-                        )
-
+                        st.success("Proveedor creado.")
                     except Exception as e:
-
                         st.error(str(e))
 
 
@@ -4112,33 +3224,13 @@ elif menu == "🏢 Proveedores":
 
 elif menu == "💵 Pagos":
 
-    st.title(
-        "💵 Pagos y cobranzas"
-    )
+    st.title("💵 Pagos y cobranzas")
 
-    pestañas = st.tabs(
-        [
-            "Cobranza clientes",
-            "Pago proveedores",
-        ]
-    )
-
-    cuentas = cuentas_imputables(
-        conn
-    )
-
-    cuentas_banco = cuentas[
-        cuentas["codigo"].str.startswith(
-            "1.1.02"
-        )
-    ]
-
-    # --------------------------------------------------------
-    # CLIENTES
-    # --------------------------------------------------------
+    pestañas = st.tabs(["Cobranza clientes", "Pago proveedores"])
+    cuentas = cuentas_imputables(conn)
+    cuentas_banco = cuentas[cuentas["codigo"].str.startswith("1.1.02")]
 
     with pestañas[0]:
-
         clientes = conn.execute(
             """
             SELECT id, rut,
@@ -4152,109 +3244,41 @@ elif menu == "💵 Pagos":
         ).fetchall()
 
         if clientes:
+            opciones = {f"{x['rut']} - {x['nombre']}": x["id"] for x in clientes}
 
-            opciones = {
-                f"{x['rut']} - {x['nombre']}":
-                    x["id"]
-                for x in clientes
-            }
-
-            with st.form(
-                "pago_cliente"
-            ):
-
-                seleccionado = st.selectbox(
-                    "Cliente",
-                    list(opciones.keys())
-                )
-
-                fecha_pago = st.date_input(
-                    "Fecha",
-                    date.today()
-                )
-
-                monto_pago = st.number_input(
-                    "Monto",
-                    min_value=0.0,
-                    step=1000.0
-                )
-
-                medio = st.selectbox(
-                    "Medio de pago",
-                    [
-                        "Transferencia",
-                        "Cheque",
-                        "Efectivo",
-                        "Tarjeta",
-                        "Otro",
-                    ]
-                )
+            with st.form("pago_cliente"):
+                seleccionado = st.selectbox("Cliente", list(opciones.keys()))
+                fecha_pago = st.date_input("Fecha", date.today())
+                monto_pago = st.number_input("Monto", min_value=0.0, step=1000.0)
+                medio = st.selectbox("Medio de pago", ["Transferencia", "Cheque", "Efectivo", "Tarjeta", "Otro"])
 
                 if cuentas_banco.empty:
-
-                    st.warning(
-                        "No existen cuentas bajo 1.1.02."
-                    )
-
+                    st.warning("No existen cuentas bajo 1.1.02.")
                     cuenta_banco = None
-
                 else:
+                    opciones_banco = dict(zip(cuentas_banco["etiqueta"], cuentas_banco["codigo"]))
+                    cuenta_banco_label = st.selectbox("Cuenta bancaria", list(opciones_banco.keys()))
+                    cuenta_banco = opciones_banco[cuenta_banco_label]
 
-                    opciones_banco = dict(
-                        zip(
-                            cuentas_banco["etiqueta"],
-                            cuentas_banco["codigo"]
-                        )
-                    )
-
-                    cuenta_banco_label = st.selectbox(
-                        "Cuenta bancaria",
-                        list(opciones_banco.keys())
-                    )
-
-                    cuenta_banco = opciones_banco[
-                        cuenta_banco_label
-                    ]
-
-                glosa = st.text_input(
-                    "Glosa"
-                )
-
-                guardar = st.form_submit_button(
-                    "Registrar cobranza"
-                )
+                glosa = st.text_input("Glosa")
+                guardar = st.form_submit_button("Registrar cobranza")
 
                 if guardar:
-
                     try:
-
                         lote = registrar_pago_cliente(
                             conn,
                             opciones[seleccionado],
-                            fecha_pago.strftime(
-                                "%Y-%m-%d"
-                            ),
+                            fecha_pago.strftime("%Y-%m-%d"),
                             monto_pago,
                             medio,
                             cuenta_banco,
                             glosa
                         )
-
-                        st.success(
-                            f"Pago registrado. "
-                            f"Lote: {lote}"
-                        )
-
+                        st.success(f"Pago registrado. Lote: {lote}")
                     except Exception as e:
-
                         st.error(str(e))
 
-    # --------------------------------------------------------
-    # PROVEEDORES
-    # --------------------------------------------------------
-
     with pestañas[1]:
-
         proveedores = conn.execute(
             """
             SELECT id, rut,
@@ -4268,104 +3292,38 @@ elif menu == "💵 Pagos":
         ).fetchall()
 
         if proveedores:
+            opciones = {f"{x['rut']} - {x['nombre']}": x["id"] for x in proveedores}
 
-            opciones = {
-                f"{x['rut']} - {x['nombre']}":
-                    x["id"]
-                for x in proveedores
-            }
-
-            with st.form(
-                "pago_proveedor"
-            ):
-
-                seleccionado = st.selectbox(
-                    "Proveedor",
-                    list(opciones.keys())
-                )
-
-                fecha_pago = st.date_input(
-                    "Fecha",
-                    date.today(),
-                    key="fecha_pago_proveedor"
-                )
-
-                monto_pago = st.number_input(
-                    "Monto",
-                    min_value=0.0,
-                    step=1000.0,
-                    key="monto_pago_proveedor"
-                )
-
-                medio = st.selectbox(
-                    "Medio de pago",
-                    [
-                        "Transferencia",
-                        "Cheque",
-                        "Efectivo",
-                        "Tarjeta",
-                        "Otro",
-                    ],
-                    key="medio_proveedor"
-                )
+            with st.form("pago_proveedor"):
+                seleccionado = st.selectbox("Proveedor", list(opciones.keys()))
+                fecha_pago = st.date_input("Fecha", date.today(), key="fecha_pago_proveedor")
+                monto_pago = st.number_input("Monto", min_value=0.0, step=1000.0, key="monto_pago_proveedor")
+                medio = st.selectbox("Medio de pago", ["Transferencia", "Cheque", "Efectivo", "Tarjeta", "Otro"], key="medio_proveedor")
 
                 if cuentas_banco.empty:
-
-                    st.warning(
-                        "No existen cuentas bajo 1.1.02."
-                    )
-
+                    st.warning("No existen cuentas bajo 1.1.02.")
                     cuenta_banco = None
-
                 else:
+                    opciones_banco = dict(zip(cuentas_banco["etiqueta"], cuentas_banco["codigo"]))
+                    cuenta_label = st.selectbox("Cuenta bancaria", list(opciones_banco.keys()), key="cuenta_proveedor")
+                    cuenta_banco = opciones_banco[cuenta_label]
 
-                    opciones_banco = dict(
-                        zip(
-                            cuentas_banco["etiqueta"],
-                            cuentas_banco["codigo"]
-                        )
-                    )
+                glosa = st.text_input("Glosa", key="glosa_proveedor")
+                guardar_proveedor = st.form_submit_button("Registrar pago")
 
-                    cuenta_label = st.selectbox(
-                        "Cuenta bancaria",
-                        list(opciones_banco.keys()),
-                        key="cuenta_proveedor"
-                    )
-
-                    cuenta_banco = opciones_banco[
-                        cuenta_label
-                    ]
-
-                glosa = st.text_input(
-                    "Glosa",
-                    key="glosa_proveedor"
-                )
-
-                if st.form_submit_button(
-                    "Registrar pago"
-                ):
-
+                if guardar_proveedor:
                     try:
-
                         lote = registrar_pago_proveedor(
                             conn,
                             opciones[seleccionado],
-                            fecha_pago.strftime(
-                                "%Y-%m-%d"
-                            ),
+                            fecha_pago.strftime("%Y-%m-%d"),
                             monto_pago,
                             medio,
                             cuenta_banco,
                             glosa
                         )
-
-                        st.success(
-                            f"Pago registrado. "
-                            f"Lote: {lote}"
-                        )
-
+                        st.success(f"Pago registrado. Lote: {lote}")
                     except Exception as e:
-
                         st.error(str(e))
 
 
@@ -4375,9 +3333,7 @@ elif menu == "💵 Pagos":
 
 elif menu == "📒 Libro Diario":
 
-    st.title(
-        "📒 Libro Diario"
-    )
+    st.title("📒 Libro Diario")
 
     df = pd.read_sql_query(
         """
@@ -4399,11 +3355,7 @@ elif menu == "📒 Libro Diario":
         conn
     )
 
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -4412,55 +3364,22 @@ elif menu == "📒 Libro Diario":
 
 elif menu == "📚 Mayor":
 
-    st.title(
-        "📚 Libro Mayor"
-    )
+    st.title("📚 Libro Mayor")
 
-    cuentas = cuentas_imputables(
-        conn
-    )
+    cuentas = cuentas_imputables(conn)
+    opciones = dict(zip(cuentas["etiqueta"], cuentas["codigo"]))
 
-    opciones = dict(
-        zip(
-            cuentas["etiqueta"],
-            cuentas["codigo"]
-        )
-    )
+    seleccion = st.selectbox("Cuenta", list(opciones.keys()))
+    codigo = opciones[seleccion]
 
-    seleccion = st.selectbox(
-        "Cuenta",
-        list(opciones.keys())
-    )
-
-    codigo = opciones[
-        seleccion
-    ]
-
-    df = obtener_mayor(
-        conn,
-        codigo
-    )
+    df = obtener_mayor(conn, codigo)
 
     if df.empty:
-
-        st.info(
-            "La cuenta no tiene movimientos."
-        )
-
+        st.info("La cuenta no tiene movimientos.")
     else:
-
         saldo = df.iloc[-1]["Saldo"]
-
-        st.metric(
-            "Saldo",
-            money(saldo)
-        )
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.metric("Saldo", money(saldo))
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -4469,29 +3388,15 @@ elif menu == "📚 Mayor":
 
 elif menu == "⚖️ Balance de Comprobación":
 
-    st.title(
-        "⚖️ Balance de Comprobación"
-    )
+    st.title("⚖️️ Balance de Comprobación")
 
     col1, col2 = st.columns(2)
 
     with col1:
-
-        desde = st.date_input(
-            "Desde",
-            date(
-                date.today().year,
-                1,
-                1
-            )
-        )
+        desde = st.date_input("Desde", date(date.today().year, 1, 1))
 
     with col2:
-
-        hasta = st.date_input(
-            "Hasta",
-            date.today()
-        )
+        hasta = st.date_input("Hasta", date.today())
 
     df = balance_comprobacion(
         conn,
@@ -4500,44 +3405,20 @@ elif menu == "⚖️ Balance de Comprobación":
     )
 
     if not df.empty:
-
         debe = df["Debe"].sum()
         haber = df["Haber"].sum()
 
         c1, c2, c3 = st.columns(3)
-
-        c1.metric(
-            "Debe",
-            money(debe)
-        )
-
-        c2.metric(
-            "Haber",
-            money(haber)
-        )
-
-        c3.metric(
-            "Diferencia",
-            money(debe - haber)
-        )
+        c1.metric("Debe", money(debe))
+        c2.metric("Haber", money(haber))
+        c3.metric("Diferencia", money(debe - haber))
 
         if abs(debe - haber) < 0.01:
-
-            st.success(
-                "🟢 Balance cuadrado."
-            )
-
+            st.success("🟢 Balance cuadrado.")
         else:
+            st.error("🔴 Existe diferencia.")
 
-            st.error(
-                "🔴 Existe diferencia."
-            )
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -4546,90 +3427,33 @@ elif menu == "⚖️ Balance de Comprobación":
 
 elif menu == "📊 Conciliación":
 
-    st.title(
-        "📊 Conciliación de auxiliares"
-    )
+    st.title("📊 Conciliación de auxiliares")
 
-    pestañas = st.tabs(
-        [
-            "Clientes",
-            "Proveedores",
-        ]
-    )
+    pestañas = st.tabs(["Clientes", "Proveedores"])
 
     with pestañas[0]:
-
-        df = conciliacion_clientes(
-            conn
-        )
-
+        df = conciliacion_clientes(conn)
         if df.empty:
-
-            st.warning(
-                "No se pudo determinar la cuenta de clientes."
-            )
-
+            st.warning("No se pudo determinar la cuenta de clientes.")
         else:
-
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            diferencia = df.iloc[0][
-                "Diferencia"
-            ]
-
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            diferencia = df.iloc[0]["Diferencia"]
             if abs(diferencia) < 0.01:
-
-                st.success(
-                    "🟢 Auxiliar de clientes conciliado."
-                )
-
+                st.success("🟢 Auxiliar de clientes conciliado.")
             else:
-
-                st.error(
-                    f"🔴 Diferencia: "
-                    f"{money(diferencia)}"
-                )
+                st.error(f"🔴 Diferencia: {money(diferencia)}")
 
     with pestañas[1]:
-
-        df = conciliacion_proveedores(
-            conn
-        )
-
+        df = conciliacion_proveedores(conn)
         if df.empty:
-
-            st.warning(
-                "No se pudo determinar la cuenta de proveedores."
-            )
-
+            st.warning("No se pudo determinar la cuenta de proveedores.")
         else:
-
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            diferencia = df.iloc[0][
-                "Diferencia"
-            ]
-
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            diferencia = df.iloc[0]["Diferencia"]
             if abs(diferencia) < 0.01:
-
-                st.success(
-                    "🟢 Auxiliar de proveedores conciliado."
-                )
-
+                st.success("🟢 Auxiliar de proveedores conciliado.")
             else:
-
-                st.error(
-                    f"🔴 Diferencia: "
-                    f"{money(diferencia)}"
-                )
+                st.error(f"🔴 Diferencia: {money(diferencia)}")
 
 
 # ============================================================
@@ -4638,20 +3462,11 @@ elif menu == "📊 Conciliación":
 
 elif menu == "📋 Plan de Cuentas":
 
-    st.title(
-        "📋 Plan de Cuentas"
-    )
+    st.title("📋 Plan de Cuentas")
 
-    pestañas = st.tabs(
-        [
-            "Plan",
-            "Cuentas de enlace",
-            "Nueva cuenta",
-        ]
-    )
+    pestañas = st.tabs(["Plan", "Cuentas de enlace", "Nueva cuenta"])
 
     with pestañas[0]:
-
         df = pd.read_sql_query(
             """
             SELECT
@@ -4666,54 +3481,22 @@ elif menu == "📋 Plan de Cuentas":
             """,
             conn
         )
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
     with pestañas[1]:
-
-        roles = cargar_roles(
-            conn
-        )
+        roles = cargar_roles(conn)
 
         for rol, (descripcion, defecto) in ROLES.items():
+            actual = roles.get(rol)
+            opciones = cuentas_imputables(conn)
+            mapa = dict(zip(opciones["etiqueta"], opciones["codigo"]))
 
-            actual = roles.get(
-                rol
-            )
-
-            opciones = cuentas_imputables(
-                conn
-            )
-
-            mapa = dict(
-                zip(
-                    opciones["etiqueta"],
-                    opciones["codigo"]
-                )
-            )
-
-            codigo_actual = (
-                actual[0]
-                if actual
-                else defecto
-            )
-
-            etiquetas = list(
-                mapa.keys()
-            )
-
+            codigo_actual = actual[0] if actual else defecto
+            etiquetas = list(mapa.keys())
             seleccionado = None
 
             for etiqueta in etiquetas:
-
-                if etiqueta.startswith(
-                    codigo_actual + " - "
-                ):
-
+                if etiqueta.startswith(codigo_actual + " - "):
                     seleccionado = etiqueta
                     break
 
@@ -4723,79 +3506,25 @@ elif menu == "📋 Plan de Cuentas":
             nuevo = st.selectbox(
                 descripcion,
                 etiquetas,
-                index=etiquetas.index(
-                    seleccionado
-                ),
+                index=etiquetas.index(seleccionado),
                 key=f"rol_{rol}"
             )
 
-            if st.button(
-                f"Guardar {descripcion}",
-                key=f"guardar_rol_{rol}"
-            ):
-
-                guardar_rol(
-                    conn,
-                    rol,
-                    mapa[nuevo]
-                )
-
-                st.success(
-                    "Configuración guardada."
-                )
+            if st.button(f"Guardar {descripcion}", key=f"guardar_rol_{rol}"):
+                guardar_rol(conn, rol, mapa[nuevo])
+                st.success("Configuración guardada.")
 
     with pestañas[2]:
+        with st.form("nueva_cuenta"):
+            codigo = st.text_input("Código")
+            nombre = st.text_input("Nombre")
+            categoria = st.selectbox("Categoría", ["Activo", "Pasivo", "Patrimonio", "Nominal"])
+            tipo = st.selectbox("Tipo", ["Activo", "Pasivo", "Patrimonio", "Ingresos", "Gastos"])
+            padre = st.text_input("Código padre")
+            nivel = st.number_input("Nivel", min_value=1, max_value=10, value=3)
 
-        with st.form(
-            "nueva_cuenta"
-        ):
-
-            codigo = st.text_input(
-                "Código"
-            )
-
-            nombre = st.text_input(
-                "Nombre"
-            )
-
-            categoria = st.selectbox(
-                "Categoría",
-                [
-                    "Activo",
-                    "Pasivo",
-                    "Patrimonio",
-                    "Nominal",
-                ]
-            )
-
-            tipo = st.selectbox(
-                "Tipo",
-                [
-                    "Activo",
-                    "Pasivo",
-                    "Patrimonio",
-                    "Ingresos",
-                    "Gastos",
-                ]
-            )
-
-            padre = st.text_input(
-                "Código padre"
-            )
-
-            nivel = st.number_input(
-                "Nivel",
-                min_value=1,
-                max_value=10,
-                value=3
-            )
-
-            if st.form_submit_button(
-                "Crear cuenta"
-            ):
-
+            if st.form_submit_button("Crear cuenta"):
                 try:
-
                     conn.execute(
                         """
                         INSERT INTO plan_cuentas
@@ -4814,20 +3543,13 @@ elif menu == "📋 Plan de Cuentas":
                             nombre.strip(),
                             categoria,
                             tipo,
-                            padre.strip()
-                            or None,
+                            padre.strip() or None,
                             nivel
                         )
                     )
-
                     conn.commit()
-
-                    st.success(
-                        "Cuenta creada."
-                    )
-
+                    st.success("Cuenta creada.")
                 except Exception as e:
-
                     st.error(str(e))
 
 
@@ -4837,10 +3559,7 @@ elif menu == "📋 Plan de Cuentas":
 
 elif menu == "⚙️ Reglas Contables":
 
-    st.title(
-        "⚙️ Reglas de clasificación contable"
-    )
-
+    st.title("⚙️ Reglas de clasificación contable")
     st.info(
         """
         Las reglas tienen prioridad sobre la cuenta habitual del
@@ -4849,64 +3568,19 @@ elif menu == "⚙️ Reglas Contables":
         """
     )
 
-    cuentas = cuentas_imputables(
-        conn
-    )
+    cuentas = cuentas_imputables(conn)
+    mapa_cuentas = dict(zip(cuentas["etiqueta"], cuentas["codigo"]))
 
-    mapa_cuentas = dict(
-        zip(
-            cuentas["etiqueta"],
-            cuentas["codigo"]
-        )
-    )
+    with st.form("nueva_regla"):
+        tipo = st.selectbox("Tipo", ["compras", "ventas"])
+        rut = st.text_input("RUT específico (opcional)")
+        patron = st.text_input("Texto que debe contener la razón social (opcional)")
+        tipo_doc = st.number_input("Tipo de documento (0 = cualquiera)", min_value=0, max_value=999, value=0)
+        cuenta_label = st.selectbox("Cuenta contable", list(mapa_cuentas.keys()))
+        prioridad = st.number_input("Prioridad", min_value=1, max_value=1000, value=100)
+        descripcion = st.text_input("Descripción")
 
-    with st.form(
-        "nueva_regla"
-    ):
-
-        tipo = st.selectbox(
-            "Tipo",
-            [
-                "compras",
-                "ventas",
-            ]
-        )
-
-        rut = st.text_input(
-            "RUT específico (opcional)"
-        )
-
-        patron = st.text_input(
-            "Texto que debe contener la razón social (opcional)"
-        )
-
-        tipo_doc = st.number_input(
-            "Tipo de documento (0 = cualquiera)",
-            min_value=0,
-            max_value=999,
-            value=0
-        )
-
-        cuenta_label = st.selectbox(
-            "Cuenta contable",
-            list(mapa_cuentas.keys())
-        )
-
-        prioridad = st.number_input(
-            "Prioridad",
-            min_value=1,
-            max_value=1000,
-            value=100
-        )
-
-        descripcion = st.text_input(
-            "Descripción"
-        )
-
-        if st.form_submit_button(
-            "Guardar regla"
-        ):
-
+        if st.form_submit_button("Guardar regla"):
             guardar_regla(
                 conn,
                 tipo,
@@ -4917,10 +3591,7 @@ elif menu == "⚙️ Reglas Contables":
                 prioridad,
                 descripcion
             )
-
-            st.success(
-                "Regla guardada."
-            )
+            st.success("Regla guardada.")
 
     st.divider()
 
@@ -4947,11 +3618,7 @@ elif menu == "⚙️ Reglas Contables":
         conn
     )
 
-    st.dataframe(
-        reglas,
-        use_container_width=True,
-        hide_index=True
-    )
+    st.dataframe(reglas, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -4960,62 +3627,27 @@ elif menu == "⚙️ Reglas Contables":
 
 elif menu == "📦 Lotes":
 
-    st.title(
-        "📦 Lotes de contabilización"
-    )
-
-    df = listar_lotes(
-        conn
-    )
+    st.title("📦 Lotes de contabilización")
+    df = listar_lotes(conn)
 
     if df.empty:
-
-        st.info(
-            "No existen lotes."
-        )
-
+        st.info("No existen lotes.")
     else:
-
-        st.dataframe(
-            df,
-            use_container_width=True,
-            hide_index=True
-        )
-
+        st.dataframe(df, use_container_width=True, hide_index=True)
         st.divider()
 
-        lote = st.selectbox(
-            "Seleccionar lote",
-            df["Lote"].tolist()
-        )
-
+        lote = st.selectbox("Seleccionar lote", df["Lote"].tolist())
         st.warning(
             "Deshacer un lote elimina los movimientos "
             "contables y documentos asociados a ese lote."
         )
 
-        if st.button(
-            "🗑️ DESHACER LOTE",
-            type="secondary"
-        ):
-
+        if st.button("🗑️ DESHACER LOTE", type="secondary"):
             try:
-
-                resultado = deshacer_lote(
-                    conn,
-                    lote
-                )
-
-                st.success(
-                    f"Lote eliminado: "
-                    f"{resultado}"
-                )
-
+                resultado = deshacer_lote(conn, lote)
+                st.success(f"Lote eliminado: {resultado}")
             except Exception as e:
-
-                st.error(
-                    f"No fue posible eliminar el lote: {e}"
-                )
+                st.error(f"No fue posible eliminar el lote: {e}")
 
 
 # ============================================================
@@ -5024,14 +3656,10 @@ elif menu == "📦 Lotes":
 
 elif menu == "🧰 Matriz Contable":
 
-    st.title(
-        "🧰 Importación de matriz contable"
-    )
-
+    st.title("🧰 Importación de matriz contable")
     st.info(
         """
         Formato esperado:
-
         fecha | cuenta | debe | haber | glosa
 
         Opcionales:
@@ -5039,241 +3667,78 @@ elif menu == "🧰 Matriz Contable":
         """
     )
 
-    archivo = st.file_uploader(
-        "Cargar matriz contable",
-        type=["csv"],
-        key="matriz"
-    )
+    archivo = st.file_uploader("Cargar matriz contable", type=["csv"], key="matriz")
 
     if archivo:
-
         try:
+            df = leer_csv(archivo)
+            df.columns = [str(c).strip().lower() for c in df.columns]
 
-            df = leer_csv(
-                archivo
-            )
-
-            df.columns = [
-                str(c).strip().lower()
-                for c in df.columns
-            ]
-
-            obligatorias = [
-                "fecha",
-                "cuenta",
-                "debe",
-                "haber",
-                "glosa"
-            ]
-
-            faltantes = [
-                c
-                for c in obligatorias
-                if c not in df.columns
-            ]
+            obligatorias = ["fecha", "cuenta", "debe", "haber", "glosa"]
+            faltantes = [c for c in obligatorias if c not in df.columns]
 
             if faltantes:
-
-                st.error(
-                    "Faltan columnas: "
-                    + ", ".join(faltantes)
-                )
-
+                st.error("Faltan columnas: " + ", ".join(faltantes))
             else:
-
-                plan = Plan(
-                    conn
-                )
-
+                plan = Plan(conn)
                 resultado = pd.DataFrame()
 
-                resultado["fecha"] = (
-                    df["fecha"]
-                    .apply(fecha_iso)
-                )
+                resultado["fecha"] = df["fecha"].apply(fecha_iso)
+                resultado["cuenta_original"] = df["cuenta"].astype(str).str.strip()
 
-                resultado["cuenta_original"] = (
-                    df["cuenta"]
-                    .astype(str)
-                    .str.strip()
-                )
+                resuelto = resultado["cuenta_original"].apply(plan.resolver)
 
-                resuelto = resultado[
-                    "cuenta_original"
-                ].apply(
-                    plan.resolver
-                )
-
-                resultado["codigo"] = resuelto.apply(
-                    lambda x:
-                    x[0]
-                    if x
-                    else None
-                )
-
-                resultado["cuenta"] = resuelto.apply(
-                    lambda x:
-                    x[1]
-                    if x
-                    else None
-                )
-
-                resultado["debe"] = (
-                    df["debe"]
-                    .apply(numero)
-                )
-
-                resultado["haber"] = (
-                    df["haber"]
-                    .apply(numero)
-                )
-
-                resultado["glosa"] = (
-                    df["glosa"]
-                    .fillna("")
-                    .astype(str)
-                )
+                resultado["codigo"] = resuelto.apply(lambda x: x[0] if x else None)
+                resultado["cuenta"] = resuelto.apply(lambda x: x[1] if x else None)
+                resultado["debe"] = df["debe"].apply(numero)
+                resultado["haber"] = df["haber"].apply(numero)
+                resultado["glosa"] = df["glosa"].fillna("").astype(str)
 
                 if "centro_costo" in df.columns:
-
-                    resultado["centro_costo"] = (
-                        df["centro_costo"]
-                        .fillna(
-                            "General / Ninguno"
-                        )
-                    )
-
+                    resultado["centro_costo"] = df["centro_costo"].fillna("General / Ninguno")
                 else:
-
-                    resultado[
-                        "centro_costo"
-                    ] = "General / Ninguno"
+                    resultado["centro_costo"] = "General / Ninguno"
 
                 if "asiento" in df.columns:
-
-                    resultado["asiento"] = (
-                        pd.to_numeric(
-                            df["asiento"],
-                            errors="coerce"
-                        )
-                    )
-
+                    resultado["asiento"] = pd.to_numeric(df["asiento"], errors="coerce")
                 else:
-
                     resultado["asiento"] = 1
 
                 errores = []
 
                 for i, fila in resultado.iterrows():
-
                     if not fila["fecha"]:
-
-                        errores.append(
-                            f"Línea {i+2}: fecha inválida."
-                        )
-
+                        errores.append(f"Línea {i+2}: fecha inválida.")
                     if not fila["codigo"]:
+                        errores.append(f"Línea {i+2}: cuenta '{fila['cuenta_original']}' no encontrada.")
+                    if fila["debe"] > 0 and fila["haber"] > 0:
+                        errores.append(f"Línea {i+2}: Debe y Haber simultáneos.")
+                    if fila["debe"] == 0 and fila["haber"] == 0:
+                        errores.append(f"Línea {i+2}: Debe y Haber están en cero.")
 
-                        errores.append(
-                            f"Línea {i+2}: cuenta "
-                            f"'{fila['cuenta_original']}' "
-                            "no encontrada."
-                        )
-
-                    if (
-                        fila["debe"] > 0
-                        and fila["haber"] > 0
-                    ):
-
-                        errores.append(
-                            f"Línea {i+2}: "
-                            "Debe y Haber simultáneos."
-                        )
-
-                    if (
-                        fila["debe"] == 0
-                        and fila["haber"] == 0
-                    ):
-
-                        errores.append(
-                            f"Línea {i+2}: "
-                            "Debe y Haber están en cero."
-                        )
-
-                for asiento_id, grupo in resultado.groupby(
-                    "asiento"
-                ):
-
-                    if abs(
-                        grupo["debe"].sum()
-                        -
-                        grupo["haber"].sum()
-                    ) > 0.01:
-
-                        errores.append(
-                            f"Asiento {asiento_id}: "
-                            "descuadrado."
-                        )
+                for asiento_id, grupo in resultado.groupby("asiento"):
+                    if abs(grupo["debe"].sum() - grupo["haber"].sum()) > 0.01:
+                        errores.append(f"Asiento {asiento_id}: descuadrado.")
 
                 if errores:
-
-                    st.error(
-                        "\n".join(
-                            errores[:30]
-                        )
-                    )
-
+                    st.error("\n".join(errores[:30]))
                 else:
+                    st.success("Matriz validada correctamente.")
+                    st.dataframe(resultado, use_container_width=True, hide_index=True)
 
-                    st.success(
-                        "Matriz validada correctamente."
-                    )
-
-                    st.dataframe(
-                        resultado,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-
-                    if st.button(
-                        "✅ IMPORTAR MATRIZ",
-                        type="primary"
-                    ):
-
-                        lote = (
-                            "MATRIZ-"
-                            + datetime.now().strftime(
-                                "%Y%m%d-%H%M%S"
-                            )
-                        )
-
+                    if st.button("✅ IMPORTAR MATRIZ", type="primary"):
+                        lote = "MATRIZ-" + datetime.now().strftime("%Y%m%d-%H%M%S")
                         cur = conn.cursor()
-
-                        base = siguiente_asiento(
-                            conn
-                        )
+                        base = siguiente_asiento(conn)
 
                         mapa_asientos = {
                             n: i + 1
-                            for i, n in enumerate(
-                                sorted(
-                                    resultado[
-                                        "asiento"
-                                    ].unique()
-                                )
-                            )
+                            for i, n in enumerate(sorted(resultado["asiento"].unique()))
                         }
 
                         try:
-
                             for fila in resultado.itertuples():
-
-                                asiento = (
-                                    base
-                                    + mapa_asientos[
-                                        fila.asiento
-                                    ]
-                                )
+                                asiento = base + mapa_asientos[fila.asiento]
 
                                 cur.execute(
                                     """
@@ -5307,25 +3772,13 @@ elif menu == "🧰 Matriz Contable":
                                 )
 
                             conn.commit()
-
-                            st.success(
-                                f"Matriz importada. "
-                                f"Lote: {lote}"
-                            )
-
+                            st.success(f"Matriz importada. Lote: {lote}")
                         except Exception as e:
-
                             conn.rollback()
-
-                            st.error(
-                                f"Error: {e}"
-                            )
+                            st.error(f"Error: {e}")
 
         except Exception as e:
-
-            st.error(
-                f"Error leyendo matriz: {e}"
-            )
+            st.error(f"Error leyendo matriz: {e}")
 
 
 # ============================================================
@@ -5333,13 +3786,7 @@ elif menu == "🧰 Matriz Contable":
 # ============================================================
 
 st.sidebar.divider()
-
-st.sidebar.caption(
-    "SGCI • Sistema de Gestión Contable Integral"
-)
-
-st.sidebar.caption(
-    "Motor contable + auxiliares + RCV + conciliación"
-)
+st.sidebar.caption("SGCI • Sistema de Gestión Contable Integral")
+st.sidebar.caption("Motor contable + auxiliares + RCV + conciliación")
 
 conn.close()
