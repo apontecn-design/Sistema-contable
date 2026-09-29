@@ -2,25 +2,10 @@
 
 """
 SGCI - Sistema de Gestión Contable Integral
-Versión integrada con Plantilla Descargable y Carga de Matriz para RCV Compras:
-- Plan de cuentas
-- RCV Compras (con descarga de plantilla y subida de matriz personalizada)
-- RCV Ventas
-- Bandeja de revisión
-- Reglas contables por RUT
-- Libro Diario
-- Mayor
-- Balance de comprobación
-- Clientes
-- Proveedores
-- Estados de cuenta
-- Antigüedad de saldos
-- Conciliación auxiliares vs cuentas contables
-- Lotes de importación
-- Deshacer lotes
-- Importación de matrices contables
-- SQLite
-- Streamlit
+Versión optimizada con:
+- Corrección de visualización en Reglas Contables
+- Módulo de Asientos Manuales y Saldos Iniciales por Matriz Excel Descargable
+- Plan de cuentas, RCV Compras/Ventas, Auxiliares, Conciliación, Lotes y SQLite.
 """
 
 import io
@@ -1326,7 +1311,6 @@ def armar_asiento(doc, tipo, cuenta, roles):
             - exento
         )
         
-        # BLINDAJE TOTAL: Si el neto viene en 0 en el SII, lo calculamos por diferencia exacta para que jamás dé Debe = 0.0
         if principal <= 0:
             if neto > 0:
                 principal = neto
@@ -2553,6 +2537,7 @@ menu = st.sidebar.radio(
         "🏠 Inicio",
         "📥 RCV Compras",
         "📤 RCV Ventas",
+        "✍️ Asientos y Saldos",
         "👥 Clientes",
         "🏢 Proveedores",
         "💵 Pagos",
@@ -2561,7 +2546,7 @@ menu = st.sidebar.radio(
         "⚖️ Balance de Comprobación",
         "📊 Conciliación",
         "📋 Plan de Cuentas",
-        "⚙️️ Reglas Contables",
+        "⚙️ Reglas Contables",
         "📦 Lotes",
         "🧰 Matriz Contable",
     ]
@@ -2645,7 +2630,7 @@ if menu == "🏠 Inicio":
 
 
 # ============================================================
-# RCV COMPRAS (Con Opción de Carga CSV o Plantilla Descargable)
+# RCV COMPRAS
 # ============================================================
 
 elif menu == "📥 RCV Compras":
@@ -2674,9 +2659,8 @@ elif menu == "📥 RCV Compras":
                 st.error(f"Error: {e}")
 
     with pestañas_compras[1]:
-        st.info("Descarga la plantilla modelo, rellenala en tu Excel con tus compras y súbela aquí adjunta para procesarla de inmediato.")
+        st.info("Descarga la plantilla modelo, rellénala en tu Excel con tus compras y súbela aquí adjunta para procesarla de inmediato.")
 
-        # Generar DataFrame de ejemplo para la plantilla
         df_plantilla_modelo = pd.DataFrame([
             {
                 "tipo_doc": 30,
@@ -2941,6 +2925,143 @@ elif menu == "📤 RCV Ventas":
                     del st.session_state["rcv_ventas"]
                 except Exception as e:
                     st.error(f"No se contabilizó el lote: {e}")
+
+
+# ============================================================
+# ASIENTOS MANUALES Y SALDOS INICIALES (NUEVO MÓDULO)
+# ============================================================
+
+elif menu == "✍️ Asientos y Saldos":
+
+    st.title("✍️ Asientos Manuales y Saldos Iniciales")
+    st.info(
+        """
+        Sube una matriz en Excel (CSV) para registrar asientos manuales o cargar los saldos iniciales de tu plan de cuentas.
+        Columnas requeridas: **fecha, codigo_cuenta, debe, haber, glosa** (Opcional: **asiento, centro_costo**).
+        """
+    )
+
+    # Botón para descargar plantilla modelo
+    df_modelo_asiento = pd.DataFrame([
+        {"fecha": "2026-01-01", "codigo_cuenta": "1.1.01", "debe": 500000.0, "haber": 0.0, "glosa": "Saldo inicial Caja", "asiento": 1, "centro_costo": "General / Ninguno"},
+        {"fecha": "2026-01-01", "codigo_cuenta": "3.1.01", "debe": 0.0, "haber": 500000.0, "glosa": "Saldo inicial Capital", "asiento": 1, "centro_costo": "General / Ninguno"}
+    ])
+    csv_modelo_asiento = df_modelo_asiento.to_csv(index=False, sep=";").encode("utf-8-sig")
+
+    st.download_button(
+        label="📥 Descargar Plantilla de Asientos y Saldos",
+        data=csv_modelo_asiento,
+        file_name="plantilla_asientos_saldos.csv",
+        mime="text/csv",
+        type="secondary"
+    )
+
+    st.divider()
+
+    tipo_carga = st.radio("Seleccione el origen del lote", ["Saldo inicial", "Asiento manual"])
+    archivo_asiento = st.file_uploader("Adjuntar matriz rellenada", type=["csv"], key="subir_asientos")
+
+    if archivo_asiento:
+        try:
+            df = leer_csv(archivo_asiento)
+            df.columns = [str(c).strip().lower() for c in df.columns]
+
+            obligatorias = ["fecha", "codigo_cuenta", "debe", "haber", "glosa"]
+            faltantes = [c for c in obligatorias if c not in df.columns]
+
+            if faltantes:
+                st.error("Faltan columnas obligatorias: " + ", ".join(faltantes))
+            else:
+                plan = Plan(conn)
+                resultado = pd.DataFrame()
+
+                resultado["fecha"] = df["fecha"].apply(fecha_iso)
+                resultado["cuenta_original"] = df["codigo_cuenta"].astype(str).str.strip()
+
+                resuelto = resultado["cuenta_original"].apply(plan.resolver)
+                resultado["codigo"] = resuelto.apply(lambda x: x[0] if x else None)
+                resultado["cuenta"] = resuelto.apply(lambda x: x[1] if x else None)
+                resultado["debe"] = df["debe"].apply(numero)
+                resultado["haber"] = df["haber"].apply(numero)
+                resultado["glosa"] = df["glosa"].fillna("").astype(str)
+
+                resultado["centro_costo"] = df["centro_costo"].fillna("General / Ninguno") if "centro_costo" in df.columns else "General / Ninguno"
+                resultado["asiento"] = pd.to_numeric(df["asiento"], errors="coerce") if "asiento" in df.columns else 1
+
+                errores = []
+                for i, fila in resultado.iterrows():
+                    if not fila["fecha"]:
+                        errores.append(f"Línea {i+2}: fecha inválida.")
+                    if not fila["codigo"]:
+                        errores.append(f"Línea {i+2}: cuenta '{fila['cuenta_original']}' no encontrada en el plan.")
+                    if fila["debe"] > 0 and fila["haber"] > 0:
+                        errores.append(f"Línea {i+2}: Debe y Haber simultáneos.")
+                    if fila["debe"] == 0 and fila["haber"] == 0:
+                        errores.append(f"Línea {i+2}: Debe y Haber están en cero.")
+
+                for asiento_id, grupo in resultado.groupby("asiento"):
+                    if abs(grupo["debe"].sum() - grupo["haber"].sum()) > 0.01:
+                        errores.append(f"Asiento {asiento_id}: descuadrado (Debe={grupo['debe'].sum()}, Haber={grupo['haber'].sum()}).")
+
+                if errores:
+                    st.error("Se encontraron errores en la matriz:\n\n" + "\n".join(errores[:30]))
+                else:
+                    st.success("¡Matriz validada y cuadrada correctamente!")
+                    st.dataframe(resultado, use_container_width=True, hide_index=True)
+
+                    if st.button("✅ REGISTRAR EN LIBRO DIARIO", type="primary"):
+                        prefix = "SALDO-INI-" if tipo_carga == "Saldo inicial" else "ASIENTOS-MAN-"
+                        lote = prefix + datetime.now().strftime("%Y%m%d-%H%M%S")
+                        cur = conn.cursor()
+                        base = siguiente_asiento(conn)
+
+                        mapa_asientos = {
+                            n: i + 1
+                            for i, n in enumerate(sorted(resultado["asiento"].unique()))
+                        }
+
+                        try:
+                            for fila in resultado.itertuples():
+                                asiento = base + mapa_asientos[fila.asiento]
+                                cur.execute(
+                                    """
+                                    INSERT INTO libro_diario
+                                    (
+                                        fecha,
+                                        cuenta,
+                                        debe,
+                                        haber,
+                                        glosa,
+                                        centro_costo,
+                                        codigo_cuenta,
+                                        asiento_id,
+                                        lote_id,
+                                        origen
+                                    )
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                                    (
+                                        fila.fecha,
+                                        fila.cuenta,
+                                        fila.debe,
+                                        fila.haber,
+                                        fila.glosa,
+                                        fila.centro_costo,
+                                        fila.codigo,
+                                        asiento,
+                                        lote,
+                                        tipo_carga
+                                    )
+                                )
+
+                            conn.commit()
+                            st.success(f"¡Registrado con éxito! Lote generado: {lote}")
+                        except Exception as e:
+                            conn.rollback()
+                            st.error(f"Error al guardar: {e}")
+
+        except Exception as e:
+            st.error(f"Error leyendo el archivo: {e}")
 
 
 # ============================================================
@@ -3534,7 +3655,7 @@ elif menu == "📋 Plan de Cuentas":
 
 
 # ============================================================
-# REGLAS CONTABLES
+# REGLAS CONTABLES (CORREGIDO Y OPTIMIZADO)
 # ============================================================
 
 elif menu == "⚙️ Reglas Contables":
@@ -3542,9 +3663,8 @@ elif menu == "⚙️ Reglas Contables":
     st.title("⚙️ Reglas de clasificación contable")
     st.info(
         """
-        Las reglas tienen prioridad sobre la cuenta habitual del
-        cliente/proveedor. Esto permite que el SGCI aprenda la
-        clasificación contable de cada empresa.
+        Las reglas tienen prioridad sobre la cuenta habitual del cliente/proveedor. 
+        Esto permite que el SGCI aprenda la clasificación contable de cada empresa.
         """
     )
 
@@ -3574,6 +3694,7 @@ elif menu == "⚙️ Reglas Contables":
             st.success("Regla guardada.")
 
     st.divider()
+    st.subheader("Reglas configuradas actualmente")
 
     reglas = pd.read_sql_query(
         """
@@ -3598,7 +3719,10 @@ elif menu == "⚙️ Reglas Contables":
         conn
     )
 
-    st.dataframe(reglas, use_container_width=True, hide_index=True)
+    if reglas.empty:
+        st.info("No hay reglas contables registradas todavía.")
+    else:
+        st.dataframe(reglas, use_container_width=True, hide_index=True)
 
 
 # ============================================================
