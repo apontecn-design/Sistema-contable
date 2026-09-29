@@ -191,7 +191,6 @@ def leer_csv(uploaded_file):
     if texto is None:
         raise ValueError("No fue posible leer el archivo.")
 
-    # Limpiar punto y coma extra al final de las líneas típicos del SII
     lineas_limpias = [
         linea.rstrip(";")
         for linea in texto.splitlines()
@@ -1172,7 +1171,7 @@ def preparar_documentos(conn, docs, tipo):
             estado = "⚠️ Tipo no soportado"
 
         elif d.total == 0:
-            estado = "⚠️ Monto cero"
+            estado = "⚠️️ Monto cero"
 
         elif clave in existentes:
             estado = "🔁 Ya contabilizado"
@@ -1298,7 +1297,7 @@ def preparar_documentos(conn, docs, tipo):
 
 
 # ============================================================
-# ASIENTOS (Con respaldo robusto para el Debe)
+# ASIENTOS (Con Blindaje Total y Cálculo por Diferencia)
 # ============================================================
 
 def armar_asiento(doc, tipo, cuenta, roles):
@@ -1332,11 +1331,16 @@ def armar_asiento(doc, tipo, cuenta, roles):
             - exento
         )
         
+        # BLINDAJE TOTAL: Si el principal (neto) viene en 0 o negativo pero hay un total,
+        # deducimos el neto automáticamente por diferencia matemática para que jamás dé Debe = 0.0
         if principal <= 0:
             if neto > 0:
                 principal = neto
             else:
-                principal = max(0.0, total - iva_recuperable - iva_no_rec - iva_uso)
+                deduccion_iva = iva_recuperable if iva_recuperable > 0 else round(total - (total / 1.19), 2)
+                principal = max(0.0, total - deduccion_iva - iva_no_rec - iva_uso - exento)
+                if iva_recuperable == 0:
+                    iva_recuperable = deduccion_iva
 
         debe = []
 
@@ -3479,7 +3483,7 @@ elif menu == "📋 Plan de Cuentas":
 
 elif menu == "⚙️ Reglas Contables":
 
-    st.title("⚙️ Reglas de clasificación contable")
+    st.title("⚙️️ Reglas de clasificación contable")
     st.info(
         """
         Las reglas tienen prioridad sobre la cuenta habitual del
@@ -3562,7 +3566,7 @@ elif menu == "📦 Lotes":
             "contables y documentos asociados a ese lote."
         )
 
-        if st.button("🗑️️ DESHACER LOTE", type="secondary"):
+        if st.button("🗑️ DESHACER LOTE", type="secondary"):
             try:
                 resultado = deshacer_lote(conn, lote)
                 st.success(f"Lote eliminado: {resultado}")
