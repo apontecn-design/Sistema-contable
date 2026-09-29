@@ -2741,7 +2741,7 @@ elif menu == "📥 RCV Compras":
     archivo = st.file_uploader(
         "Cargar RCV de Compras",
         type=["csv"],
-        key="rcv_compras"
+        key="rcv_compras_file"
     )
 
     if archivo:
@@ -2756,7 +2756,7 @@ elif menu == "📥 RCV Compras":
         except Exception as e:
             st.error(f"Error: {e}")
 
-    if "rcv_compras" in st.session_state:
+    if "rcv_compras" in st.session_state and isinstance(st.session_state["rcv_compras"], pd.DataFrame):
 
         df = st.session_state["rcv_compras"].copy()
 
@@ -2867,7 +2867,7 @@ elif menu == "📤 RCV Ventas":
     archivo = st.file_uploader(
         "Cargar RCV de Ventas",
         type=["csv"],
-        key="rcv_ventas"
+        key="rcv_ventas_file"
     )
 
     if archivo:
@@ -2881,7 +2881,7 @@ elif menu == "📤 RCV Ventas":
         except Exception as e:
             st.error(f"Error: {e}")
 
-    if "rcv_ventas" in st.session_state:
+    if "rcv_ventas" in st.session_state and isinstance(st.session_state["rcv_ventas"], pd.DataFrame):
 
         df = st.session_state["rcv_ventas"].copy()
 
@@ -3243,7 +3243,9 @@ elif menu == "💵 Pagos":
             """
         ).fetchall()
 
-        if clientes:
+        if not clientes:
+            st.info("No hay clientes registrados. Debe crear al menos un cliente para registrar cobranzas.")
+        else:
             opciones = {f"{x['rut']} - {x['nombre']}": x["id"] for x in clientes}
 
             with st.form("pago_cliente"):
@@ -3291,7 +3293,9 @@ elif menu == "💵 Pagos":
             """
         ).fetchall()
 
-        if proveedores:
+        if not proveedores:
+            st.info("No hay proveedores registrados. Debe crear al menos un proveedor para registrar pagos.")
+        else:
             opciones = {f"{x['rut']} - {x['nombre']}": x["id"] for x in proveedores}
 
             with st.form("pago_proveedor"):
