@@ -3,11 +3,10 @@
 """
 SGCI - Sistema de Gestión Contable Integral
 Versión actualizada con:
-- Tratamiento contable completo por Tipo de Documento SII (33, 34, 39, 41, 45, 46, 52, 55, 56, 60, 61, 30, 32)
-- Separación de Facturas Exentas de Ventas (Tipo 34 -> Cuenta Ventas Exentas)
-- Protección de acceso mediante contraseña
-- Botón de descarga de respaldo de Base de Datos en el Sidebar
-- Plan de cuentas, RCV Compras/Ventas, Auxiliares, Conciliación, Lotes y SQLite.
+- Corrección de multplicador de signo (-1) aplicado en resúmenes y montos para Notas de Crédito (Compras y Ventas)
+- Tratamiento contable completo por Tipo de Documento SII
+- Separación de Facturas Exentas de Ventas (Tipo 34 y 41 -> Cuenta Ventas Exentas)
+- Protección de acceso mediante contraseña y respaldo de base de datos
 """
 
 import io
@@ -1191,7 +1190,7 @@ def preparar_documentos(conn, docs, tipo):
 
         vistos.add(clave)
 
-        # Criterio de signo según tipo de documento (Notas de crédito restan)
+        # Criterio estricto de signo: Notas de crédito restan (-1), notas de débito y facturas suman (1)
         signo = (
             -1
             if tipo_doc in DOC_NOTA_CREDITO
@@ -1231,7 +1230,7 @@ def preparar_documentos(conn, docs, tipo):
         cuenta = None
         origen = None
 
-        # Si es venta exenta (Código 34 o 41), asignar por defecto la cuenta de ventas exentas
+        # Si es venta exenta (Código 34, 41 o 32), asignar por defecto la cuenta de ventas exentas
         if not compras and tipo_doc in {34, 41, 32}:
             exento_rol = roles.get("ingreso_exento")
             if exento_rol:
@@ -1299,102 +1298,97 @@ def preparar_documentos(conn, docs, tipo):
 
 def armar_asiento(doc, tipo, cuenta, roles):
 
-    total = float(doc.total)
-
-    if total < 0:
-        raise ValueError(
-            f"El documento {doc.folio} tiene total negativo."
-        )
+    total = float(doc.total) * int(doc.signo)
 
     if tipo == "compras":
 
         iva_recuperable = (
             float(doc.iva)
             + float(doc.iva_af)
-        )
+        ) * int(doc.signo)
 
-        iva_no_rec = float(doc.iva_no_rec)
-        iva_uso = float(doc.iva_uso_comun)
-        activo_fijo = float(doc.neto_af)
-        exento = float(doc.exento)
-        neto = float(doc.neto)
+        iva_no_rec = float(doc.iva_no_rec) * int(doc.signo)
+        iva_uso = float(doc.iva_uso_comun) * int(doc.signo)
+        activo_fijo = float(doc.neto_af) * int(doc.signo)
+        exento = float(doc.exento) * int(doc.signo)
+        neto = float(doc.neto) * int(doc.signo)
 
         principal = (
-            total
-            - iva_recuperable
-            - activo_fijo
-            - iva_no_rec
-            - iva_uso
-            - exento
-        )
+            abs(total)
+            - abs(iva_recuperable)
+            - abs(activo_fijo)
+            - abs(iva_no_rec)
+            - abs(iva_uso)
+            - abs(exento)
+        ) * int(doc.signo)
         
-        if principal <= 0:
-            if neto > 0:
+        if abs(principal) <= 0.01:
+            if abs(neto) > 0:
                 principal = neto
             else:
-                deduccion_iva = iva_recuperable if iva_recuperable > 0 else round(total - (total / 1.19), 2)
-                principal = max(0.0, total - deduccion_iva - iva_no_rec - iva_uso - exento)
-                if iva_recuperable == 0:
+                deduccion_iva = iva_recuperable if abs(iva_recuperable) > 0 else round(total - (total / 1.19), 2)
+                principal = total - deduccion_iva - iva_no_rec - iva_uso - exento
+                if abs(iva_recuperable) == 0:
                     iva_recuperable = deduccion_iva
 
         debe = []
+        haber = []
 
-        if principal > 0:
-            debe.append((cuenta, principal))
-
-        if activo_fijo > 0:
-            if roles["activo_fijo"] is None:
-                raise ValueError("No está configurada la cuenta de activo fijo.")
-            debe.append((roles["activo_fijo"][0], activo_fijo))
-
-        if iva_recuperable > 0:
-            debe.append((roles["iva_credito"][0], iva_recuperable))
-
-        if iva_no_rec > 0:
-            cuenta_iva_nr = roles["iva_no_recuperable"]
-            if cuenta_iva_nr is None:
-                raise ValueError("No está configurada la cuenta de IVA no recuperable.")
-            debe.append((cuenta_iva_nr[0], iva_no_rec))
-
-        if iva_uso > 0:
-            cuenta_iva_uc = roles["iva_uso_comun"]
-            if cuenta_iva_uc is None:
-                raise ValueError("No está configurada la cuenta de IVA de uso común.")
-            debe.append((cuenta_iva_uc[0], iva_uso))
-
-        haber = [(roles["proveedores"][0], total)]
+        if int(doc.signo) > 0:
+            if principal != 0:
+                debe.append((cuenta, abs(principal)))
+            if activo_fijo != 0:
+                debe.append((roles["activo_fijo"][0], abs(activo_fijo)))
+            if iva_recuperable != 0:
+                debe.append((roles["iva_credito"][0], abs(iva_recuperable)))
+            if iva_no_rec != 0:
+                debe.append((roles["iva_no_recuperable"][0], abs(iva_no_rec)))
+            if iva_uso != 0:
+                debe.append((roles["iva_uso_comun"][0], abs(iva_uso)))
+            haber.append((roles["proveedores"][0], abs(total)))
+        else:
+            # Nota de crédito de compra (invierten los roles)
+            haber.append((cuenta, abs(principal)))
+            if abs(activo_fijo) > 0:
+                haber.append((roles["activo_fijo"][0], abs(activo_fijo)))
+            if abs(iva_recuperable) > 0:
+                haber.append((roles["iva_credito"][0], abs(iva_recuperable)))
+            if abs(iva_no_rec) > 0:
+                haber.append((roles["iva_no_recuperable"][0], abs(iva_no_rec)))
+            if abs(iva_uso) > 0:
+                haber.append((roles["iva_uso_comun"][0], abs(iva_uso)))
+            debe.append((roles["proveedores"][0], abs(total)))
 
     else:
 
-        iva = float(doc.iva)
-        principal = total - iva
+        iva = float(doc.iva) * int(doc.signo)
+        principal = (float(doc.total) - float(doc.iva)) * int(doc.signo)
 
-        if principal < 0:
-            raise ValueError(
-                f"Documento {doc.folio}: "
-                "IVA superior al total."
-            )
-
-        debe = [(roles["clientes"][0], total)]
+        debe = []
         haber = []
 
-        if principal > 0:
-            haber.append((cuenta, principal))
-
-        if iva > 0:
-            haber.append((roles["iva_debito"][0], iva))
-
-    if int(doc.signo) < 0:
-        debe, haber = haber, debe
+        if int(doc.signo) > 0:
+            debe.append((roles["clientes"][0], abs(total)))
+            if principal != 0:
+                haber.append((cuenta, abs(principal)))
+            if iva != 0:
+                haber.append((roles["iva_debito"][0], abs(iva)))
+        else:
+            # Nota de crédito de venta (invierten los roles)
+            haber.append((roles["clientes"][0], abs(total)))
+            if abs(principal) > 0:
+                debe.append((cuenta, abs(principal)))
+            if abs(iva) > 0:
+                debe.append((roles["iva_debito"][0], abs(iva)))
 
     lineas = []
 
     for codigo, monto in debe:
-        if monto > 0:
+        if monto > 0.001:
             lineas.append((codigo, round(monto, 2), 0.0))
 
     for codigo, monto in haber:
-        if monto > 0:
+        if monto > 0.001:
             lineas.append((codigo, 0.0, round(monto, 2)))
 
     total_debe = sum(x[1] for x in lineas)
@@ -1564,6 +1558,8 @@ def contabilizar_rcv(
 
             asiento += 1
 
+            signo_val = int(d.signo)
+
             if compras:
 
                 cuenta_nombre = plan.hojas[d.cuenta_codigo]
@@ -1604,9 +1600,9 @@ def contabilizar_rcv(
                         entidad_id,
                         cuenta_nombre,
                         centro,
-                        float(d.neto) + float(d.exento) + float(d.neto_af),
-                        float(d.iva) + float(d.iva_af),
-                        int(d.signo) * float(d.total),
+                        (float(d.neto) + float(d.exento) + float(d.neto_af)) * signo_val,
+                        (float(d.iva) + float(d.iva_af)) * signo_val,
+                        float(d.total) * signo_val,
                         glosa,
                         int(d.tipo_doc),
                         str(d.folio),
@@ -1639,9 +1635,9 @@ def contabilizar_rcv(
                         fecha,
                         entidad_id,
                         cuenta_nombre,
-                        float(d.neto) + float(d.exento),
-                        float(d.iva),
-                        int(d.signo) * float(d.total),
+                        (float(d.neto) + float(d.exento)) * signo_val,
+                        float(d.iva) * signo_val,
+                        float(d.total) * signo_val,
                         glosa,
                         int(d.tipo_doc),
                         str(d.folio),
@@ -2563,7 +2559,7 @@ menu = st.sidebar.radio(
         "⚖️ Balance de Comprobación",
         "📊 Conciliación",
         "📋 Plan de Cuentas",
-        "⚙️️ Reglas Contables",
+        "⚙️ Reglas Contables",
         "📦 Lotes",
         "🧰 Matriz Contable",
     ]
@@ -2753,9 +2749,10 @@ elif menu == "📥 RCV Compras":
         st.divider()
         st.subheader("Resumen de importación")
 
-        total = df["total"].sum()
-        neto = df["neto"].sum()
-        iva = df["iva"].sum()
+        # Criterio corregido considerando el signo (-1 para NC)
+        total = (df["total"] * df["signo"]).sum()
+        neto = (df["neto"] * df["signo"]).sum()
+        iva = (df["iva"] * df["signo"]).sum()
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Documentos", len(df))
@@ -2875,11 +2872,16 @@ elif menu == "📤 RCV Ventas":
 
         df = st.session_state["rcv_ventas"].copy()
 
+        # Criterio corregido considerando el signo (-1 para NC)
+        total_v = (df["total"] * df["signo"]).sum()
+        neto_v = (df["neto"] * df["signo"]).sum()
+        iva_v = (df["iva"] * df["signo"]).sum()
+
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Documentos", len(df))
-        c2.metric("Neto", money(df["neto"].sum()))
-        c3.metric("IVA", money(df["iva"].sum()))
-        c4.metric("Total", money(df["total"].sum()))
+        c2.metric("Neto", money(neto_v))
+        c3.metric("IVA", money(iva_v))
+        c4.metric("Total", money(total_v))
 
         st.divider()
         st.subheader("Bandeja de revisión")
