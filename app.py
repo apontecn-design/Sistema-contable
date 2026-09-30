@@ -2,11 +2,11 @@
 
 """
 SGCI - Sistema de Gestión Contable Integral
-Versión con:
+Versión actualizada con:
+- Tratamiento contable completo por Tipo de Documento SII (33, 34, 39, 41, 45, 46, 52, 55, 56, 60, 61, 30, 32)
+- Separación de Facturas Exentas de Ventas (Tipo 34 -> Cuenta Ventas Exentas)
 - Protección de acceso mediante contraseña
 - Botón de descarga de respaldo de Base de Datos en el Sidebar
-- Corrección de visualización en Reglas Contables
-- Módulo de Asientos Manuales y Saldos Iniciales por Matriz Excel Descargable
 - Plan de cuentas, RCV Compras/Ventas, Auxiliares, Conciliación, Lotes y SQLite.
 """
 
@@ -44,7 +44,7 @@ if not st.session_state["authenticated"]:
         st.info("Por seguridad, ingresa la contraseña para acceder al sistema contable.")
         pwd = st.text_input("Contraseña de acceso", type="password")
         if st.button("Ingresar al Sistema", type="primary", use_container_width=True):
-            if pwd == "admin2026":  # Contraseña por defecto (puedes modificarla aquí)
+            if pwd == "admin2026":
                 st.session_state["authenticated"] = True
                 st.rerun()
             else:
@@ -230,19 +230,19 @@ def serie_fecha(serie):
 
 
 # ============================================================
-# TIPOS DE DOCUMENTOS SII
+# TIPOS DE DOCUMENTOS SII (Criterios Oficiales)
 # ============================================================
 
 NOMBRES_DOC = {
-    30: "Factura",
-    32: "Factura de compra",
+    30: "Factura física / exenta no electrónica",
+    32: "Factura de ventas/servicios exentos no electrónicos",
     33: "Factura electrónica",
-    34: "Factura exenta electrónica",
-    39: "Boleta electrónica",
+    34: "Factura no afecta o exenta electrónica",
+    39: "Boleta electrónica de ventas y servicios",
     41: "Boleta exenta electrónica",
-    43: "Liquidación factura",
+    45: "Factura de compra",
     46: "Factura de compra electrónica",
-    52: "Guía de despacho",
+    52: "Guía de despacho electrónica",
     55: "Nota de débito",
     56: "Nota de débito electrónica",
     60: "Nota de crédito",
@@ -258,7 +258,11 @@ DOC_SOPORTADOS = {
     32,
     33,
     34,
+    39,
+    41,
+    45,
     46,
+    52,
     55,
     56,
     60,
@@ -304,8 +308,12 @@ ROLES = {
         "5.2.01"
     ),
     "ingreso_defecto": (
-        "Ingresos por defecto",
+        "Ingresos por defecto (Ventas Afectas)",
         "4.1.01"
+    ),
+    "ingreso_exento": (
+        "Ventas exentas",
+        "4.1.04"
     ),
     "activo_fijo": (
         "Activo fijo",
@@ -561,8 +569,6 @@ def crear_esquema(conn):
             ("razon_social", "TEXT"),
             ("email", "TEXT"),
             ("telefono", "TEXT"),
-            ("direccion", "TEXT"),
-            ("comuna", "TEXT"),
             ("comuna", "TEXT"),
             ("ciudad", "TEXT"),
             ("cuenta_defecto", "TEXT"),
@@ -691,6 +697,7 @@ PLAN_BASE = [
     ("4.1.01", "Ventas", "Nominal", "Ingresos", "4.1", 3),
     ("4.1.02", "Servicios", "Nominal", "Ingresos", "4.1", 3),
     ("4.1.03", "Otros Ingresos", "Nominal", "Ingresos", "4.1", 3),
+    ("4.1.04", "Ventas exentas", "Nominal", "Ingresos", "4.1", 3),
     ("5", "COSTOS", "Nominal", "Gastos", None, 1),
     ("5.1", "Costos de Venta", "Nominal", "Gastos", "5", 2),
     ("5.1.01", "Costo de Ventas", "Nominal", "Gastos", "5.1", 3),
@@ -1073,11 +1080,10 @@ def preparar_documentos(conn, docs, tipo):
     plan = Plan(conn)
     roles = cargar_roles(conn)
 
-    rol_defecto = (
-        "gasto_defecto"
-        if compras
-        else "ingreso_defecto"
-    )
+    if compras:
+        rol_defecto = "gasto_defecto"
+    else:
+        rol_defecto = "ingreso_defecto"
 
     defecto = roles[rol_defecto]
 
@@ -1185,6 +1191,7 @@ def preparar_documentos(conn, docs, tipo):
 
         vistos.add(clave)
 
+        # Criterio de signo según tipo de documento (Notas de crédito restan)
         signo = (
             -1
             if tipo_doc in DOC_NOTA_CREDITO
@@ -1221,43 +1228,32 @@ def preparar_documentos(conn, docs, tipo):
         if d.exento > 0 and d.neto > 0:
             obs.append("Documento mixto: exento y afecto.")
 
-        if compras and d.iva_no_rec > 0:
-            obs.append("Contiene IVA no recuperable.")
-
-        if compras and d.iva_uso_comun > 0:
-            obs.append("Contiene IVA de uso común.")
-
-        if compras and d.neto_af > 0:
-            obs.append("Contiene activo fijo.")
-
-        if signo < 0:
-            if d.ref_folio:
-                obs.append(
-                    "Nota de crédito asociada a "
-                    f"{nombre_documento(d.ref_type)} "
-                    f"N° {d.ref_folio}."
-                )
-            else:
-                obs.append("Nota de crédito sin documento de referencia.")
-
         cuenta = None
         origen = None
 
-        regla = buscar_regla(
-            conn,
-            tipo,
-            rut,
-            tipo_doc,
-            d.razon_social
-        )
-
-        if regla:
-            cuenta = limpiar_texto(
-                regla["codigo_cuenta"]
-            )
-            origen = f"Regla #{int(regla['id'])}"
+        # Si es venta exenta (Código 34 o 41), asignar por defecto la cuenta de ventas exentas
+        if not compras and tipo_doc in {34, 41, 32}:
+            exento_rol = roles.get("ingreso_exento")
+            if exento_rol:
+                cuenta = exento_rol[0]
+                origen = f"Cuenta ventas exentas (Tipo {tipo_doc})"
 
         if not cuenta:
+            regla = buscar_regla(
+                conn,
+                tipo,
+                rut,
+                tipo_doc,
+                d.razon_social
+            )
+
+            if regla:
+                cuenta = limpiar_texto(
+                    regla["codigo_cuenta"]
+                )
+                origen = f"Regla #{int(regla['id'])}"
+
+        if not cuenta and compras:
             habitual = cuenta_habitual(
                 conn,
                 tipo,
@@ -2567,13 +2563,12 @@ menu = st.sidebar.radio(
         "⚖️ Balance de Comprobación",
         "📊 Conciliación",
         "📋 Plan de Cuentas",
-        "⚙️ Reglas Contables",
+        "⚙️️ Reglas Contables",
         "📦 Lotes",
         "🧰 Matriz Contable",
     ]
 )
 
-# Botón de Respaldo de Base de Datos en el Sidebar
 st.sidebar.divider()
 st.sidebar.caption("Respaldo de Datos")
 if os.path.exists(DB_FILE):
@@ -2698,7 +2693,7 @@ elif menu == "📥 RCV Compras":
 
         df_plantilla_modelo = pd.DataFrame([
             {
-                "tipo_doc": 30,
+                "tipo_doc": 33,
                 "folio": "147039",
                 "fecha_doc": str(date.today()),
                 "rut": "76123456-7",
