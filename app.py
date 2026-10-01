@@ -13,7 +13,8 @@ import io
 import os
 import re
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from hashlib import sha256
 
 import pandas as pd
 import streamlit as st
@@ -23,7 +24,9 @@ import streamlit as st
 # CONFIGURACIÓN Y SEGURIDAD (AUTENTICACIÓN)
 # ============================================================
 
-DB_FILE = "sgci.db"
+DATA_DIR = os.getenv("SGCI_DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_FILE = os.path.join(DATA_DIR, "sgci.db")
 
 st.set_page_config(
     page_title="SGCI - Sistema Contable",
@@ -219,6 +222,40 @@ def leer_csv(uploaded_file):
 
     return df.dropna(how="all")
 
+
+
+def leer_archivo_tabular(uploaded_file):
+    """Lee CSV o Excel, incluyendo planillas descargadas del SII."""
+    nombre = getattr(uploaded_file, "name", "").lower()
+    if nombre.endswith((".xlsx", ".xls")):
+        datos = uploaded_file.getvalue()
+        if not datos:
+            raise ValueError("El archivo está vacío.")
+        libro = pd.ExcelFile(io.BytesIO(datos))
+        hojas = libro.sheet_names
+        # El usuario puede escoger la hoja desde la interfaz; aquí se usa la primera.
+        hoja = hojas[0]
+        return pd.read_excel(io.BytesIO(datos), sheet_name=hoja, dtype=str)
+    return leer_csv(uploaded_file)
+
+
+def normalizar_columnas(df):
+    df = df.copy()
+    df.columns = [
+        re.sub(r"\\s+", " ", limpiar_texto(c)).strip().lower()
+        for c in df.columns
+    ]
+    return df
+
+
+def leer_excel_con_hoja(uploaded_file, hoja=None):
+    datos = uploaded_file.getvalue()
+    if not datos:
+        raise ValueError("El archivo está vacío.")
+    libro = pd.ExcelFile(io.BytesIO(datos))
+    if hoja is None:
+        hoja = libro.sheet_names[0]
+    return pd.read_excel(io.BytesIO(datos), sheet_name=hoja, dtype=str)
 
 def serie_numero(serie):
     return serie.apply(numero)
@@ -551,6 +588,86 @@ def crear_esquema(conn):
             """,
             (rol, codigo)
         )
+
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bancos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            numero_cuenta TEXT,
+            tipo TEXT,
+            moneda TEXT DEFAULT 'CLP',
+            cuenta_contable TEXT,
+            saldo_inicial REAL DEFAULT 0,
+            activo INTEGER DEFAULT 1
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cartola_bancaria (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            banco_id INTEGER,
+            fecha TEXT,
+            descripcion TEXT,
+            referencia TEXT,
+            cargo REAL DEFAULT 0,
+            abono REAL DEFAULT 0,
+            saldo REAL,
+            conciliado INTEGER DEFAULT 0,
+            observacion TEXT,
+            lote_id TEXT,
+            UNIQUE(banco_id, fecha, descripcion, cargo, abono, referencia)
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS periodos_contables (
+            periodo TEXT PRIMARY KEY,
+            estado TEXT DEFAULT 'ABIERTO',
+            fecha_cierre TEXT,
+            observacion TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS auditoria (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha_hora TEXT,
+            usuario TEXT,
+            accion TEXT,
+            detalle TEXT
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS activos_fijos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo TEXT UNIQUE,
+            descripcion TEXT,
+            fecha_compra TEXT,
+            valor REAL DEFAULT 0,
+            vida_util_meses INTEGER DEFAULT 1,
+            valor_residual REAL DEFAULT 0,
+            cuenta_activo TEXT,
+            cuenta_depreciacion TEXT,
+            cuenta_gasto TEXT,
+            activo INTEGER DEFAULT 1
+        )
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS inventario (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            codigo TEXT UNIQUE,
+            descripcion TEXT,
+            unidad TEXT,
+            stock REAL DEFAULT 0,
+            costo_unitario REAL DEFAULT 0,
+            cuenta_inventario TEXT,
+            cuenta_costo_venta TEXT,
+            activo INTEGER DEFAULT 1
+        )
+    """)
 
     migraciones = {
         "clientes": [
@@ -2522,6 +2639,152 @@ def guardar_regla(
     conn.commit()
 
 
+
+# ============================================================
+# CONTROL CONTABLE Y REPORTES
+# ============================================================
+
+def registrar_auditoria(conn, accion, detalle):
+    conn.execute(
+        "INSERT INTO auditoria(fecha_hora, usuario, accion, detalle) VALUES (?,?,?,?)",
+        (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "admin", accion, detalle)
+    )
+    conn.commit()
+
+
+def periodo_estado(conn, periodo):
+    fila = conn.execute("SELECT estado FROM periodos_contables WHERE periodo=?", (periodo,)).fetchone()
+    return fila[0] if fila else "ABIERTO"
+
+
+def asegurar_periodo(conn, periodo):
+    conn.execute("INSERT OR IGNORE INTO periodos_contables(periodo, estado) VALUES (?, 'ABIERTO')", (periodo,))
+    conn.commit()
+
+
+def periodo_cerrado(conn, fecha_texto):
+    periodo = str(fecha_texto)[:7]
+    return periodo_estado(conn, periodo) == "CERRADO"
+
+
+def saldo_cuenta(conn, codigo, hasta=None):
+    sql = "SELECT COALESCE(SUM(debe),0)-COALESCE(SUM(haber),0) FROM libro_diario WHERE codigo_cuenta=?"
+    params=[codigo]
+    if hasta:
+        sql += " AND fecha <= ?"
+        params.append(hasta)
+    return float(conn.execute(sql, params).fetchone()[0] or 0)
+
+
+def resumen_financiero(conn, hasta=None):
+    where = ""
+    params=[]
+    if hasta:
+        where=" WHERE fecha <= ?"
+        params=[hasta]
+    df = pd.read_sql_query(f"""
+        SELECT p.codigo, p.nombre, p.tipo, p.categoria,
+               COALESCE(SUM(l.debe),0) debe, COALESCE(SUM(l.haber),0) haber
+        FROM plan_cuentas p
+        LEFT JOIN libro_diario l ON l.codigo_cuenta=p.codigo {('AND l.fecha <= ?' if hasta else '')}
+        GROUP BY p.codigo,p.nombre,p.tipo,p.categoria
+        ORDER BY p.codigo
+    """, conn, params=params)
+    if df.empty:
+        return df
+    df["saldo"] = df["debe"] - df["haber"]
+    return df
+
+
+def estado_situacion(conn, hasta=None):
+    df=resumen_financiero(conn,hasta)
+    if df.empty: return df
+    return df[df["tipo"].isin(["Activo","Pasivo","Patrimonio"])].copy()
+
+
+def estado_resultados(conn, hasta=None, desde=None):
+    sql="""
+        SELECT p.codigo, p.nombre, p.tipo, p.categoria,
+               COALESCE(SUM(l.debe),0) debe, COALESCE(SUM(l.haber),0) haber
+        FROM plan_cuentas p
+        LEFT JOIN libro_diario l ON l.codigo_cuenta=p.codigo
+    """
+    params=[]
+    filtros=[]
+    if desde:
+        filtros.append("l.fecha >= ?"); params.append(desde)
+    if hasta:
+        filtros.append("l.fecha <= ?"); params.append(hasta)
+    if filtros: sql += " WHERE " + " AND ".join(filtros)
+    sql += " GROUP BY p.codigo,p.nombre,p.tipo,p.categoria ORDER BY p.codigo"
+    df=pd.read_sql_query(sql,conn,params=params)
+    if df.empty: return df
+    df["saldo"] = df["haber"]-df["debe"]
+    return df[df["tipo"].isin(["Ingresos","Gastos"])].copy()
+
+
+def conciliacion_banco(conn, banco_id):
+    banco=conn.execute("SELECT * FROM bancos WHERE id=?",(banco_id,)).fetchone()
+    if not banco: return None
+    movimientos=pd.read_sql_query("SELECT * FROM cartola_bancaria WHERE banco_id=? ORDER BY fecha,id",conn,params=[banco_id])
+    saldo_cartola=float(movimientos["abono"].sum()-movimientos["cargo"].sum()+float(banco["saldo_inicial"] or 0)) if not movimientos.empty else float(banco["saldo_inicial"] or 0)
+    saldo_contable=saldo_cuenta(conn,banco["cuenta_contable"]) if banco["cuenta_contable"] else 0
+    return saldo_cartola,saldo_contable,saldo_cartola-saldo_contable,movimientos
+
+
+def antiguedad_documentos(conn, tipo):
+    hoy=date.today()
+    if tipo=="clientes":
+        df=pd.read_sql_query("""
+            SELECT c.razon_social AS entidad, v.fecha, v.folio, v.monto_total AS monto,
+                   COALESCE((SELECT SUM(p.monto) FROM pagos_clientes p WHERE p.cliente_id=v.cliente_id),0) pagos
+            FROM ventas v JOIN clientes c ON c.id=v.cliente_id
+            ORDER BY v.fecha
+        """,conn)
+    else:
+        df=pd.read_sql_query("""
+            SELECT p.razon_social AS entidad, c.fecha, c.folio, c.monto_total AS monto,
+                   COALESCE((SELECT SUM(pg.monto) FROM pagos_proveedores pg WHERE pg.proveedor_id=c.proveedor_id),0) pagos
+            FROM compras c JOIN proveedores p ON p.id=c.proveedor_id
+            ORDER BY c.fecha
+        """,conn)
+    if df.empty: return df
+    df["fecha"]=pd.to_datetime(df["fecha"],errors="coerce")
+    df["saldo"]=df["monto"].abs()-df["pagos"].abs()
+    df["dias"]=(pd.Timestamp(hoy)-df["fecha"]).dt.days.fillna(0).astype(int)
+    df["tramo"]=pd.cut(df["dias"],[-1,30,60,90,10**9],labels=["0-30","31-60","61-90","+90"])
+    return df[df["saldo"]>0.01]
+
+
+def importar_cartola(conn, df, banco_id):
+    df=normalizar_columnas(df)
+    def col(*names):
+        for n in names:
+            if n.lower() in df.columns: return n.lower()
+        return None
+    fecha_c=col("fecha","fecha movimiento","fecha de movimiento","date")
+    desc_c=col("descripcion","descripción","detalle","glosa","movimiento")
+    cargo_c=col("cargo","cargos","debito","débito","retiros","egresos")
+    abono_c=col("abono","abonos","credito","crédito","depositos","depósitos","ingresos")
+    saldo_c=col("saldo","saldo disponible","balance")
+    ref_c=col("referencia","nro documento","documento","numero","número")
+    if not fecha_c or not desc_c:
+        raise ValueError("No pude identificar Fecha y Descripción en la cartola.")
+    lote="BANCO-"+datetime.now().strftime("%Y%m%d-%H%M%S")
+    nuevos=0; repetidos=0
+    for _,r in df.iterrows():
+        fecha=fecha_iso(r.get(fecha_c)); desc=limpiar_texto(r.get(desc_c)); ref=limpiar_texto(r.get(ref_c)) if ref_c else ""
+        cargo=numero(r.get(cargo_c)) if cargo_c else 0
+        abono=numero(r.get(abono_c)) if abono_c else 0
+        saldo=numero(r.get(saldo_c)) if saldo_c else None
+        if not fecha or not desc: continue
+        try:
+            conn.execute("""INSERT INTO cartola_bancaria(banco_id,fecha,descripcion,referencia,cargo,abono,saldo,lote_id) VALUES(?,?,?,?,?,?,?,?)""",
+                         (banco_id,fecha,desc,ref,cargo,abono,saldo,lote)); nuevos+=1
+        except sqlite3.IntegrityError: repetidos+=1
+    conn.commit(); registrar_auditoria(conn,"IMPORTACIÓN CARTOLA",f"Banco {banco_id}: {nuevos} movimientos nuevos, {repetidos} repetidos")
+    return nuevos,repetidos,lote
+
 # ============================================================
 # INICIALIZACIÓN
 # ============================================================
@@ -2548,6 +2811,10 @@ menu = st.sidebar.radio(
     "Módulo",
     [
         "🏠 Inicio",
+        "📊 Estados Financieros",
+        "🏦 Bancos y Cartolas",
+        "🔒 Cierre Mensual",
+        "📌 Cuentas por Cobrar/Pagar",
         "📥 RCV Compras",
         "📤 RCV Ventas",
         "✍️ Asientos y Saldos",
@@ -2577,6 +2844,12 @@ if os.path.exists(DB_FILE):
         mime="application/octet-stream",
         help="Descarga una copia de seguridad exacta de tu base de datos local."
     )
+
+
+if st.sidebar.button("🚪 Cerrar sesión"):
+    st.session_state["authenticated"] = False
+    st.rerun()
+
 
 
 # ============================================================
@@ -2655,6 +2928,149 @@ if menu == "🏠 Inicio":
     )
 
 
+
+# ============================================================
+# ESTADOS FINANCIEROS
+# ============================================================
+
+elif menu == "📊 Estados Financieros":
+    st.title("📊 Estados Financieros")
+    c1,c2,c3=st.columns(3)
+    desde=c1.date_input("Desde", date(date.today().year,1,1), key="ef_desde")
+    hasta=c2.date_input("Hasta", date.today(), key="ef_hasta")
+    modo=c3.selectbox("Informe",["Estado de Resultados","Estado de Situación Financiera","Balance de Comprobación"])
+    ds=desde.strftime("%Y-%m-%d"); hs=hasta.strftime("%Y-%m-%d")
+    if modo=="Estado de Resultados":
+        df=estado_resultados(conn,hs,ds)
+        if df.empty: st.info("No hay movimientos para el período seleccionado.")
+        else:
+            ingresos=df[df.tipo=="Ingresos"]["saldo"].sum(); gastos=df[df.tipo=="Gastos"]["saldo"].sum(); resultado=ingresos-gastos
+            a,b,c=st.columns(3); a.metric("Ingresos",money(ingresos)); b.metric("Gastos",money(gastos)); c.metric("Resultado",money(resultado))
+            st.dataframe(df[["codigo","nombre","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","saldo":"Saldo"}),use_container_width=True,hide_index=True)
+            st.success(f"Resultado del período: {money(resultado)}" if resultado>=0 else f"Resultado del período: {money(resultado)} (pérdida)")
+    elif modo=="Estado de Situación Financiera":
+        df=estado_situacion(conn,hs)
+        if df.empty: st.info("No hay movimientos para la fecha seleccionada.")
+        else:
+            activos=df[df.tipo=="Activo"]["saldo"].sum(); pasivos=-df[df.tipo=="Pasivo"]["saldo"].sum(); patrimonio=-df[df.tipo=="Patrimonio"]["saldo"].sum()
+            a,b,c=st.columns(3); a.metric("Activos",money(activos)); b.metric("Pasivos",money(pasivos)); c.metric("Patrimonio",money(patrimonio))
+            st.dataframe(df[["codigo","nombre","tipo","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","tipo":"Tipo","saldo":"Saldo"}),use_container_width=True,hide_index=True)
+            st.info(f"Control: Activo = {money(activos)} | Pasivo + Patrimonio = {money(pasivos+patrimonio)} | Diferencia = {money(activos-pasivos-patrimonio)}")
+    else:
+        df=resumen_financiero(conn,hs)
+        if df.empty: st.info("No hay movimientos.")
+        else:
+            df["saldo_deudor"]=df["debe"]-df["haber"].clip(upper=df["debe"])
+            df["saldo_acreedor"]=df["haber"]-df["debe"].clip(upper=df["haber"])
+            st.dataframe(df[["codigo","nombre","debe","haber","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","debe":"Debe","haber":"Haber","saldo":"Saldo"}),use_container_width=True,hide_index=True)
+            st.success("🟢 Balance cuadrado" if abs(df.debe.sum()-df.haber.sum())<0.01 else f"🔴 Diferencia: {money(df.debe.sum()-df.haber.sum())}")
+
+
+# ============================================================
+# BANCOS Y CARTOLAS
+# ============================================================
+
+elif menu == "🏦 Bancos y Cartolas":
+    st.title("🏦 Bancos y Cartolas")
+    tabs=st.tabs(["Cuentas bancarias","Cargar cartola","Conciliación","Movimientos"])
+    with tabs[0]:
+        df=pd.read_sql_query("SELECT b.id AS ID,b.nombre AS Banco,b.numero_cuenta AS Cuenta,b.tipo AS Tipo,b.moneda AS Moneda,b.cuenta_contable AS Cuenta_Contable,b.saldo_inicial AS Saldo_Inicial FROM bancos b WHERE activo=1 ORDER BY nombre",conn)
+        if not df.empty: st.dataframe(df,use_container_width=True,hide_index=True)
+        with st.form("nuevo_banco"):
+            a,b,c=st.columns(3); nombre=a.text_input("Banco"); numero_cuenta=b.text_input("N° cuenta"); tipo=c.selectbox("Tipo",["Cuenta corriente","Cuenta vista","Cuenta empresa","Otra"])
+            cuentas=cuentas_imputables(conn); mapa=dict(zip(cuentas.etiqueta,cuentas.codigo)); cuenta=c.selectbox("Cuenta contable bancaria",list(mapa.keys())) if mapa else ""
+            saldo=st.number_input("Saldo inicial",value=0.0,step=1000.0)
+            if st.form_submit_button("Guardar cuenta bancaria"):
+                conn.execute("INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)",(nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo)); conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); st.success("Cuenta bancaria creada.")
+    with tabs[1]:
+        bancos=pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre",conn)
+        if bancos.empty: st.warning("Primero crea una cuenta bancaria.")
+        else:
+            banco_label=st.selectbox("Cuenta bancaria",[f"{r.id} - {r.nombre} - {r.numero_cuenta}" for r in bancos.itertuples()]); banco_id=int(banco_label.split(" - ")[0])
+            archivo=st.file_uploader("Cartola bancaria CSV o Excel",type=["csv","xlsx","xls"],key="cartola_file")
+            st.caption("Se reconocen automáticamente columnas habituales: fecha, descripción/detalle, cargo, abono/crédito/débito y saldo.")
+            if archivo:
+                try:
+                    dfc=leer_archivo_tabular(archivo); st.write("Vista previa"); st.dataframe(dfc.head(20),use_container_width=True,hide_index=True)
+                    if st.button("Importar cartola",type="primary"):
+                        nuevos,repetidos,lote=importar_cartola(conn,dfc,banco_id); st.success(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
+                except Exception as e: st.error(str(e))
+            plantilla=pd.DataFrame([{"fecha":"2026-09-30","descripcion":"TRANSFERENCIA EJEMPLO","referencia":"12345","cargo":0,"abono":100000,"saldo":100000}])
+            st.download_button("📥 Descargar plantilla de cartola",plantilla.to_csv(index=False,sep=";").encode("utf-8-sig"),"plantilla_cartola_bancaria.csv","text/csv")
+    with tabs[2]:
+        bancos=pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre",conn)
+        if bancos.empty: st.info("No hay cuentas bancarias.")
+        else:
+            label=st.selectbox("Cuenta a conciliar",[f"{r.id} - {r.nombre} - {r.numero_cuenta}" for r in bancos.itertuples()],key="conc_banco")
+            info=conciliacion_banco(conn,int(label.split(" - ")[0]))
+            if info:
+                sc,ss,dif,movs=info; a,b,c=st.columns(3); a.metric("Saldo cartola",money(sc)); b.metric("Saldo contable",money(ss)); c.metric("Diferencia",money(dif))
+                st.success("🟢 Conciliación sin diferencia" if abs(dif)<0.01 else "🟡 Revisar diferencias")
+    with tabs[3]:
+        bancos=pd.read_sql_query("SELECT id,nombre FROM bancos WHERE activo=1 ORDER BY nombre",conn)
+        if not bancos.empty:
+            label=st.selectbox("Cuenta",[f"{r.id} - {r.nombre}" for r in bancos.itertuples()],key="mov_banco")
+            dfm=pd.read_sql_query("SELECT fecha,descripcion,referencia,cargo,abono,saldo,conciliado,observacion FROM cartola_bancaria WHERE banco_id=? ORDER BY fecha,id DESC",conn,params=[int(label.split(" - ")[0])])
+            st.dataframe(dfm,use_container_width=True,hide_index=True)
+
+
+# ============================================================
+# CIERRE MENSUAL
+# ============================================================
+
+elif menu == "🔒 Cierre Mensual":
+    st.title("🔒 Cierre Mensual")
+    st.info("El cierre evita que se modifique accidentalmente un período ya revisado. Los ajustes posteriores deben registrarse en un período abierto.")
+    periodos=pd.read_sql_query("SELECT periodo,estado,fecha_cierre,observacion FROM periodos_contables ORDER BY periodo DESC",conn)
+    st.dataframe(periodos,use_container_width=True,hide_index=True)
+    periodo=st.text_input("Período a revisar (AAAA-MM)",date.today().strftime("%Y-%m"))
+    try:
+        datetime.strptime(periodo,"%Y-%m")
+        asegurar_periodo(conn,periodo)
+        df=periodos.copy()
+        desde=periodo+"-01"; ultimo=(pd.Period(periodo).end_time).strftime("%Y-%m-%d")
+        diario=pd.read_sql_query("SELECT COALESCE(SUM(debe),0) debe,COALESCE(SUM(haber),0) haber FROM libro_diario WHERE fecha BETWEEN ? AND ?",conn,params=[desde,ultimo]).iloc[0]
+        dif=float(diario.debe-diario.haber)
+        c1,c2,c3=st.columns(3); c1.metric("Debe",money(diario.debe)); c2.metric("Haber",money(diario.haber)); c3.metric("Diferencia",money(dif))
+        alertas=[]
+        cc=conciliacion_clientes(conn); cp=conciliacion_proveedores(conn)
+        if not cc.empty and abs(float(cc.iloc[0].Diferencia))>0.01: alertas.append("Diferencia en clientes")
+        if not cp.empty and abs(float(cp.iloc[0].Diferencia))>0.01: alertas.append("Diferencia en proveedores")
+        if abs(dif)>0.01: alertas.append("Libro diario descuadrado")
+        st.subheader("Lista de comprobación")
+        if alertas:
+            for x in alertas: st.error("🔴 "+x)
+        else: st.success("🟢 No se detectaron diferencias básicas. El período está listo para revisión final.")
+        if periodo_estado(conn,periodo)=="ABIERTO":
+            if st.button("🔒 CERRAR PERÍODO",type="primary"):
+                if alertas: st.error("No se recomienda cerrar mientras existan alertas.")
+                else:
+                    conn.execute("UPDATE periodos_contables SET estado='CERRADO',fecha_cierre=? WHERE periodo=?",(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),periodo)); conn.commit(); registrar_auditoria(conn,"CIERRE CONTABLE",periodo); st.success("Período cerrado."); st.rerun()
+        else:
+            st.success("🔒 Período cerrado")
+            if st.button("Reabrir período"):
+                conn.execute("UPDATE periodos_contables SET estado='ABIERTO',fecha_cierre=NULL WHERE periodo=?",(periodo,)); conn.commit(); registrar_auditoria(conn,"REAPERTURA CONTABLE",periodo); st.warning("Período reabierto."); st.rerun()
+    except Exception as e: st.error(f"Período inválido: {e}")
+
+
+# ============================================================
+# CUENTAS POR COBRAR/PAGAR
+# ============================================================
+
+elif menu == "📌 Cuentas por Cobrar/Pagar":
+    st.title("📌 Cuentas por Cobrar y por Pagar")
+    t1,t2=st.tabs(["Clientes","Proveedores"])
+    with t1:
+        df=antiguedad_documentos(conn,"clientes")
+        if df.empty: st.info("No hay saldos pendientes.")
+        else:
+            resumen=df.groupby("tramo",observed=False)["saldo"].sum().reindex(["0-30","31-60","61-90","+90"],fill_value=0).reset_index(); st.dataframe(resumen.rename(columns={"tramo":"Antigüedad","saldo":"Saldo"}),use_container_width=True,hide_index=True); st.dataframe(df[["entidad","fecha","folio","saldo","dias","tramo"]],use_container_width=True,hide_index=True)
+    with t2:
+        df=antiguedad_documentos(conn,"proveedores")
+        if df.empty: st.info("No hay saldos pendientes.")
+        else:
+            resumen=df.groupby("tramo",observed=False)["saldo"].sum().reindex(["0-30","31-60","61-90","+90"],fill_value=0).reset_index(); st.dataframe(resumen.rename(columns={"tramo":"Antigüedad","saldo":"Saldo"}),use_container_width=True,hide_index=True); st.dataframe(df[["entidad","fecha","folio","saldo","dias","tramo"]],use_container_width=True,hide_index=True)
+
 # ============================================================
 # RCV COMPRAS
 # ============================================================
@@ -2668,13 +3084,13 @@ elif menu == "📥 RCV Compras":
     with pestañas_compras[0]:
         archivo = st.file_uploader(
             "Cargar RCV de Compras",
-            type=["csv"],
+            type=["csv", "xlsx", "xls"],
             key="rcv_compras_file"
         )
 
         if archivo:
             try:
-                df_original = leer_csv(archivo)
+                df_original = leer_archivo_tabular(archivo)
                 st.success(f"Archivo leído: {len(df_original):,} filas")
 
                 df = normalizar_rcv(df_original, "compras")
@@ -2721,7 +3137,7 @@ elif menu == "📥 RCV Compras":
 
         if archivo_subido:
             try:
-                df_subido = leer_csv(archivo_subido)
+                df_subido = leer_archivo_tabular(archivo_subido)
                 df_prep = df_subido.copy()
                 df_prep["fecha_doc"] = df_prep["fecha_doc"].apply(fecha_iso)
                 df_prep["neto"] = df_prep["neto"].apply(numero)
@@ -2859,7 +3275,7 @@ elif menu == "📤 RCV Ventas":
 
     if archivo:
         try:
-            df_original = leer_csv(archivo)
+            df_original = leer_archivo_tabular(archivo)
             df = normalizar_rcv(df_original, "ventas")
             df = preparar_documentos(conn, df, "ventas")
 
@@ -3802,11 +4218,11 @@ elif menu == "🧰 Matriz Contable":
         """
     )
 
-    archivo = st.file_uploader("Cargar matriz contable", type=["csv"], key="matriz")
+    archivo = st.file_uploader("Cargar matriz contable", type=["csv", "xlsx", "xls"], key="matriz")
 
     if archivo:
         try:
-            df = leer_csv(archivo)
+            df = leer_archivo_tabular(archivo)
             df.columns = [str(c).strip().lower() for c in df.columns]
 
             obligatorias = ["fecha", "cuenta", "debe", "haber", "glosa"]
