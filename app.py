@@ -1414,102 +1414,265 @@ def preparar_documentos(conn, docs, tipo):
 # ============================================================
 
 def armar_asiento(doc, tipo, cuenta, roles):
+    """
+    Construye las líneas contables de un documento del RCV.
 
-    total = float(doc.total) * int(doc.signo)
+    REGLA FUNDAMENTAL:
+    El tratamiento contable depende del TIPO DE DOCUMENTO,
+    no del signo con que el SII entregue los montos.
+
+    En particular:
+    - Factura / ND: efecto contable normal.
+    - NC: invierte Debe y Haber.
+    """
+
+    # --------------------------------------------------------
+    # 1. DATOS DEL DOCUMENTO
+    # --------------------------------------------------------
+
+    tipo_doc = int(getattr(doc, "tipo_doc", 0) or 0)
+
+    # Las NC tienen tratamiento contable inverso.
+    # No dependemos de que el CSV del SII traiga números negativos.
+    es_nc = tipo_doc in DOC_NOTA_CREDITO
+
+    total = abs(float(getattr(doc, "total", 0) or 0))
+    neto = abs(float(getattr(doc, "neto", 0) or 0))
+    exento = abs(float(getattr(doc, "exento", 0) or 0))
+
+    iva = abs(float(getattr(doc, "iva", 0) or 0))
+    iva_no_rec = abs(float(getattr(doc, "iva_no_rec", 0) or 0))
+    iva_uso = abs(float(getattr(doc, "iva_uso", 0) or 0))
+
+    activo_fijo = abs(float(getattr(doc, "activo_fijo", 0) or 0))
+    iva_activo_fijo = abs(
+        float(getattr(doc, "iva_activo_fijo", 0) or 0)
+    )
+
+    lineas_normales = []
+
+    # --------------------------------------------------------
+    # 2. COMPRAS
+    # --------------------------------------------------------
 
     if tipo == "compras":
 
-        iva_recuperable = (
-            float(doc.iva)
-            + float(doc.iva_af)
-        ) * int(doc.signo)
+        # Cuenta principal seleccionada por el usuario/regla contable.
+        cuenta_principal = cuenta
 
-        iva_no_rec = float(doc.iva_no_rec) * int(doc.signo)
-        iva_uso = float(doc.iva_uso_comun) * int(doc.signo)
-        activo_fijo = float(doc.neto_af) * int(doc.signo)
-        exento = float(doc.exento) * int(doc.signo)
-        neto = float(doc.neto) * int(doc.signo)
+        # ----------------------------------------------------
+        # DETERMINAR BASE PRINCIPAL
+        # ----------------------------------------------------
+        #
+        # Preferimos el neto informado por el SII.
+        # Si el documento no trae neto, calculamos la diferencia
+        # para soportar otros formatos de RCV.
+        #
 
-        principal = (
-            abs(total)
-            - abs(iva_recuperable)
-            - abs(activo_fijo)
-            - abs(iva_no_rec)
-            - abs(iva_uso)
-            - abs(exento)
-        ) * int(doc.signo)
-        
-        if abs(principal) <= 0.01:
-            if abs(neto) > 0:
-                principal = neto
-            else:
-                deduccion_iva = iva_recuperable if abs(iva_recuperable) > 0 else round(total - (total / 1.19), 2)
-                principal = total - deduccion_iva - iva_no_rec - iva_uso - exento
-                if abs(iva_recuperable) == 0:
-                    iva_recuperable = deduccion_iva
+        principal = neto
 
-        debe = []
-        haber = []
+        if principal <= 0.001:
 
-        if int(doc.signo) > 0:
-            if principal != 0:
-                debe.append((cuenta, abs(principal)))
-            if activo_fijo != 0:
-                debe.append((roles["activo_fijo"][0], abs(activo_fijo)))
-            if iva_recuperable != 0:
-                debe.append((roles["iva_credito"][0], abs(iva_recuperable)))
-            if iva_no_rec != 0:
-                debe.append((roles["iva_no_recuperable"][0], abs(iva_no_rec)))
-            if iva_uso != 0:
-                debe.append((roles["iva_uso_comun"][0], abs(iva_uso)))
-            haber.append((roles["proveedores"][0], abs(total)))
-        else:
-            # Nota de crédito de compra (invierten los roles)
-            haber.append((cuenta, abs(principal)))
-            if abs(activo_fijo) > 0:
-                haber.append((roles["activo_fijo"][0], abs(activo_fijo)))
-            if abs(iva_recuperable) > 0:
-                haber.append((roles["iva_credito"][0], abs(iva_recuperable)))
-            if abs(iva_no_rec) > 0:
-                haber.append((roles["iva_no_recuperable"][0], abs(iva_no_rec)))
-            if abs(iva_uso) > 0:
-                haber.append((roles["iva_uso_comun"][0], abs(iva_uso)))
-            debe.append((roles["proveedores"][0], abs(total)))
+            impuestos_separados = (
+                iva
+                + iva_no_rec
+                + iva_uso
+                + iva_activo_fijo
+            )
+
+            principal = max(
+                total - impuestos_separados - exento,
+                0.0
+            )
+
+        # Parte exenta también pertenece a la compra/gasto.
+        principal += exento
+
+        # ----------------------------------------------------
+        # DEBE DE LA COMPRA
+        # ----------------------------------------------------
+
+        if principal > 0.001:
+            lineas_normales.append(
+                (cuenta_principal, principal, 0.0)
+            )
+
+        # IVA crédito fiscal recuperable.
+        #
+        # Si existe IVA específico de activo fijo, evitamos
+        # duplicarlo dentro del IVA general.
+        iva_credito = max(iva - iva_activo_fijo, 0.0)
+
+        if iva_credito > 0.001:
+            lineas_normales.append(
+                (roles["iva_credito"], iva_credito, 0.0)
+            )
+
+        # IVA de activo fijo.
+        if iva_activo_fijo > 0.001:
+            codigo_iva_af = roles.get(
+                "iva_credito_activo_fijo",
+                roles["iva_credito"]
+            )
+
+            lineas_normales.append(
+                (codigo_iva_af, iva_activo_fijo, 0.0)
+            )
+
+        # IVA no recuperable.
+        if iva_no_rec > 0.001:
+            codigo_no_rec = roles.get(
+                "iva_no_recuperable",
+                cuenta_principal
+            )
+
+            lineas_normales.append(
+                (codigo_no_rec, iva_no_rec, 0.0)
+            )
+
+        # IVA de uso común.
+        if iva_uso > 0.001:
+            codigo_uso = roles.get(
+                "iva_uso_comun",
+                cuenta_principal
+            )
+
+            lineas_normales.append(
+                (codigo_uso, iva_uso, 0.0)
+            )
+
+        # ----------------------------------------------------
+        # CUADRATURA AUTOMÁTICA DE LA BASE
+        # ----------------------------------------------------
+        #
+        # Proveedores debe quedar exactamente por el total
+        # del documento. Si el RCV contiene otros impuestos
+        # que todavía no tienen cuenta separada, incorporamos
+        # la diferencia a la cuenta principal para no perder
+        # valor contable.
+        #
+
+        debe_actual = sum(x[1] for x in lineas_normales)
+
+        diferencia = round(total - debe_actual, 2)
+
+        if abs(diferencia) > 0.01:
+
+            encontrada = False
+
+            for i, (codigo, debe, haber) in enumerate(lineas_normales):
+                if codigo == cuenta_principal and debe > 0:
+                    nuevo_debe = debe + diferencia
+
+                    if nuevo_debe < -0.01:
+                        raise ValueError(
+                            f"Documento {doc.folio}: "
+                            "la composición tributaria supera "
+                            "el total del documento."
+                        )
+
+                    lineas_normales[i] = (
+                        codigo,
+                        max(nuevo_debe, 0.0),
+                        haber
+                    )
+
+                    encontrada = True
+                    break
+
+            if not encontrada and diferencia > 0:
+                lineas_normales.append(
+                    (cuenta_principal, diferencia, 0.0)
+                )
+
+        # Proveedor / cuenta por pagar.
+        lineas_normales.append(
+            (roles["proveedores"], 0.0, total)
+        )
+
+    # --------------------------------------------------------
+    # 3. VENTAS
+    # --------------------------------------------------------
+
+    elif tipo == "ventas":
+
+        cuenta_ventas = cuenta
+
+        # Clientes por cobrar.
+        lineas_normales.append(
+            (roles["clientes"], total, 0.0)
+        )
+
+        # IVA débito fiscal.
+        if iva > 0.001:
+            lineas_normales.append(
+                (roles["iva_debito"], 0.0, iva)
+            )
+
+        # Venta neta/exenta.
+        venta_base = round(total - iva, 2)
+
+        if venta_base > 0.001:
+            lineas_normales.append(
+                (cuenta_ventas, 0.0, venta_base)
+            )
 
     else:
+        raise ValueError(
+            f"Tipo de operación no reconocido: {tipo}"
+        )
 
-        iva = float(doc.iva) * int(doc.signo)
-        principal = (float(doc.total) - float(doc.iva)) * int(doc.signo)
+    # --------------------------------------------------------
+    # 4. TRATAMIENTO DE NOTAS DE CRÉDITO
+    # --------------------------------------------------------
+    #
+    # Una NC no se trata simplemente como un número negativo.
+    # Se revierte el efecto contable del documento normal.
+    #
 
-        debe = []
-        haber = []
+    if es_nc:
+        lineas_normales = [
+            (codigo, haber, debe)
+            for codigo, debe, haber in lineas_normales
+        ]
 
-        if int(doc.signo) > 0:
-            debe.append((roles["clientes"][0], abs(total)))
-            if principal != 0:
-                haber.append((cuenta, abs(principal)))
-            if iva != 0:
-                haber.append((roles["iva_debito"][0], abs(iva)))
-        else:
-            # Nota de crédito de venta (invierten los roles)
-            haber.append((roles["clientes"][0], abs(total)))
-            if abs(principal) > 0:
-                debe.append((cuenta, abs(principal)))
-            if abs(iva) > 0:
-                debe.append((roles["iva_debito"][0], abs(iva)))
+    # --------------------------------------------------------
+    # 5. LIMPIEZA DE LÍNEAS
+    # --------------------------------------------------------
 
     lineas = []
 
-    for codigo, monto in debe:
-        if monto > 0.001:
-            lineas.append((codigo, round(monto, 2), 0.0))
+    for codigo, debe, haber in lineas_normales:
 
-    for codigo, monto in haber:
-        if monto > 0.001:
-            lineas.append((codigo, 0.0, round(monto, 2)))
+        debe = round(float(debe), 2)
+        haber = round(float(haber), 2)
 
-    total_debe = sum(x[1] for x in lineas)
-    total_haber = sum(x[2] for x in lineas)
+        if abs(debe) <= 0.001 and abs(haber) <= 0.001:
+            continue
+
+        if debe < -0.001 or haber < -0.001:
+            raise ValueError(
+                f"Documento {doc.folio}: "
+                "se generó un monto contable negativo."
+            )
+
+        lineas.append(
+            (codigo, debe, haber)
+        )
+
+    # --------------------------------------------------------
+    # 6. CONTROL CONTABLE FINAL
+    # --------------------------------------------------------
+
+    total_debe = round(
+        sum(x[1] for x in lineas),
+        2
+    )
+
+    total_haber = round(
+        sum(x[2] for x in lineas),
+        2
+    )
 
     if abs(total_debe - total_haber) > 0.01:
         raise ValueError(
