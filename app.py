@@ -1512,7 +1512,7 @@ def armar_asiento(doc, tipo, cuenta, roles):
         if iva_activo_fijo > 0.001:
             codigo_iva_af = roles.get(
                 "iva_credito_activo_fijo",
-                roles["iva_credito"]
+                roles["iva_credito"][1]
             )
 
             lineas_normales.append(
