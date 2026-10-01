@@ -1505,7 +1505,7 @@ def armar_asiento(doc, tipo, cuenta, roles):
 
         if iva_credito > 0.001:
             lineas_normales.append(
-                (roles["iva_credito"], iva_credito, 0.0)
+                (roles["iva_credito"][1], iva_credito, 0.0)
             )
 
         # IVA de activo fijo.
