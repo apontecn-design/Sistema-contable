@@ -1421,10 +1421,38 @@ def armar_asiento(doc, tipo, cuenta, roles):
     El tratamiento contable depende del TIPO DE DOCUMENTO,
     no del signo con que el SII entregue los montos.
 
-    En particular:
-    - Factura / ND: efecto contable normal.
-    - NC: invierte Debe y Haber.
+    - Factura / Nota de Débito: efecto contable normal.
+    - Nota de Crédito: revierte Debe y Haber.
     """
+
+    # --------------------------------------------------------
+    # FUNCIÓN AUXILIAR PARA OBTENER EL CÓDIGO DE UN ROL
+    # --------------------------------------------------------
+    #
+    # cargar_roles() devuelve:
+    #     (codigo, nombre)
+    #
+    # Esta función garantiza que al asiento siempre llegue
+    # solamente el código contable.
+    #
+
+    def codigo_rol(nombre_rol, defecto=None):
+        valor = roles.get(nombre_rol)
+
+        if valor:
+            if isinstance(valor, (tuple, list)):
+                return valor[0]
+            return valor
+
+        if defecto is not None:
+            if isinstance(defecto, (tuple, list)):
+                return defecto[0]
+            return defecto
+
+        raise ValueError(
+            f"No existe una cuenta configurada para el rol "
+            f"'{nombre_rol}'."
+        )
 
     # --------------------------------------------------------
     # 1. DATOS DEL DOCUMENTO
@@ -1432,21 +1460,24 @@ def armar_asiento(doc, tipo, cuenta, roles):
 
     tipo_doc = int(getattr(doc, "tipo_doc", 0) or 0)
 
-    # Las NC tienen tratamiento contable inverso.
-    # No dependemos de que el CSV del SII traiga números negativos.
+    # El tipo de documento determina el tratamiento.
+    # Las NC revierten el asiento.
     es_nc = tipo_doc in DOC_NOTA_CREDITO
 
+    # Usamos valores absolutos porque el signo del archivo SII
+    # no determina por sí mismo el tratamiento contable.
     total = abs(float(getattr(doc, "total", 0) or 0))
     neto = abs(float(getattr(doc, "neto", 0) or 0))
     exento = abs(float(getattr(doc, "exento", 0) or 0))
 
     iva = abs(float(getattr(doc, "iva", 0) or 0))
     iva_no_rec = abs(float(getattr(doc, "iva_no_rec", 0) or 0))
-    iva_uso = abs(float(getattr(doc, "iva_uso", 0) or 0))
 
-    activo_fijo = abs(float(getattr(doc, "activo_fijo", 0) or 0))
-    iva_activo_fijo = abs(
-        float(getattr(doc, "iva_activo_fijo", 0) or 0)
+    # Nombres reales utilizados por normalizar_rcv().
+    neto_af = abs(float(getattr(doc, "neto_af", 0) or 0))
+    iva_af = abs(float(getattr(doc, "iva_af", 0) or 0))
+    iva_uso_comun = abs(
+        float(getattr(doc, "iva_uso_comun", 0) or 0)
     )
 
     lineas_normales = []
@@ -1457,39 +1488,32 @@ def armar_asiento(doc, tipo, cuenta, roles):
 
     if tipo == "compras":
 
-        # Cuenta principal seleccionada por el usuario/regla contable.
         cuenta_principal = cuenta
 
         # ----------------------------------------------------
-        # DETERMINAR BASE PRINCIPAL
+        # BASE PRINCIPAL DE LA COMPRA
         # ----------------------------------------------------
-        #
-        # Preferimos el neto informado por el SII.
-        # Si el documento no trae neto, calculamos la diferencia
-        # para soportar otros formatos de RCV.
-        #
 
-        principal = neto
+        principal = neto + exento
 
-        if principal <= 0.001:
+        # Si el RCV no entrega base neta/exenta utilizable,
+        # reconstruimos la base por diferencia.
+        if principal <= 0.001 and neto_af <= 0.001:
 
             impuestos_separados = (
                 iva
                 + iva_no_rec
-                + iva_uso
-                + iva_activo_fijo
+                + iva_uso_comun
+                + iva_af
             )
 
             principal = max(
-                total - impuestos_separados - exento,
+                total - impuestos_separados,
                 0.0
             )
 
-        # Parte exenta también pertenece a la compra/gasto.
-        principal += exento
-
         # ----------------------------------------------------
-        # DEBE DE LA COMPRA
+        # DEBE: GASTO / COMPRA PRINCIPAL
         # ----------------------------------------------------
 
         if principal > 0.001:
@@ -1497,71 +1521,116 @@ def armar_asiento(doc, tipo, cuenta, roles):
                 (cuenta_principal, principal, 0.0)
             )
 
-        # IVA crédito fiscal recuperable.
+        # ----------------------------------------------------
+        # ACTIVO FIJO
+        # ----------------------------------------------------
+
+        if neto_af > 0.001:
+            codigo_activo_fijo = codigo_rol(
+                "activo_fijo",
+                cuenta_principal
+            )
+
+            lineas_normales.append(
+                (codigo_activo_fijo, neto_af, 0.0)
+            )
+
+        # ----------------------------------------------------
+        # IVA CRÉDITO FISCAL
+        # ----------------------------------------------------
         #
-        # Si existe IVA específico de activo fijo, evitamos
-        # duplicarlo dentro del IVA general.
-        iva_credito = max(iva - iva_activo_fijo, 0.0)
+        # Si el IVA de activo fijo está informado aparte,
+        # evitamos duplicarlo dentro del IVA general.
+        #
+
+        iva_credito = max(iva - iva_af, 0.0)
 
         if iva_credito > 0.001:
             lineas_normales.append(
-                (roles["iva_credito"][1], iva_credito, 0.0)
+                (
+                    codigo_rol("iva_credito"),
+                    iva_credito,
+                    0.0
+                )
             )
 
-        # IVA de activo fijo.
-        if iva_activo_fijo > 0.001:
-            codigo_iva_af = roles.get(
-                "iva_credito_activo_fijo",
-                roles["iva_credito"][1]
-            )
+        # ----------------------------------------------------
+        # IVA DE ACTIVO FIJO
+        # ----------------------------------------------------
 
+        if iva_af > 0.001:
             lineas_normales.append(
-                (codigo_iva_af, iva_activo_fijo, 0.0)
+                (
+                    codigo_rol("iva_credito"),
+                    iva_af,
+                    0.0
+                )
             )
 
-        # IVA no recuperable.
+        # ----------------------------------------------------
+        # IVA NO RECUPERABLE
+        # ----------------------------------------------------
+
         if iva_no_rec > 0.001:
-            codigo_no_rec = roles.get(
-                "iva_no_recuperable",
-                cuenta_principal
-            )
-
             lineas_normales.append(
-                (codigo_no_rec, iva_no_rec, 0.0)
-            )
-
-        # IVA de uso común.
-        if iva_uso > 0.001:
-            codigo_uso = roles.get(
-                "iva_uso_comun",
-                cuenta_principal
-            )
-
-            lineas_normales.append(
-                (codigo_uso, iva_uso, 0.0)
+                (
+                    codigo_rol(
+                        "iva_no_recuperable",
+                        cuenta_principal
+                    ),
+                    iva_no_rec,
+                    0.0
+                )
             )
 
         # ----------------------------------------------------
-        # CUADRATURA AUTOMÁTICA DE LA BASE
+        # IVA DE USO COMÚN
+        # ----------------------------------------------------
+
+        if iva_uso_comun > 0.001:
+            lineas_normales.append(
+                (
+                    codigo_rol(
+                        "iva_uso_comun",
+                        cuenta_principal
+                    ),
+                    iva_uso_comun,
+                    0.0
+                )
+            )
+
+        # ----------------------------------------------------
+        # CUADRATURA AUTOMÁTICA
         # ----------------------------------------------------
         #
-        # Proveedores debe quedar exactamente por el total
-        # del documento. Si el RCV contiene otros impuestos
-        # que todavía no tienen cuenta separada, incorporamos
-        # la diferencia a la cuenta principal para no perder
-        # valor contable.
+        # El Haber a Proveedores debe ser exactamente igual
+        # al total del documento.
         #
 
-        debe_actual = sum(x[1] for x in lineas_normales)
+        debe_actual = sum(
+            x[1] for x in lineas_normales
+        )
 
-        diferencia = round(total - debe_actual, 2)
+        diferencia = round(
+            total - debe_actual,
+            2
+        )
 
         if abs(diferencia) > 0.01:
 
             encontrada = False
 
-            for i, (codigo, debe, haber) in enumerate(lineas_normales):
-                if codigo == cuenta_principal and debe > 0:
+            # Primero intentamos absorber la diferencia
+            # en la cuenta principal de compra/gasto.
+            for i, (codigo, debe, haber) in enumerate(
+                lineas_normales
+            ):
+
+                if (
+                    codigo == cuenta_principal
+                    and debe > 0
+                ):
+
                     nuevo_debe = debe + diferencia
 
                     if nuevo_debe < -0.01:
@@ -1580,14 +1649,27 @@ def armar_asiento(doc, tipo, cuenta, roles):
                     encontrada = True
                     break
 
-            if not encontrada and diferencia > 0:
+            # Si no había línea principal y falta valor,
+            # agregamos la diferencia a la cuenta seleccionada.
+            if not encontrada and diferencia > 0.01:
                 lineas_normales.append(
-                    (cuenta_principal, diferencia, 0.0)
+                    (
+                        cuenta_principal,
+                        diferencia,
+                        0.0
+                    )
                 )
 
-        # Proveedor / cuenta por pagar.
+        # ----------------------------------------------------
+        # HABER: PROVEEDORES
+        # ----------------------------------------------------
+
         lineas_normales.append(
-            (roles["proveedores"], 0.0, total)
+            (
+                codigo_rol("proveedores"),
+                0.0,
+                total
+            )
         )
 
     # --------------------------------------------------------
@@ -1598,23 +1680,47 @@ def armar_asiento(doc, tipo, cuenta, roles):
 
         cuenta_ventas = cuenta
 
-        # Clientes por cobrar.
+        # ----------------------------------------------------
+        # DEBE: CLIENTES POR COBRAR
+        # ----------------------------------------------------
+
         lineas_normales.append(
-            (roles["clientes"], total, 0.0)
+            (
+                codigo_rol("clientes"),
+                total,
+                0.0
+            )
         )
 
-        # IVA débito fiscal.
+        # ----------------------------------------------------
+        # HABER: IVA DÉBITO FISCAL
+        # ----------------------------------------------------
+
         if iva > 0.001:
             lineas_normales.append(
-                (roles["iva_debito"], 0.0, iva)
+                (
+                    codigo_rol("iva_debito"),
+                    0.0,
+                    iva
+                )
             )
 
-        # Venta neta/exenta.
-        venta_base = round(total - iva, 2)
+        # ----------------------------------------------------
+        # HABER: INGRESO POR VENTA
+        # ----------------------------------------------------
+
+        venta_base = round(
+            total - iva,
+            2
+        )
 
         if venta_base > 0.001:
             lineas_normales.append(
-                (cuenta_ventas, 0.0, venta_base)
+                (
+                    cuenta_ventas,
+                    0.0,
+                    venta_base
+                )
             )
 
     else:
@@ -1623,17 +1729,28 @@ def armar_asiento(doc, tipo, cuenta, roles):
         )
 
     # --------------------------------------------------------
-    # 4. TRATAMIENTO DE NOTAS DE CRÉDITO
+    # 4. NOTAS DE CRÉDITO
     # --------------------------------------------------------
     #
-    # Una NC no se trata simplemente como un número negativo.
-    # Se revierte el efecto contable del documento normal.
+    # Las NC revierten el asiento normal.
+    #
+    # Ejemplo compra:
+    #   Factura:
+    #       Debe  Gasto / IVA
+    #       Haber Proveedores
+    #
+    #   NC:
+    #       Debe  Proveedores
+    #       Haber Gasto / IVA
+    #
+    # Lo mismo aplica inversamente a las ventas.
     #
 
     if es_nc:
         lineas_normales = [
             (codigo, haber, debe)
-            for codigo, debe, haber in lineas_normales
+            for codigo, debe, haber
+            in lineas_normales
         ]
 
     # --------------------------------------------------------
@@ -1644,10 +1761,27 @@ def armar_asiento(doc, tipo, cuenta, roles):
 
     for codigo, debe, haber in lineas_normales:
 
+        # Blindaje adicional:
+        # nunca permitimos que una tupla (codigo, nombre)
+        # llegue al Libro Diario.
+        if isinstance(codigo, (tuple, list)):
+            codigo = codigo[0]
+
+        if not codigo:
+            raise ValueError(
+                f"Documento {doc.folio}: "
+                "se intentó contabilizar una cuenta vacía."
+            )
+
+        codigo = str(codigo).strip()
+
         debe = round(float(debe), 2)
         haber = round(float(haber), 2)
 
-        if abs(debe) <= 0.001 and abs(haber) <= 0.001:
+        if (
+            abs(debe) <= 0.001
+            and abs(haber) <= 0.001
+        ):
             continue
 
         if debe < -0.001 or haber < -0.001:
@@ -1657,7 +1791,11 @@ def armar_asiento(doc, tipo, cuenta, roles):
             )
 
         lineas.append(
-            (codigo, debe, haber)
+            (
+                codigo,
+                debe,
+                haber
+            )
         )
 
     # --------------------------------------------------------
