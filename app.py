@@ -620,6 +620,30 @@ def crear_esquema(conn):
         )
     """)
 
+    # Obligaciones/operaciones manuales para conciliación bancaria
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS obligaciones_manuales (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT,
+            tipo TEXT DEFAULT 'PAGO',
+            descripcion TEXT NOT NULL,
+            referencia TEXT,
+            monto REAL DEFAULT 0,
+            codigo_cuenta TEXT,
+            conciliado INTEGER DEFAULT 0,
+            fecha_conciliacion TEXT,
+            cartola_id INTEGER,
+            asiento_id INTEGER
+        )
+    """)
+
+    # Nuevos campos de trazabilidad para movimientos bancarios.
+    agregar_columna(conn, "cartola_bancaria", "origen", "TEXT DEFAULT 'CARTOLA'")
+    agregar_columna(conn, "cartola_bancaria", "asiento_id", "INTEGER")
+    agregar_columna(conn, "cartola_bancaria", "match_tipo", "TEXT")
+    agregar_columna(conn, "cartola_bancaria", "match_id", "INTEGER")
+    agregar_columna(conn, "cartola_bancaria", "match_confianza", "REAL")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS periodos_contables (
             periodo TEXT PRIMARY KEY,
@@ -3057,34 +3081,330 @@ def antiguedad_documentos(conn, tipo):
     return df[df["saldo"]>0.01]
 
 
-def importar_cartola(conn, df, banco_id):
-    df=normalizar_columnas(df)
+def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
+    """Importa movimientos tabulares evitando duplicados."""
+    df = normalizar_columnas(df)
+
     def col(*names):
         for n in names:
-            if n.lower() in df.columns: return n.lower()
+            if n.lower() in df.columns:
+                return n.lower()
         return None
-    fecha_c=col("fecha","fecha movimiento","fecha de movimiento","date")
-    desc_c=col("descripcion","descripción","detalle","glosa","movimiento")
-    cargo_c=col("cargo","cargos","debito","débito","retiros","egresos")
-    abono_c=col("abono","abonos","credito","crédito","depositos","depósitos","ingresos")
-    saldo_c=col("saldo","saldo disponible","balance")
-    ref_c=col("referencia","nro documento","documento","numero","número")
+
+    fecha_c = col("fecha", "fecha movimiento", "fecha de movimiento", "date")
+    desc_c = col("descripcion", "descripción", "detalle", "glosa", "movimiento")
+    cargo_c = col("cargo", "cargos", "debito", "débito", "retiros", "egresos", "cheques y otros cargos")
+    abono_c = col("abono", "abonos", "credito", "crédito", "depositos", "depósitos", "ingresos", "depositos y abonos", "depósitos y abonos")
+    saldo_c = col("saldo", "saldo disponible", "balance", "saldo diario")
+    ref_c = col("referencia", "nro documento", "nº de documento", "n° documento", "documento", "numero", "número")
+
     if not fecha_c or not desc_c:
         raise ValueError("No pude identificar Fecha y Descripción en la cartola.")
-    lote="BANCO-"+datetime.now().strftime("%Y%m%d-%H%M%S")
-    nuevos=0; repetidos=0
-    for _,r in df.iterrows():
-        fecha=fecha_iso(r.get(fecha_c)); desc=limpiar_texto(r.get(desc_c)); ref=limpiar_texto(r.get(ref_c)) if ref_c else ""
-        cargo=numero(r.get(cargo_c)) if cargo_c else 0
-        abono=numero(r.get(abono_c)) if abono_c else 0
-        saldo=numero(r.get(saldo_c)) if saldo_c else None
-        if not fecha or not desc: continue
+
+    lote = "BANCO-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    nuevos = 0
+    repetidos = 0
+
+    for _, r in df.iterrows():
+        fecha = fecha_iso(r.get(fecha_c))
+        desc = limpiar_texto(r.get(desc_c))
+        ref = limpiar_texto(r.get(ref_c)) if ref_c else ""
+        cargo = abs(numero(r.get(cargo_c))) if cargo_c else 0
+        abono = abs(numero(r.get(abono_c))) if abono_c else 0
+        saldo = numero(r.get(saldo_c)) if saldo_c and limpiar_texto(r.get(saldo_c)) else None
+
+        if not fecha or not desc or (cargo <= 0 and abono <= 0):
+            continue
+
         try:
-            conn.execute("""INSERT INTO cartola_bancaria(banco_id,fecha,descripcion,referencia,cargo,abono,saldo,lote_id) VALUES(?,?,?,?,?,?,?,?)""",
-                         (banco_id,fecha,desc,ref,cargo,abono,saldo,lote)); nuevos+=1
-        except sqlite3.IntegrityError: repetidos+=1
-    conn.commit(); registrar_auditoria(conn,"IMPORTACIÓN CARTOLA",f"Banco {banco_id}: {nuevos} movimientos nuevos, {repetidos} repetidos")
-    return nuevos,repetidos,lote
+            conn.execute(
+                """INSERT INTO cartola_bancaria
+                   (banco_id,fecha,descripcion,referencia,cargo,abono,saldo,lote_id,origen)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (banco_id, fecha, desc, ref, cargo, abono, saldo, lote, origen),
+            )
+            nuevos += 1
+        except sqlite3.IntegrityError:
+            repetidos += 1
+
+    conn.commit()
+    registrar_auditoria(conn, "IMPORTACIÓN CARTOLA", f"Banco {banco_id}: {nuevos} movimientos nuevos, {repetidos} repetidos")
+    return nuevos, repetidos, lote
+
+
+def leer_cartola_pdf(uploaded_file, password=""):
+    """Extrae cartolas PDF de texto. Soporta PDF protegido con contraseña.
+
+    Incluye reconocimiento específico del formato BCI observado y deja una
+    estructura estándar: fecha, descripcion, referencia, cargo, abono, saldo.
+    """
+    datos = uploaded_file.getvalue()
+    if not datos:
+        raise ValueError("El PDF está vacío.")
+
+    PdfReader = None
+    try:
+        from pypdf import PdfReader as _PdfReader
+        PdfReader = _PdfReader
+    except Exception:
+        try:
+            from PyPDF2 import PdfReader as _PdfReader
+            PdfReader = _PdfReader
+        except Exception:
+            raise ValueError("Para leer PDF debes agregar 'pypdf' al archivo requirements.txt de Render/GitHub.")
+
+    try:
+        lector = PdfReader(io.BytesIO(datos))
+        if getattr(lector, "is_encrypted", False):
+            if not password:
+                raise ValueError("La cartola está protegida. Ingresa la contraseña del PDF.")
+            resultado = lector.decrypt(password)
+            if not resultado:
+                raise ValueError("La contraseña del PDF no es correcta.")
+        texto = "\n".join((pagina.extract_text() or "") for pagina in lector.pages)
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"No fue posible leer el PDF: {e}")
+
+    if not texto.strip():
+        raise ValueError("El PDF no contiene texto extraíble. Si es una cartola escaneada, deberá cargarse manualmente o en CSV/Excel.")
+
+    movimientos = []
+    # BCI: fecha + sucursal + descripción + documento + cargo/abono + saldo.
+    # En el formato observado, cada movimiento aparece en una sola línea.
+    patron = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(\d+)\s+([\d\.]+)\s+([\d\.]+)\s*$")
+
+    for linea in texto.splitlines():
+        linea = re.sub(r"\s+", " ", linea.strip())
+        m = patron.match(linea)
+        if not m:
+            continue
+        fecha_txt, cuerpo, referencia, monto_txt, saldo_txt = m.groups()
+        cuerpo_upper = cuerpo.upper()
+        monto = numero(monto_txt)
+        saldo = numero(saldo_txt)
+
+        # Determinación por descripción para el formato BCI. Si el banco usa
+        # términos de abono, se clasifica como abono; en caso contrario cargo.
+        palabras_abono = ("ABONO", "DEPOSITO", "DEPÓSITO", "TRANSFERENCIA RECIBIDA", "PAGO RECIBIDO")
+        es_abono = any(x in cuerpo_upper for x in palabras_abono)
+        cargo = 0.0 if es_abono else abs(monto)
+        abono = abs(monto) if es_abono else 0.0
+
+        movimientos.append({
+            "fecha": fecha_iso(fecha_txt),
+            "descripcion": cuerpo,
+            "referencia": referencia,
+            "cargo": cargo,
+            "abono": abono,
+            "saldo": saldo,
+        })
+
+    if not movimientos:
+        raise ValueError("Pude abrir el PDF, pero no reconocí movimientos bancarios. Puedes usar la carga manual o CSV/Excel.")
+
+    return pd.DataFrame(movimientos)
+
+
+def registrar_movimiento_manual(conn, banco_id, fecha, descripcion, referencia, cargo, abono, saldo=None):
+    df = pd.DataFrame([{
+        "fecha": fecha,
+        "descripcion": descripcion,
+        "referencia": referencia,
+        "cargo": cargo,
+        "abono": abono,
+        "saldo": saldo,
+    }])
+    return importar_cartola(conn, df, banco_id, origen="MANUAL")
+
+
+def crear_obligacion_manual(conn, fecha, tipo, descripcion, referencia, monto, codigo_cuenta):
+    cur = conn.execute(
+        """INSERT INTO obligaciones_manuales(fecha,tipo,descripcion,referencia,monto,codigo_cuenta)
+           VALUES(?,?,?,?,?,?)""",
+        (fecha_iso(fecha), tipo, limpiar_texto(descripcion), limpiar_texto(referencia), abs(float(monto)), codigo_cuenta),
+    )
+    conn.commit()
+    registrar_auditoria(conn, "OBLIGACIÓN MANUAL", f"{tipo}: {descripcion} {money(monto)}")
+    return cur.lastrowid
+
+
+def candidatos_conciliacion(conn, movimiento_id):
+    """Busca coincidencias por monto y agrega señales por fecha/referencia."""
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
+    if not mov:
+        return pd.DataFrame()
+
+    es_cargo = float(mov["cargo"] or 0) > 0
+    monto = abs(float(mov["cargo"] or mov["abono"] or 0))
+    fecha_mov = pd.to_datetime(mov["fecha"], errors="coerce")
+    ref_mov = limpiar_texto(mov["referencia"]).lower()
+    candidatos = []
+
+    def agregar(tipo, ident, fecha, descripcion, referencia, importe, cuenta, entidad_id=None):
+        if abs(abs(float(importe or 0)) - monto) > 0.01:
+            return
+        puntos = 70.0  # monto exacto
+        f = pd.to_datetime(fecha, errors="coerce")
+        dias = None
+        if pd.notna(fecha_mov) and pd.notna(f):
+            dias = abs((fecha_mov - f).days)
+            if dias <= 3:
+                puntos += 20
+            elif dias <= 15:
+                puntos += 10
+        ref = limpiar_texto(referencia).lower()
+        if ref_mov and ref and ref_mov == ref:
+            puntos += 10
+        candidatos.append({
+            "tipo": tipo,
+            "id": int(ident),
+            "fecha": fecha,
+            "descripcion": descripcion,
+            "referencia": referencia or "",
+            "monto": monto,
+            "cuenta": cuenta,
+            "entidad_id": entidad_id,
+            "confianza": min(puntos, 100.0),
+            "dias": dias,
+        })
+
+    roles = cargar_roles(conn)
+    if es_cargo:
+        # Compras/proveedores aún no aplicadas completamente.
+        filas = conn.execute("""
+            SELECT c.id,c.fecha,c.folio,c.monto_total,c.proveedor_id,
+                   COALESCE(p.razon_social,p.nombre,'Proveedor') entidad,
+                   COALESCE((SELECT SUM(a.monto) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0) aplicado
+            FROM compras c LEFT JOIN proveedores p ON p.id=c.proveedor_id
+        """).fetchall()
+        cuenta = roles.get("proveedores")[0] if roles.get("proveedores") else None
+        for r in filas:
+            pendiente = max(abs(float(r["monto_total"] or 0)) - abs(float(r["aplicado"] or 0)), 0)
+            agregar("PROVEEDOR", r["id"], r["fecha"], f"{r['entidad']} | Compra/Doc. {r['folio']}", r["folio"], pendiente, cuenta, r["proveedor_id"])
+    else:
+        filas = conn.execute("""
+            SELECT v.id,v.fecha,v.folio,v.monto_total,v.cliente_id,
+                   COALESCE(c.razon_social,c.nombre,'Cliente') entidad,
+                   COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0) aplicado
+            FROM ventas v LEFT JOIN clientes c ON c.id=v.cliente_id
+        """).fetchall()
+        cuenta = roles.get("clientes")[0] if roles.get("clientes") else None
+        for r in filas:
+            pendiente = max(abs(float(r["monto_total"] or 0)) - abs(float(r["aplicado"] or 0)), 0)
+            agregar("CLIENTE", r["id"], r["fecha"], f"{r['entidad']} | Venta/Doc. {r['folio']}", r["folio"], pendiente, cuenta, r["cliente_id"])
+
+    # Operaciones manuales: servicios, nómina, impuestos, arriendos, etc.
+    tipo_manual = "PAGO" if es_cargo else "ABONO"
+    filas = conn.execute("""
+        SELECT * FROM obligaciones_manuales
+        WHERE conciliado=0 AND tipo=?
+    """, (tipo_manual,)).fetchall()
+    for r in filas:
+        agregar("MANUAL", r["id"], r["fecha"], r["descripcion"], r["referencia"], r["monto"], r["codigo_cuenta"], None)
+
+    if not candidatos:
+        return pd.DataFrame()
+    return pd.DataFrame(candidatos).sort_values(["confianza", "fecha"], ascending=[False, False]).reset_index(drop=True)
+
+
+def contabilizar_conciliacion_bancaria(conn, movimiento_id, candidato_tipo, candidato_id):
+    """Confirma una coincidencia, genera el asiento bancario y deja trazabilidad."""
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
+    if not mov:
+        raise ValueError("Movimiento bancario no encontrado.")
+    if int(mov["conciliado"] or 0) == 1:
+        raise ValueError("Este movimiento ya está conciliado.")
+
+    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+    if not banco or not banco["cuenta_contable"]:
+        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+
+    monto = abs(float(mov["cargo"] or mov["abono"] or 0))
+    es_cargo = float(mov["cargo"] or 0) > 0
+    if monto <= 0:
+        raise ValueError("El movimiento no tiene monto para conciliar.")
+
+    cuenta_contraparte = None
+    descripcion = ""
+    entidad_id = None
+    documento_id = int(candidato_id)
+    roles = cargar_roles(conn)
+
+    if candidato_tipo == "PROVEEDOR":
+        r = conn.execute("""SELECT c.*,COALESCE(p.razon_social,p.nombre,'Proveedor') entidad
+                            FROM compras c LEFT JOIN proveedores p ON p.id=c.proveedor_id WHERE c.id=?""", (documento_id,)).fetchone()
+        if not r:
+            raise ValueError("Compra no encontrada.")
+        cuenta_contraparte = roles.get("proveedores")[0] if roles.get("proveedores") else None
+        descripcion = f"Pago proveedor {r['entidad']} Doc. {r['folio']}"
+        entidad_id = r["proveedor_id"]
+    elif candidato_tipo == "CLIENTE":
+        r = conn.execute("""SELECT v.*,COALESCE(c.razon_social,c.nombre,'Cliente') entidad
+                            FROM ventas v LEFT JOIN clientes c ON c.id=v.cliente_id WHERE v.id=?""", (documento_id,)).fetchone()
+        if not r:
+            raise ValueError("Venta no encontrada.")
+        cuenta_contraparte = roles.get("clientes")[0] if roles.get("clientes") else None
+        descripcion = f"Cobro cliente {r['entidad']} Doc. {r['folio']}"
+        entidad_id = r["cliente_id"]
+    elif candidato_tipo == "MANUAL":
+        r = conn.execute("SELECT * FROM obligaciones_manuales WHERE id=? AND conciliado=0", (documento_id,)).fetchone()
+        if not r:
+            raise ValueError("La obligación manual no existe o ya fue conciliada.")
+        cuenta_contraparte = r["codigo_cuenta"]
+        descripcion = r["descripcion"]
+    else:
+        raise ValueError("Tipo de coincidencia no reconocido.")
+
+    if not cuenta_contraparte:
+        raise ValueError("La operación no tiene cuenta contable de contrapartida.")
+
+    asiento_id = siguiente_asiento(conn) + 1
+    lote = "CONC-BANCO-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    fecha = mov["fecha"]
+    cuenta_banco = banco["cuenta_contable"]
+    plan = Plan(conn)
+
+    # Cargo bancario: Debe contrapartida / Haber Banco.
+    # Abono bancario: Debe Banco / Haber contrapartida.
+    lineas = [
+        (cuenta_contraparte, monto, 0.0),
+        (cuenta_banco, 0.0, monto),
+    ] if es_cargo else [
+        (cuenta_banco, monto, 0.0),
+        (cuenta_contraparte, 0.0, monto),
+    ]
+
+    for codigo, debe, haber in lineas:
+        nombre = plan.todos.get(codigo, codigo)
+        conn.execute("""INSERT INTO libro_diario
+            (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+            VALUES(?,?,?,?,?,?,?,?,?)""",
+            (fecha, nombre, debe, haber, descripcion, codigo, asiento_id, lote, "CONCILIACION_BANCARIA"))
+
+    if candidato_tipo == "PROVEEDOR":
+        cur = conn.execute("""INSERT INTO pagos_proveedores(fecha,proveedor_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
+                              VALUES(?,?,?,?,?,?,?)""", (fecha, entidad_id, monto, "Banco", cuenta_banco, descripcion, lote))
+        conn.execute("INSERT INTO aplicaciones_proveedores(pago_id,compra_id,monto) VALUES(?,?,?)", (cur.lastrowid, documento_id, monto))
+    elif candidato_tipo == "CLIENTE":
+        cur = conn.execute("""INSERT INTO pagos_clientes(fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
+                              VALUES(?,?,?,?,?,?,?)""", (fecha, entidad_id, monto, "Banco", cuenta_banco, descripcion, lote))
+        conn.execute("INSERT INTO aplicaciones_clientes(pago_id,venta_id,monto) VALUES(?,?,?)", (cur.lastrowid, documento_id, monto))
+    else:
+        conn.execute("""UPDATE obligaciones_manuales
+                        SET conciliado=1,fecha_conciliacion=?,cartola_id=?,asiento_id=? WHERE id=?""",
+                     (datetime.now().isoformat(timespec="seconds"), movimiento_id, asiento_id, documento_id))
+
+    confianza = 100.0
+    conn.execute("""UPDATE cartola_bancaria
+                    SET conciliado=1,observacion=?,asiento_id=?,match_tipo=?,match_id=?,match_confianza=?
+                    WHERE id=?""",
+                 (descripcion, asiento_id, candidato_tipo, documento_id, confianza, movimiento_id))
+    conn.commit()
+    registrar_auditoria(conn, "CONCILIACIÓN BANCARIA", f"Movimiento {movimiento_id} -> {candidato_tipo} {documento_id}, asiento {asiento_id}")
+    return asiento_id
+
 
 # ============================================================
 # INICIALIZACIÓN
@@ -3273,46 +3593,165 @@ elif menu == "📊 Estados Financieros":
 
 elif menu == "🏦 Bancos y Cartolas":
     st.title("🏦 Bancos y Cartolas")
-    tabs=st.tabs(["Cuentas bancarias","Cargar cartola","Conciliación","Movimientos"])
+    st.caption("Carga cartolas PDF/Excel/CSV, registra movimientos manuales y concilia por coincidencia de montos.")
+    tabs = st.tabs(["Cuentas bancarias", "Cargar cartola", "Movimiento manual", "Conciliación", "Operaciones manuales", "Movimientos"])
+
     with tabs[0]:
-        df=pd.read_sql_query("SELECT b.id AS ID,b.nombre AS Banco,b.numero_cuenta AS Cuenta,b.tipo AS Tipo,b.moneda AS Moneda,b.cuenta_contable AS Cuenta_Contable,b.saldo_inicial AS Saldo_Inicial FROM bancos b WHERE activo=1 ORDER BY nombre",conn)
-        if not df.empty: st.dataframe(df,use_container_width=True,hide_index=True)
+        df = pd.read_sql_query("SELECT b.id AS ID,b.nombre AS Banco,b.numero_cuenta AS Cuenta,b.tipo AS Tipo,b.moneda AS Moneda,b.cuenta_contable AS Cuenta_Contable,b.saldo_inicial AS Saldo_Inicial FROM bancos b WHERE activo=1 ORDER BY nombre", conn)
+        if not df.empty:
+            st.dataframe(df, use_container_width=True, hide_index=True)
         with st.form("nuevo_banco"):
-            a,b,c=st.columns(3); nombre=a.text_input("Banco"); numero_cuenta=b.text_input("N° cuenta"); tipo=c.selectbox("Tipo",["Cuenta corriente","Cuenta vista","Cuenta empresa","Otra"])
-            cuentas=cuentas_imputables(conn); mapa=dict(zip(cuentas.etiqueta,cuentas.codigo)); cuenta=c.selectbox("Cuenta contable bancaria",list(mapa.keys())) if mapa else ""
-            saldo=st.number_input("Saldo inicial",value=0.0,step=1000.0)
+            a,b,c = st.columns(3)
+            nombre = a.text_input("Banco")
+            numero_cuenta = b.text_input("N° cuenta")
+            tipo = c.selectbox("Tipo", ["Cuenta corriente","Cuenta vista","Cuenta empresa","Otra"])
+            cuentas = cuentas_imputables(conn)
+            mapa = dict(zip(cuentas.etiqueta, cuentas.codigo))
+            cuenta = c.selectbox("Cuenta contable bancaria", list(mapa.keys())) if mapa else ""
+            saldo = st.number_input("Saldo inicial", value=0.0, step=1000.0)
             if st.form_submit_button("Guardar cuenta bancaria"):
-                conn.execute("INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)",(nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo)); conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); st.success("Cuenta bancaria creada.")
+                conn.execute("INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)", (nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo))
+                conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); st.success("Cuenta bancaria creada.")
+
     with tabs[1]:
-        bancos=pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre",conn)
-        if bancos.empty: st.warning("Primero crea una cuenta bancaria.")
+        bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
+        if bancos.empty:
+            st.warning("Primero crea una cuenta bancaria.")
         else:
-            banco_label=st.selectbox("Cuenta bancaria",[f"{r.id} - {r.nombre} - {r.numero_cuenta}" for r in bancos.itertuples()]); banco_id=int(banco_label.split(" - ")[0])
-            archivo=st.file_uploader("Cartola bancaria CSV o Excel",type=["csv","xlsx","xls"],key="cartola_file")
-            st.caption("Se reconocen automáticamente columnas habituales: fecha, descripción/detalle, cargo, abono/crédito/débito y saldo.")
+            banco_label = st.selectbox("Cuenta bancaria", [f"{r.id} - {r.nombre} - {r.numero_cuenta}" for r in bancos.itertuples()], key="carga_banco")
+            banco_id = int(banco_label.split(" - ")[0])
+            archivo = st.file_uploader("Cartola bancaria PDF, CSV o Excel", type=["pdf","csv","xlsx","xls"], key="cartola_file")
+            password_pdf = st.text_input("Contraseña del PDF (solo si está protegido)", type="password", key="cartola_pwd")
+            st.caption("La contraseña se usa únicamente para abrir el PDF durante esta carga; SGCI no la guarda.")
+
             if archivo:
                 try:
-                    dfc=leer_archivo_tabular(archivo); st.write("Vista previa"); st.dataframe(dfc.head(20),use_container_width=True,hide_index=True)
-                    if st.button("Importar cartola",type="primary"):
-                        nuevos,repetidos,lote=importar_cartola(conn,dfc,banco_id); st.success(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
-                except Exception as e: st.error(str(e))
-            plantilla=pd.DataFrame([{"fecha":"2026-09-30","descripcion":"TRANSFERENCIA EJEMPLO","referencia":"12345","cargo":0,"abono":100000,"saldo":100000}])
-            st.download_button("📥 Descargar plantilla de cartola",plantilla.to_csv(index=False,sep=";").encode("utf-8-sig"),"plantilla_cartola_bancaria.csv","text/csv")
+                    if archivo.name.lower().endswith(".pdf"):
+                        dfc = leer_cartola_pdf(archivo, password_pdf)
+                    else:
+                        dfc = leer_archivo_tabular(archivo)
+                    st.write("Vista previa")
+                    st.dataframe(dfc.head(50), use_container_width=True, hide_index=True)
+                    if st.button("Importar cartola", type="primary"):
+                        nuevos,repetidos,lote = importar_cartola(conn, dfc, banco_id, origen="PDF" if archivo.name.lower().endswith(".pdf") else "ARCHIVO")
+                        st.success(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+            plantilla = pd.DataFrame([{"fecha":"2026-09-30","descripcion":"TRANSFERENCIA EJEMPLO","referencia":"12345","cargo":0,"abono":100000,"saldo":100000}])
+            st.download_button("📥 Descargar plantilla de cartola", plantilla.to_csv(index=False,sep=";").encode("utf-8-sig"), "plantilla_cartola_bancaria.csv", "text/csv")
+
     with tabs[2]:
-        bancos=pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre",conn)
-        if bancos.empty: st.info("No hay cuentas bancarias.")
+        bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
+        if bancos.empty:
+            st.warning("Primero crea una cuenta bancaria.")
         else:
-            label=st.selectbox("Cuenta a conciliar",[f"{r.id} - {r.nombre} - {r.numero_cuenta}" for r in bancos.itertuples()],key="conc_banco")
-            info=conciliacion_banco(conn,int(label.split(" - ")[0]))
-            if info:
-                sc,ss,dif,movs=info; a,b,c=st.columns(3); a.metric("Saldo cartola",money(sc)); b.metric("Saldo contable",money(ss)); c.metric("Diferencia",money(dif))
-                st.success("🟢 Conciliación sin diferencia" if abs(dif)<0.01 else "🟡 Revisar diferencias")
+            with st.form("movimiento_bancario_manual"):
+                label = st.selectbox("Cuenta bancaria", [f"{r.id} - {r.nombre} - {r.numero_cuenta}" for r in bancos.itertuples()])
+                banco_id = int(label.split(" - ")[0])
+                c1,c2 = st.columns(2)
+                fecha_mov = c1.date_input("Fecha", date.today())
+                naturaleza = c2.selectbox("Movimiento", ["Cargo / salida de dinero", "Abono / entrada de dinero"])
+                descripcion = st.text_input("Descripción")
+                referencia = st.text_input("Referencia / N° documento")
+                monto = st.number_input("Monto", min_value=0.0, step=1000.0)
+                saldo = st.number_input("Saldo después del movimiento (opcional)", value=0.0, step=1000.0)
+                if st.form_submit_button("Guardar movimiento manual", type="primary"):
+                    if not descripcion or monto <= 0:
+                        st.error("Indica descripción y un monto mayor que cero.")
+                    else:
+                        cargo = monto if naturaleza.startswith("Cargo") else 0
+                        abono = monto if naturaleza.startswith("Abono") else 0
+                        nuevos,repetidos,_ = registrar_movimiento_manual(conn,banco_id,fecha_mov.strftime("%Y-%m-%d"),descripcion,referencia,cargo,abono,saldo)
+                        if nuevos:
+                            st.success("Movimiento guardado. Ya está disponible para conciliación.")
+                        else:
+                            st.warning("Ese movimiento ya existe y no se duplicó.")
+
     with tabs[3]:
-        bancos=pd.read_sql_query("SELECT id,nombre FROM bancos WHERE activo=1 ORDER BY nombre",conn)
+        bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
+        if bancos.empty:
+            st.info("No hay cuentas bancarias.")
+        else:
+            label = st.selectbox("Cuenta a conciliar", [f"{r.id} - {r.nombre} - {r.numero_cuenta}" for r in bancos.itertuples()], key="conc_banco")
+            banco_id = int(label.split(" - ")[0])
+            info = conciliacion_banco(conn,banco_id)
+            if info:
+                sc,ss,dif,movs = info
+                a,b,c = st.columns(3); a.metric("Saldo cartola",money(sc)); b.metric("Saldo contable",money(ss)); c.metric("Diferencia",money(dif))
+                st.success("🟢 Conciliación sin diferencia" if abs(dif)<0.01 else "🟡 Revisar diferencias")
+
+            pendientes = pd.read_sql_query("""SELECT id,fecha,descripcion,referencia,cargo,abono,saldo,origen
+                                                FROM cartola_bancaria WHERE banco_id=? AND conciliado=0
+                                                ORDER BY fecha,id""", conn, params=[banco_id])
+            if pendientes.empty:
+                st.success("No hay movimientos pendientes de conciliación.")
+            else:
+                st.subheader("Movimientos pendientes")
+                opciones_mov = []
+                for r in pendientes.itertuples():
+                    monto = r.cargo if float(r.cargo or 0)>0 else r.abono
+                    clase = "Cargo" if float(r.cargo or 0)>0 else "Abono"
+                    opciones_mov.append(f"{r.id} | {r.fecha} | {clase} {money(monto)} | {r.descripcion}")
+                elegido = st.selectbox("Selecciona un movimiento", opciones_mov)
+                movimiento_id = int(elegido.split(" | ",1)[0])
+                cand = candidatos_conciliacion(conn,movimiento_id)
+                if cand.empty:
+                    st.warning("No encontré coincidencias exactas por monto. Puedes crear una operación manual en la pestaña 'Operaciones manuales'.")
+                else:
+                    mostrar = cand[["confianza","tipo","fecha","descripcion","referencia","monto","cuenta"]].copy()
+                    mostrar["confianza"] = mostrar["confianza"].apply(lambda x: f"{x:.0f}%")
+                    st.dataframe(mostrar.rename(columns={"confianza":"Coincidencia","tipo":"Origen","fecha":"Fecha","descripcion":"Detalle","referencia":"Referencia","monto":"Monto","cuenta":"Cuenta"}), use_container_width=True, hide_index=True)
+                    opciones_cand = [f"{i} | {r.tipo} | {r.descripcion} | {money(r.monto)} | {r.confianza:.0f}%" for i,r in cand.iterrows()]
+                    sel = st.selectbox("Coincidencia propuesta", opciones_cand)
+                    idx = int(sel.split(" | ",1)[0])
+                    elegido_c = cand.iloc[idx]
+                    st.info("SGCI propone por coincidencia de monto y suma puntos por cercanía de fecha/referencia. La contabilización solo ocurre cuando tú confirmas.")
+                    if st.button("✅ Confirmar y contabilizar coincidencia", type="primary"):
+                        try:
+                            asiento = contabilizar_conciliacion_bancaria(conn,movimiento_id,elegido_c["tipo"],int(elegido_c["id"]))
+                            st.success(f"Movimiento conciliado y contabilizado en el asiento {asiento}.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"No se pudo conciliar: {e}")
+
+    with tabs[4]:
+        st.subheader("Servicios, nómina y otros pagos/abonos")
+        st.caption("Registra aquí operaciones que no provienen del RCV. Luego SGCI las buscará por coincidencia de monto contra la cartola.")
+        cuentas = cuentas_imputables(conn)
+        mapa = dict(zip(cuentas.etiqueta,cuentas.codigo))
+        with st.form("nueva_operacion_manual"):
+            c1,c2 = st.columns(2)
+            fecha_op = c1.date_input("Fecha de la operación", date.today())
+            tipo_op = c2.selectbox("Tipo", ["PAGO","ABONO"])
+            descripcion_op = st.text_input("Descripción (ej.: Nómina septiembre, Internet, Arriendo)")
+            referencia_op = st.text_input("Referencia (opcional)")
+            monto_op = st.number_input("Monto de la operación", min_value=0.0, step=1000.0)
+            cuenta_op = st.selectbox("Cuenta contable de contrapartida", list(mapa.keys())) if mapa else ""
+            if st.form_submit_button("Guardar operación"):
+                if not descripcion_op or monto_op <= 0 or not cuenta_op:
+                    st.error("Completa descripción, monto y cuenta contable.")
+                else:
+                    crear_obligacion_manual(conn,fecha_op.strftime("%Y-%m-%d"),tipo_op,descripcion_op,referencia_op,monto_op,mapa[cuenta_op])
+                    st.success("Operación guardada. SGCI podrá encontrarla por coincidencia de monto.")
+                    st.rerun()
+
+        ops = pd.read_sql_query("""SELECT o.id,o.fecha,o.tipo,o.descripcion,o.referencia,o.monto,o.codigo_cuenta,
+                                     CASE WHEN o.conciliado=1 THEN 'Conciliado' ELSE 'Pendiente' END estado
+                                     FROM obligaciones_manuales o ORDER BY o.fecha DESC,o.id DESC""", conn)
+        if not ops.empty:
+            st.dataframe(ops, use_container_width=True, hide_index=True)
+
+    with tabs[5]:
+        bancos = pd.read_sql_query("SELECT id,nombre FROM bancos WHERE activo=1 ORDER BY nombre", conn)
         if not bancos.empty:
-            label=st.selectbox("Cuenta",[f"{r.id} - {r.nombre}" for r in bancos.itertuples()],key="mov_banco")
-            dfm=pd.read_sql_query("SELECT fecha,descripcion,referencia,cargo,abono,saldo,conciliado,observacion FROM cartola_bancaria WHERE banco_id=? ORDER BY fecha,id DESC",conn,params=[int(label.split(" - ")[0])])
-            st.dataframe(dfm,use_container_width=True,hide_index=True)
+            label = st.selectbox("Cuenta", [f"{r.id} - {r.nombre}" for r in bancos.itertuples()], key="mov_banco")
+            dfm = pd.read_sql_query("""SELECT fecha,descripcion,referencia,cargo,abono,saldo,
+                                        CASE WHEN conciliado=1 THEN 'Sí' ELSE 'No' END conciliado,
+                                        origen,match_tipo,match_id,asiento_id,observacion
+                                        FROM cartola_bancaria WHERE banco_id=? ORDER BY fecha,id DESC""", conn, params=[int(label.split(" - ")[0])])
+            st.dataframe(dfm, use_container_width=True, hide_index=True)
 
 
 # ============================================================
