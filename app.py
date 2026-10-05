@@ -3406,6 +3406,70 @@ def contabilizar_conciliacion_bancaria(conn, movimiento_id, candidato_tipo, cand
     return asiento_id
 
 
+def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, descripcion=None):
+    """Imputa directamente un movimiento bancario a una cuenta contable y lo deja conciliado.
+
+    Cargo: Debe contrapartida / Haber Banco.
+    Abono: Debe Banco / Haber contrapartida.
+    """
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
+    if not mov:
+        raise ValueError("Movimiento bancario no encontrado.")
+    if int(mov["conciliado"] or 0) == 1:
+        raise ValueError("Este movimiento ya está conciliado.")
+
+    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+    if not banco or not banco["cuenta_contable"]:
+        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+
+    plan = Plan(conn)
+    if codigo_cuenta not in plan.todos:
+        raise ValueError("La cuenta de contrapartida no existe en el plan de cuentas.")
+    if codigo_cuenta == banco["cuenta_contable"]:
+        raise ValueError("La contrapartida no puede ser la misma cuenta bancaria.")
+
+    monto = abs(float(mov["cargo"] or mov["abono"] or 0))
+    es_cargo = float(mov["cargo"] or 0) > 0
+    if monto <= 0:
+        raise ValueError("El movimiento no tiene monto para contabilizar.")
+
+    glosa = limpiar_texto(descripcion) or limpiar_texto(mov["descripcion"]) or "Imputación manual bancaria"
+    asiento_id = siguiente_asiento(conn) + 1
+    lote = "CONC-MANUAL-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    fecha = mov["fecha"]
+    cuenta_banco = banco["cuenta_contable"]
+
+    lineas = [
+        (codigo_cuenta, monto, 0.0),
+        (cuenta_banco, 0.0, monto),
+    ] if es_cargo else [
+        (cuenta_banco, monto, 0.0),
+        (codigo_cuenta, 0.0, monto),
+    ]
+
+    try:
+        for codigo, debe, haber in lineas:
+            nombre = plan.todos.get(codigo, codigo)
+            conn.execute("""INSERT INTO libro_diario
+                (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (fecha, nombre, debe, haber, glosa, codigo, asiento_id, lote, "CONCILIACION_BANCARIA_MANUAL"))
+
+        conn.execute("""UPDATE cartola_bancaria
+                        SET conciliado=1,observacion=?,asiento_id=?,match_tipo='IMPUTACION_MANUAL',
+                            match_id=NULL,match_confianza=100
+                        WHERE id=?""",
+                     (glosa, asiento_id, movimiento_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    registrar_auditoria(conn, "IMPUTACIÓN BANCARIA MANUAL",
+                        f"Movimiento {movimiento_id} -> cuenta {codigo_cuenta}, asiento {asiento_id}")
+    return asiento_id
+
+
 # ============================================================
 # INICIALIZACIÓN
 # ============================================================
@@ -3698,7 +3762,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 movimiento_id = int(elegido.split(" | ",1)[0])
                 cand = candidatos_conciliacion(conn,movimiento_id)
                 if cand.empty:
-                    st.warning("No encontré coincidencias exactas por monto. Puedes crear una operación manual en la pestaña 'Operaciones manuales'.")
+                    st.warning("No encontré coincidencias exactas por monto. Puedes imputar este movimiento directamente a contabilidad aquí mismo.")
                 else:
                     mostrar = cand[["confianza","tipo","fecha","descripcion","referencia","monto","cuenta"]].copy()
                     mostrar["confianza"] = mostrar["confianza"].apply(lambda x: f"{x:.0f}%")
@@ -3715,6 +3779,30 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.rerun()
                         except Exception as e:
                             st.error(f"No se pudo conciliar: {e}")
+
+                st.divider()
+                st.subheader("Imputación manual del movimiento")
+                st.caption("Úsala cuando no exista una coincidencia adecuada. Al confirmar, SGCI genera el asiento y marca el movimiento como conciliado. Si el gasto ya fue provisionado, selecciona la cuenta por pagar correspondiente; no vuelvas a seleccionar la cuenta de gasto.")
+                cuentas_manual = cuentas_imputables(conn)
+                if cuentas_manual.empty:
+                    st.info("No hay cuentas imputables disponibles en el plan de cuentas.")
+                else:
+                    mapa_manual = dict(zip(cuentas_manual.etiqueta, cuentas_manual.codigo))
+                    cuenta_manual = st.selectbox("Cuenta contable de contrapartida", list(mapa_manual.keys()), key=f"imputacion_cuenta_{movimiento_id}")
+                    mov_sel = pendientes.loc[pendientes["id"] == movimiento_id].iloc[0]
+                    glosa_base = limpiar_texto(mov_sel["descripcion"])
+                    glosa_manual = st.text_input("Glosa del asiento", value=glosa_base, key=f"imputacion_glosa_{movimiento_id}")
+                    monto_sel = float(mov_sel["cargo"] or 0) if float(mov_sel["cargo"] or 0) > 0 else float(mov_sel["abono"] or 0)
+                    naturaleza_sel = "Cargo / salida" if float(mov_sel["cargo"] or 0) > 0 else "Abono / entrada"
+                    st.info(f"Movimiento: {naturaleza_sel} por {money(monto_sel)}. SGCI usará automáticamente la cuenta bancaria como la otra línea del asiento.")
+                    confirmar_manual = st.checkbox("Confirmo que revisé la cuenta contable y deseo contabilizar y conciliar este movimiento.", key=f"imputacion_confirma_{movimiento_id}")
+                    if st.button("🧾 Contabilizar e imputar manualmente", type="primary", disabled=not confirmar_manual, key=f"imputacion_btn_{movimiento_id}"):
+                        try:
+                            asiento = contabilizar_imputacion_manual_bancaria(conn,movimiento_id,mapa_manual[cuenta_manual],glosa_manual)
+                            st.success(f"Movimiento imputado, conciliado y contabilizado en el asiento {asiento}.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"No se pudo imputar el movimiento: {e}")
 
     with tabs[4]:
         st.subheader("Servicios, nómina y otros pagos/abonos")
