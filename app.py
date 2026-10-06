@@ -4193,7 +4193,7 @@ def anticipos_contables_sin_asignar(conn):
            )
         ORDER BY MIN(ld.fecha),ld.asiento_id
     """
-    params=codigos+codigos+codigos
+    params=codigos+codigos+codigos+codigos
     return pd.read_sql_query(sql,conn,params=params)
 
 
