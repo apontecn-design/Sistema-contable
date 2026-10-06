@@ -4013,11 +4013,13 @@ def documentos_pendientes_proveedor(conn, proveedor_id):
     """, conn, params=[int(proveedor_id)])
 
 
-def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id, compra_ids):
-    """Contabiliza un cargo de cartola como pago a proveedor y aplica el monto a uno o varios documentos.
+def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id, compra_ids,
+                                                 cuenta_diferencia=None, glosa_diferencia=""):
+    """Contabiliza un cargo bancario como pago a proveedor.
 
-    Genera Debe Proveedores / Haber Banco y mantiene sincronizado el auxiliar del proveedor.
-    Si el movimiento es menor al saldo de los documentos seleccionados, aplica parcialmente en orden.
+    El monto aplicado al auxiliar del proveedor nunca supera el saldo de los documentos elegidos.
+    Si el cargo bancario excede ese saldo, la diferencia puede imputarse a otra cuenta contable.
+    Si el cargo es menor, se aplica parcialmente y el documento conserva saldo pendiente.
     """
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
     if not mov:
@@ -4039,12 +4041,11 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
         raise ValueError("La cuenta de Proveedores no está configurada.")
     cuenta_proveedores = rol_prov[0]
     cuenta_banco = banco["cuenta_contable"]
-    if cuenta_banco == cuenta_proveedores:
-        raise ValueError("La cuenta bancaria y la cuenta de Proveedores no pueden ser la misma.")
 
     proveedor = conn.execute("SELECT * FROM proveedores WHERE id=?", (int(proveedor_id),)).fetchone()
     if not proveedor:
         raise ValueError("Proveedor no encontrado.")
+
     compra_ids = [int(x) for x in compra_ids]
     if not compra_ids:
         raise ValueError("Selecciona al menos un documento pendiente del proveedor.")
@@ -4054,10 +4055,16 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
     if docs.empty:
         raise ValueError("Los documentos seleccionados ya no tienen saldo pendiente.")
 
-    monto = abs(float(mov["cargo"] or 0))
-    disponible = float(docs["pendiente"].sum())
-    if disponible + 0.01 < monto:
-        raise ValueError(f"Los documentos seleccionados solo tienen {money(disponible)} pendientes y el cargo bancario es {money(monto)}.")
+    monto_banco = clp_round(abs(float(mov["cargo"] or 0)))
+    saldo_docs = clp_round(float(docs["pendiente"].sum()))
+    monto_proveedor = min(monto_banco, saldo_docs)
+    diferencia = clp_round(monto_banco - monto_proveedor)
+
+    if diferencia > 0:
+        if not cuenta_diferencia:
+            raise ValueError(f"Existe una diferencia de {money(diferencia)}. Selecciona la cuenta contable donde deseas imputarla.")
+        if cuenta_diferencia in (cuenta_banco, cuenta_proveedores):
+            raise ValueError("La cuenta de diferencia debe ser distinta de Banco y Proveedores.")
 
     nombre_prov = limpiar_texto(proveedor["razon_social"] or proveedor["nombre"] or "Proveedor")
     folios = ", ".join(str(x) for x in docs["folio"].tolist())
@@ -4067,43 +4074,69 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
     plan = Plan(conn)
 
     try:
-        for codigo, debe, haber in [(cuenta_proveedores, monto, 0.0), (cuenta_banco, 0.0, monto)]:
+        # Proveedores solo por lo efectivamente aplicado a sus documentos.
+        conn.execute("""INSERT INTO libro_diario
+            (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+            VALUES(?,?,?,?,?,?,?,?,?)""",
+            (mov["fecha"], plan.todos.get(cuenta_proveedores,cuenta_proveedores),
+             monto_proveedor, 0.0, glosa, cuenta_proveedores, asiento_id, lote,
+             "CONCILIACION_PAGO_PROVEEDOR"))
+
+        # Exceso del cheque/pago: cuenta elegida por el usuario.
+        if diferencia > 0:
+            gd = limpiar_texto(glosa_diferencia) or f"Diferencia pago proveedor {nombre_prov}"
             conn.execute("""INSERT INTO libro_diario
                 (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
                 VALUES(?,?,?,?,?,?,?,?,?)""",
-                (mov["fecha"], plan.todos.get(codigo,codigo), debe, haber, glosa, codigo, asiento_id, lote, "CONCILIACION_PAGO_PROVEEDOR"))
+                (mov["fecha"], plan.todos.get(cuenta_diferencia,cuenta_diferencia),
+                 diferencia, 0.0, gd, cuenta_diferencia, asiento_id, lote,
+                 "CONCILIACION_DIFERENCIA_PROVEEDOR"))
+
+        # Banco siempre por el monto real de la cartola.
+        conn.execute("""INSERT INTO libro_diario
+            (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+            VALUES(?,?,?,?,?,?,?,?,?)""",
+            (mov["fecha"], plan.todos.get(cuenta_banco,cuenta_banco),
+             0.0, monto_banco, glosa, cuenta_banco, asiento_id, lote,
+             "CONCILIACION_PAGO_PROVEEDOR"))
 
         cur = conn.execute("""INSERT INTO pagos_proveedores(fecha,proveedor_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
                               VALUES(?,?,?,?,?,?,?)""",
-                           (mov["fecha"], int(proveedor_id), monto, "Banco", cuenta_banco, glosa, lote))
+                           (mov["fecha"], int(proveedor_id), monto_proveedor, "Banco",
+                            cuenta_banco, glosa, lote))
         pago_id = cur.lastrowid
 
-        restante = monto
+        restante = monto_proveedor
         aplicaciones = []
         for r in docs.itertuples(index=False):
             if restante <= 0.01:
                 break
-            aplicar = min(restante, float(r.pendiente))
-            if aplicar > 0.01:
+            aplicar = min(restante, clp_round(float(r.pendiente)))
+            if aplicar > 0:
                 conn.execute("INSERT INTO aplicaciones_proveedores(pago_id,compra_id,monto) VALUES(?,?,?)",
                              (pago_id, int(r.id), aplicar))
                 aplicaciones.append((int(r.id), aplicar))
-                restante -= aplicar
-        if restante > 0.01:
-            raise ValueError("No fue posible aplicar completamente el pago a los documentos seleccionados.")
+                restante = clp_round(restante - aplicar)
+
+        if restante > 0:
+            raise ValueError("No fue posible aplicar completamente la porción correspondiente al proveedor.")
+
+        observacion = glosa
+        if diferencia > 0:
+            observacion += f" | Diferencia {money(diferencia)} -> {cuenta_diferencia}"
 
         conn.execute("""UPDATE cartola_bancaria
                         SET conciliado=1,observacion=?,asiento_id=?,match_tipo='PROVEEDOR',match_id=?,match_confianza=100
                         WHERE id=?""",
-                     (glosa, asiento_id, int(proveedor_id), int(movimiento_id)))
+                     (observacion, asiento_id, int(proveedor_id), int(movimiento_id)))
         conn.commit()
     except Exception:
         conn.rollback()
         raise
 
     registrar_auditoria(conn, "PAGO PROVEEDOR DESDE CARTOLA",
-                        f"Movimiento {movimiento_id} -> proveedor {proveedor_id}, asiento {asiento_id}")
-    return asiento_id, aplicaciones
+                        f"Movimiento {movimiento_id} -> proveedor {proveedor_id}, aplicado {monto_proveedor}, diferencia {diferencia}, asiento {asiento_id}")
+    return asiento_id, aplicaciones, diferencia
 
 
 def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id):
@@ -5026,17 +5059,41 @@ elif menu == "🏦 Bancos y Cartolas":
                                 doc_map = {f"{int(r.id)} | {r.fecha} | Folio {r.folio} | pendiente {money(r.pendiente)}": int(r.id) for r in docs_pend.itertuples()}
                                 docs_sel_labels = st.multiselect("Documento(s) que paga este movimiento", list(doc_map.keys()), key=f"docs_pago_{movimiento_id}")
                                 docs_ids = [doc_map[x] for x in docs_sel_labels]
-                                disponible = float(docs_pend[docs_pend["id"].isin(docs_ids)]["pendiente"].sum()) if docs_ids else 0.0
-                                monto_mov = float(mov_sel["cargo"] or 0)
+                                disponible = clp_round(float(docs_pend[docs_pend["id"].isin(docs_ids)]["pendiente"].sum())) if docs_ids else 0
+                                monto_mov = clp_round(float(mov_sel["cargo"] or 0))
+                                cuenta_dif_codigo = None
+                                glosa_dif = ""
+                                diferencia_pago = max(0, clp_round(monto_mov-disponible)) if docs_ids else 0
+
                                 if docs_ids:
-                                    st.info(f"Cargo bancario: {money(monto_mov)} | Saldo disponible en documentos seleccionados: {money(disponible)}")
-                                    if disponible > monto_mov + 0.01:
-                                        st.caption("El pago se aplicará en el orden de los documentos seleccionados; el último puede quedar parcialmente pagado.")
+                                    a1,a2,a3=st.columns(3)
+                                    a1.metric("Cargo bancario", money(monto_mov))
+                                    a2.metric("Aplicado a documentos", money(min(monto_mov,disponible)))
+                                    a3.metric("Diferencia por imputar", money(diferencia_pago))
+                                    if disponible > monto_mov:
+                                        st.info(f"Pago parcial: quedarán {money(disponible-monto_mov)} pendientes en los documentos seleccionados.")
+                                    elif diferencia_pago > 0:
+                                        st.warning("El cargo bancario es mayor que el saldo de los documentos. La diferencia no se cargará al proveedor: debes indicar otra cuenta contable.")
+                                        cuentas_dif=cuentas_imputables(conn)
+                                        mapa_dif=dict(zip(cuentas_dif.etiqueta,cuentas_dif.codigo))
+                                        cuenta_dif_label=st.selectbox("Cuenta contable para la diferencia",list(mapa_dif.keys()),key=f"cuenta_dif_prov_{movimiento_id}")
+                                        cuenta_dif_codigo=mapa_dif.get(cuenta_dif_label)
+                                        glosa_dif=st.text_input("Glosa de la diferencia",value=f"Diferencia pago proveedor {prov_label.split(' | ',2)[-1]}",key=f"glosa_dif_prov_{movimiento_id}")
+                                        st.caption("Ejemplos: diferencia de pago, anticipo al proveedor, comisión bancaria u otra cuenta que corresponda según la naturaleza real.")
+
                                 confirma_prov = st.checkbox("Confirmo que este movimiento corresponde al pago del proveedor y documentos seleccionados.", key=f"conf_pago_prov_{movimiento_id}")
-                                if st.button("💳 Contabilizar pago a proveedor", type="primary", disabled=(not confirma_prov or not docs_ids), key=f"btn_pago_prov_{movimiento_id}"):
+                                falta_cuenta_dif = bool(docs_ids and diferencia_pago>0 and not cuenta_dif_codigo)
+                                if st.button("💳 Contabilizar pago a proveedor", type="primary", disabled=(not confirma_prov or not docs_ids or falta_cuenta_dif), key=f"btn_pago_prov_{movimiento_id}"):
                                     try:
-                                        asiento, aplicaciones = contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, prov_id, docs_ids)
-                                        st.success(f"Pago contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado.")
+                                        asiento, aplicaciones, diferencia = contabilizar_pago_proveedor_desde_cartola(
+                                            conn, movimiento_id, prov_id, docs_ids,
+                                            cuenta_diferencia=cuenta_dif_codigo,
+                                            glosa_diferencia=glosa_dif
+                                        )
+                                        msg=f"Pago contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado."
+                                        if diferencia>0:
+                                            msg += f" Diferencia imputada: {money(diferencia)}."
+                                        st.success(msg)
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"No se pudo contabilizar el pago: {e}")
