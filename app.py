@@ -3043,10 +3043,40 @@ def reclasificar_compras(conn, compra_ids, nueva_cuenta, recordar_proveedor=Fals
                 omitidas += 1
                 continue
 
-            # monto_neto ya conserva el signo contable de la compra/NC.
-            monto = round(float(c["monto_neto"] or 0), 2)
+            # La base reclasificable debe salir del asiento REAL que generó el RCV,
+            # no solamente de compras.monto_neto. Algunos RCV (por ejemplo ciertos
+            # servicios) pueden venir con neto/exento en cero y armar_asiento()
+            # reconstruye correctamente la base por diferencia contra el total.
+            # En esos casos el Libro Diario sí contiene el monto contable correcto.
+            fila_base = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(debe), 0) AS debe,
+                    COALESCE(SUM(haber), 0) AS haber
+                FROM libro_diario
+                WHERE lote_id = ?
+                  AND fecha = ?
+                  AND glosa = ?
+                  AND codigo_cuenta = ?
+                  AND COALESCE(origen, '') NOT LIKE 'Reclasificación%'
+                """,
+                (c["lote_id"], c["fecha"], c["glosa"], cuenta_anterior)
+            ).fetchone()
+
+            debe_base = round(float(fila_base["debe"] or 0), 2) if fila_base else 0.0
+            haber_base = round(float(fila_base["haber"] or 0), 2) if fila_base else 0.0
+            monto = round(debe_base - haber_base, 2)
+
+            # Respaldo para registros antiguos en los que la trazabilidad del lote
+            # o la glosa no estuviera disponible. Solo se usa si el Diario no dio base.
             if abs(monto) <= 0.001:
-                raise ValueError(f"La compra folio {c['folio']} no tiene base reclasificable.")
+                monto = round(float(c["monto_neto"] or 0), 2)
+
+            if abs(monto) <= 0.001:
+                raise ValueError(
+                    f"La compra folio {c['folio']} no tiene base reclasificable "
+                    "en el asiento original del Libro Diario."
+                )
 
             asiento += 1
             glosa = (
