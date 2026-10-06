@@ -76,167 +76,6 @@ def money(valor):
         return "$0"
 
 
-
-def numero_cartola(valor):
-    """Convierte montos de cartolas chilenas a número sin confundir miles con decimales.
-
-    Ejemplos CLP: 158.038 -> 158038; 11.805.135 -> 11805135; 36.290 -> 36290.
-    También tolera formato 1.234,56 cuando exista decimal explícito con coma.
-    """
-    if valor is None:
-        return 0.0
-    s = str(valor).strip().replace("$", "").replace(" ", "")
-    if not s or s.lower() in {"nan", "none"}:
-        return 0.0
-    negativo = s.startswith("-")
-    s = s.lstrip("+-")
-    if "," in s:
-        # Convención chilena: punto miles y coma decimal.
-        s = s.replace(".", "").replace(",", ".")
-    elif "." in s:
-        partes = s.split(".")
-        # Uno o varios grupos de miles de tres dígitos.
-        if len(partes) > 1 and all(x.isdigit() for x in partes) and all(len(x) == 3 for x in partes[1:]):
-            s = "".join(partes)
-        elif len(partes) > 2:
-            s = "".join(partes)
-    try:
-        n = float(s)
-        return -n if negativo else n
-    except Exception:
-        return 0.0
-
-
-def formatear_montos_df(df, columnas=None):
-    """Devuelve copia para visualización con separador de miles chileno."""
-    if df is None:
-        return df
-    out = df.copy()
-    if columnas is None:
-        columnas = [c for c in out.columns if str(c).lower() in {
-            "debe","haber","saldo","cargo","abono","monto","total","compras","pagado",
-            "facturado","ingresos","gastos","activo","pasivo","patrimonio","diferencia",
-            "saldo_inicial","saldo inicial","movimiento"
-        }]
-    for c in columnas:
-        if c in out.columns:
-            out[c] = out[c].apply(lambda x: money(x) if pd.notna(x) else "")
-    return out
-
-
-def datos_empresa(conn):
-    fila = conn.execute("SELECT rut, razon_social, giro, direccion, comuna, ciudad FROM empresa ORDER BY id LIMIT 1").fetchone()
-    if not fila:
-        return {"rut":"", "razon_social":"SGCI - Sistema de Gestión Contable Integral", "giro":"", "direccion":"", "comuna":"", "ciudad":""}
-    return {k: (fila[k] or "") for k in ("rut","razon_social","giro","direccion","comuna","ciudad")}
-
-
-def excel_reporte(df, titulo, empresa=None, periodo="", totales=None):
-    """Genera un XLSX en memoria con encabezado, tabla y formato monetario CLP."""
-    salida = io.BytesIO()
-    with pd.ExcelWriter(salida, engine="openpyxl") as writer:
-        inicio = 5
-        df.to_excel(writer, sheet_name="Reporte", index=False, startrow=inicio)
-        ws = writer.book["Reporte"]
-        ws["A1"] = (empresa or {}).get("razon_social", "SGCI") or "SGCI"
-        ws["A2"] = titulo
-        ws["A3"] = periodo
-        if (empresa or {}).get("rut"):
-            ws["D1"] = f"RUT: {(empresa or {}).get('rut')}"
-        for cell in ws[inicio + 1]:
-            cell.font = cell.font.copy(bold=True)
-        for col_idx, col_name in enumerate(df.columns, 1):
-            if str(col_name).lower() in {"debe","haber","saldo","cargo","abono","monto","total","movimiento","saldo deudor","saldo acreedor"}:
-                for row in range(inicio + 2, inicio + 2 + len(df)):
-                    ws.cell(row=row, column=col_idx).number_format = '$#,##0;[Red]-$#,##0'
-            ancho = min(max(12, len(str(col_name)) + 2, *(len(str(v)) + 2 for v in df[col_name].head(100).fillna(""))), 45)
-            ws.column_dimensions[ws.cell(row=inicio + 1, column=col_idx).column_letter].width = ancho
-        if totales:
-            fila = inicio + 3 + len(df)
-            ws.cell(row=fila, column=1, value="Totales / Resumen")
-            for i, (k, v) in enumerate(totales.items(), 2):
-                ws.cell(row=fila, column=i, value=f"{k}: {money(v)}")
-    salida.seek(0)
-    return salida.getvalue()
-
-
-def pdf_reporte(df, titulo, empresa=None, periodo="", totales=None, orientacion="landscape"):
-    """Genera PDF imprimible en memoria usando ReportLab."""
-    try:
-        from reportlab.lib import colors
-        from reportlab.lib.pagesizes import A4, landscape, portrait
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.enums import TA_CENTER, TA_RIGHT
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-        from reportlab.lib.units import mm
-    except Exception:
-        raise ValueError("Para generar PDF debes agregar 'reportlab' al requirements.txt y volver a desplegar.")
-
-    salida = io.BytesIO()
-    pagesize = landscape(A4) if orientacion == "landscape" else portrait(A4)
-    doc = SimpleDocTemplate(salida, pagesize=pagesize, rightMargin=10*mm, leftMargin=10*mm, topMargin=10*mm, bottomMargin=10*mm)
-    styles = getSampleStyleSheet()
-    titulo_style = ParagraphStyle("TituloSGCI", parent=styles["Heading1"], alignment=TA_CENTER, fontSize=16, spaceAfter=4)
-    sub_style = ParagraphStyle("SubSGCI", parent=styles["Normal"], alignment=TA_CENTER, fontSize=9, spaceAfter=2)
-    normal = ParagraphStyle("NormalSGCI", parent=styles["Normal"], fontSize=7, leading=9)
-    story=[]
-    emp = empresa or {}
-    story.append(Paragraph(str(emp.get("razon_social") or "SGCI - Sistema de Gestión Contable Integral"), titulo_style))
-    if emp.get("rut"):
-        story.append(Paragraph(f"RUT: {emp.get('rut')}", sub_style))
-    story.append(Paragraph(titulo, ParagraphStyle("Rep", parent=titulo_style, fontSize=13)))
-    if periodo:
-        story.append(Paragraph(periodo, sub_style))
-    story.append(Paragraph(f"Emitido: {datetime.now().strftime('%d-%m-%Y %H:%M')}", sub_style))
-    story.append(Spacer(1, 4*mm))
-
-    mostrar = df.copy()
-    for c in mostrar.columns:
-        if str(c).lower() in {"debe","haber","saldo","cargo","abono","monto","total","movimiento","saldo deudor","saldo acreedor"}:
-            mostrar[c] = mostrar[c].apply(lambda x: money(x) if pd.notna(x) else "")
-    data = [[Paragraph(str(c), normal) for c in mostrar.columns]]
-    for _, r in mostrar.iterrows():
-        data.append([Paragraph(str(v) if pd.notna(v) else "", normal) for v in r.tolist()])
-    if not data[0]:
-        data=[["Sin datos"]]
-    ancho_total = pagesize[0] - 20*mm
-    ncols=max(1,len(mostrar.columns))
-    col_widths=[ancho_total/ncols]*ncols
-    tabla=Table(data, colWidths=col_widths, repeatRows=1)
-    tabla.setStyle(TableStyle([
-        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#E9EEF5")),
-        ("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#1F2937")),
-        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
-        ("GRID",(0,0),(-1,-1),0.25,colors.HexColor("#C7CDD4")),
-        ("VALIGN",(0,0),(-1,-1),"TOP"),
-        ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),
-        ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
-    ]))
-    story.append(tabla)
-    if totales:
-        story.append(Spacer(1,4*mm))
-        resumen = " | ".join(f"{k}: {money(v)}" for k,v in totales.items())
-        story.append(Paragraph(resumen, ParagraphStyle("Tot", parent=styles["Normal"], alignment=TA_RIGHT, fontSize=9)))
-    doc.build(story)
-    salida.seek(0)
-    return salida.getvalue()
-
-
-def botones_reporte(df, titulo, nombre_archivo, empresa=None, periodo="", totales=None, key="reporte"):
-    """Botones PDF y Excel reutilizables."""
-    c1, c2 = st.columns(2)
-    try:
-        pdf = pdf_reporte(df, titulo, empresa, periodo, totales)
-        c1.download_button("🖨️ Descargar PDF", pdf, f"{nombre_archivo}.pdf", "application/pdf", key=f"{key}_pdf")
-    except Exception as e:
-        c1.warning(str(e))
-    try:
-        xlsx = excel_reporte(df, titulo, empresa, periodo, totales)
-        c2.download_button("📥 Descargar Excel", xlsx, f"{nombre_archivo}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"{key}_xlsx")
-    except Exception as e:
-        c2.warning(f"No se pudo generar Excel: {e}")
-
-
 def limpiar_texto(valor):
     if valor is None:
         return ""
@@ -3126,6 +2965,137 @@ def guardar_regla(
 
 
 
+
+# ============================================================
+# RECLASIFICACIÓN CONTABLE DE COMPRAS YA CONTABILIZADAS
+# ============================================================
+
+def compras_para_reclasificar(conn):
+    """Devuelve compras contabilizadas con la cuenta actualmente registrada."""
+    return pd.read_sql_query(
+        """
+        SELECT
+            c.id AS compra_id,
+            c.fecha,
+            p.rut,
+            COALESCE(p.razon_social, p.nombre, '') AS proveedor,
+            c.tipo_doc,
+            c.folio,
+            c.monto_neto,
+            c.monto_total,
+            c.cuenta_gasto,
+            c.lote_id
+        FROM compras c
+        LEFT JOIN proveedores p ON p.id = c.proveedor_id
+        ORDER BY c.fecha DESC, c.id DESC
+        """,
+        conn
+    )
+
+
+def codigo_cuenta_por_nombre(conn, nombre):
+    fila = conn.execute(
+        "SELECT codigo FROM plan_cuentas WHERE nombre = ? ORDER BY nivel DESC LIMIT 1",
+        (limpiar_texto(nombre),)
+    ).fetchone()
+    return limpiar_texto(fila["codigo"]) if fila else None
+
+
+def reclasificar_compras(conn, compra_ids, nueva_cuenta, recordar_proveedor=False):
+    """Genera un asiento de reclasificación sin modificar IVA ni Proveedores."""
+    ids = [int(x) for x in compra_ids]
+    if not ids:
+        raise ValueError("Selecciona al menos una compra.")
+
+    plan = Plan(conn)
+    if nueva_cuenta not in plan.hojas:
+        raise ValueError("La nueva cuenta no existe o no es imputable.")
+
+    placeholders = ",".join("?" for _ in ids)
+    compras = conn.execute(
+        f"""
+        SELECT c.*, p.rut, COALESCE(p.razon_social,p.nombre,'') AS proveedor
+        FROM compras c
+        LEFT JOIN proveedores p ON p.id=c.proveedor_id
+        WHERE c.id IN ({placeholders})
+        ORDER BY c.fecha, c.id
+        """,
+        ids
+    ).fetchall()
+
+    if len(compras) != len(ids):
+        raise ValueError("No fue posible localizar todas las compras seleccionadas.")
+
+    asiento = siguiente_asiento(conn)
+    lote = "RECLAS-COMPRAS-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    reclasificadas = 0
+    omitidas = 0
+
+    try:
+        for c in compras:
+            if periodo_cerrado(conn, c["fecha"]):
+                raise ValueError(f"El período {str(c['fecha'])[:7]} está cerrado. Reabre el período antes de reclasificar.")
+
+            cuenta_anterior = codigo_cuenta_por_nombre(conn, c["cuenta_gasto"])
+            if not cuenta_anterior:
+                raise ValueError(f"No pude identificar el código de la cuenta actual de la compra folio {c['folio']}.")
+            if cuenta_anterior == nueva_cuenta:
+                omitidas += 1
+                continue
+
+            # monto_neto ya conserva el signo contable de la compra/NC.
+            monto = round(float(c["monto_neto"] or 0), 2)
+            if abs(monto) <= 0.001:
+                raise ValueError(f"La compra folio {c['folio']} no tiene base reclasificable.")
+
+            asiento += 1
+            glosa = (
+                f"Reclasificación compra {nombre_documento(c['tipo_doc'])} N° {c['folio']} - "
+                f"{c['proveedor']} | {cuenta_anterior} → {nueva_cuenta}"
+            )
+
+            # Facturas: Debe nueva / Haber anterior. NC: efecto inverso.
+            if monto > 0:
+                lineas = [(nueva_cuenta, abs(monto), 0.0), (cuenta_anterior, 0.0, abs(monto))]
+            else:
+                lineas = [(cuenta_anterior, abs(monto), 0.0), (nueva_cuenta, 0.0, abs(monto))]
+
+            for codigo, debe, haber in lineas:
+                conn.execute(
+                    """
+                    INSERT INTO libro_diario
+                    (fecha, cuenta, debe, haber, glosa, centro_costo, codigo_cuenta, asiento_id, lote_id, origen)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (c["fecha"], plan.todos[codigo], debe, haber, glosa,
+                     c["centro_costo"] or "General / Ninguno", codigo, asiento, lote, "Reclasificación RCV Compras")
+                )
+
+            conn.execute(
+                "UPDATE compras SET cuenta_gasto=? WHERE id=?",
+                (plan.todos[nueva_cuenta], c["id"])
+            )
+
+            if recordar_proveedor and c["proveedor_id"]:
+                conn.execute(
+                    "UPDATE proveedores SET cuenta_defecto=? WHERE id=?",
+                    (nueva_cuenta, c["proveedor_id"])
+                )
+
+            reclasificadas += 1
+
+        conn.execute(
+            "INSERT INTO auditoria(fecha_hora, usuario, accion, detalle) VALUES (?,?,?,?)",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "admin", "RECLASIFICACIÓN RCV COMPRAS",
+             f"Lote {lote}: {reclasificadas} compra(s) a {nueva_cuenta}; omitidas {omitidas}")
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {"reclasificadas": reclasificadas, "omitidas": omitidas, "lote": lote}
+
 # ============================================================
 # CONTROL CONTABLE Y REPORTES
 # ============================================================
@@ -3270,9 +3240,9 @@ def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
         fecha = fecha_iso(r.get(fecha_c))
         desc = limpiar_texto(r.get(desc_c))
         ref = limpiar_texto(r.get(ref_c)) if ref_c else ""
-        cargo = abs(numero_cartola(r.get(cargo_c))) if cargo_c else 0
-        abono = abs(numero_cartola(r.get(abono_c))) if abono_c else 0
-        saldo = numero_cartola(r.get(saldo_c)) if saldo_c and limpiar_texto(r.get(saldo_c)) else None
+        cargo = abs(numero(r.get(cargo_c))) if cargo_c else 0
+        abono = abs(numero(r.get(abono_c))) if abono_c else 0
+        saldo = numero(r.get(saldo_c)) if saldo_c and limpiar_texto(r.get(saldo_c)) else None
 
         if not fecha or not desc or (cargo <= 0 and abono <= 0):
             continue
@@ -3343,8 +3313,8 @@ def leer_cartola_pdf(uploaded_file, password=""):
             continue
         fecha_txt, cuerpo, referencia, monto_txt, saldo_txt = m.groups()
         cuerpo_upper = cuerpo.upper()
-        monto = numero_cartola(monto_txt)
-        saldo = numero_cartola(saldo_txt)
+        monto = numero(monto_txt)
+        saldo = numero(saldo_txt)
 
         # Determinación por descripción para el formato BCI. Si el banco usa
         # términos de abono, se clasifica como abono; en caso contrario cargo.
@@ -3786,36 +3756,30 @@ elif menu == "📊 Estados Financieros":
     hasta=c2.date_input("Hasta", date.today(), key="ef_hasta")
     modo=c3.selectbox("Informe",["Estado de Resultados","Estado de Situación Financiera","Balance de Comprobación"])
     ds=desde.strftime("%Y-%m-%d"); hs=hasta.strftime("%Y-%m-%d")
-    empresa_rep=datos_empresa(conn)
-    periodo_rep=f"Período: {desde.strftime('%d-%m-%Y')} al {hasta.strftime('%d-%m-%Y')}"
     if modo=="Estado de Resultados":
         df=estado_resultados(conn,hs,ds)
         if df.empty: st.info("No hay movimientos para el período seleccionado.")
         else:
             ingresos=df[df.tipo=="Ingresos"]["saldo"].sum(); gastos=df[df.tipo=="Gastos"]["saldo"].sum(); resultado=ingresos-gastos
             a,b,c=st.columns(3); a.metric("Ingresos",money(ingresos)); b.metric("Gastos",money(gastos)); c.metric("Resultado",money(resultado))
-            rep=df[["codigo","nombre","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","saldo":"Saldo"})
-            st.dataframe(formatear_montos_df(rep,["Saldo"]),use_container_width=True,hide_index=True)
+            st.dataframe(df[["codigo","nombre","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","saldo":"Saldo"}),use_container_width=True,hide_index=True)
             st.success(f"Resultado del período: {money(resultado)}" if resultado>=0 else f"Resultado del período: {money(resultado)} (pérdida)")
-            botones_reporte(rep,"Estado de Resultados","estado_resultados",empresa_rep,periodo_rep,{"Ingresos":ingresos,"Gastos":gastos,"Resultado":resultado},"ef_er")
     elif modo=="Estado de Situación Financiera":
         df=estado_situacion(conn,hs)
         if df.empty: st.info("No hay movimientos para la fecha seleccionada.")
         else:
             activos=df[df.tipo=="Activo"]["saldo"].sum(); pasivos=-df[df.tipo=="Pasivo"]["saldo"].sum(); patrimonio=-df[df.tipo=="Patrimonio"]["saldo"].sum()
             a,b,c=st.columns(3); a.metric("Activos",money(activos)); b.metric("Pasivos",money(pasivos)); c.metric("Patrimonio",money(patrimonio))
-            rep=df[["codigo","nombre","tipo","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","tipo":"Tipo","saldo":"Saldo"})
-            st.dataframe(formatear_montos_df(rep,["Saldo"]),use_container_width=True,hide_index=True)
+            st.dataframe(df[["codigo","nombre","tipo","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","tipo":"Tipo","saldo":"Saldo"}),use_container_width=True,hide_index=True)
             st.info(f"Control: Activo = {money(activos)} | Pasivo + Patrimonio = {money(pasivos+patrimonio)} | Diferencia = {money(activos-pasivos-patrimonio)}")
-            botones_reporte(rep,"Estado de Situación Financiera","estado_situacion_financiera",empresa_rep,f"Al {hasta.strftime('%d-%m-%Y')}",{"Activos":activos,"Pasivos":pasivos,"Patrimonio":patrimonio},"ef_esf")
     else:
-        df=balance_comprobacion(conn,ds,hs)
+        df=resumen_financiero(conn,hs)
         if df.empty: st.info("No hay movimientos.")
         else:
-            debe=df["Debe"].sum(); haber=df["Haber"].sum()
-            st.dataframe(formatear_montos_df(df,["Debe","Haber","Saldo"]),use_container_width=True,hide_index=True)
-            st.success("🟢 Balance cuadrado" if abs(debe-haber)<0.01 else f"🔴 Diferencia: {money(debe-haber)}")
-            botones_reporte(df,"Balance de Comprobación","balance_comprobacion",empresa_rep,periodo_rep,{"Debe":debe,"Haber":haber,"Diferencia":debe-haber},"ef_bc")
+            df["saldo_deudor"]=df["debe"]-df["haber"].clip(upper=df["debe"])
+            df["saldo_acreedor"]=df["haber"]-df["debe"].clip(upper=df["haber"])
+            st.dataframe(df[["codigo","nombre","debe","haber","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","debe":"Debe","haber":"Haber","saldo":"Saldo"}),use_container_width=True,hide_index=True)
+            st.success("🟢 Balance cuadrado" if abs(df.debe.sum()-df.haber.sum())<0.01 else f"🔴 Diferencia: {money(df.debe.sum()-df.haber.sum())}")
 
 
 # ============================================================
@@ -3830,7 +3794,7 @@ elif menu == "🏦 Bancos y Cartolas":
     with tabs[0]:
         df = pd.read_sql_query("SELECT b.id AS ID,b.nombre AS Banco,b.numero_cuenta AS Cuenta,b.tipo AS Tipo,b.moneda AS Moneda,b.cuenta_contable AS Cuenta_Contable,b.saldo_inicial AS Saldo_Inicial FROM bancos b WHERE activo=1 ORDER BY nombre", conn)
         if not df.empty:
-            st.dataframe(formatear_montos_df(df, ["Saldo_Inicial"]), use_container_width=True, hide_index=True)
+            st.dataframe(df, use_container_width=True, hide_index=True)
         with st.form("nuevo_banco"):
             a,b,c = st.columns(3)
             nombre = a.text_input("Banco")
@@ -3862,7 +3826,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     else:
                         dfc = leer_archivo_tabular(archivo)
                     st.write("Vista previa")
-                    st.dataframe(formatear_montos_df(dfc.head(50), ["cargo","abono","saldo"]), use_container_width=True, hide_index=True)
+                    st.dataframe(dfc.head(50), use_container_width=True, hide_index=True)
                     if st.button("Importar cartola", type="primary"):
                         nuevos,repetidos,lote = importar_cartola(conn, dfc, banco_id, origen="PDF" if archivo.name.lower().endswith(".pdf") else "ARCHIVO")
                         st.success(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
@@ -3933,7 +3897,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 else:
                     mostrar = cand[["confianza","tipo","fecha","descripcion","referencia","monto","cuenta"]].copy()
                     mostrar["confianza"] = mostrar["confianza"].apply(lambda x: f"{x:.0f}%")
-                    st.dataframe(formatear_montos_df(mostrar.rename(columns={"confianza":"Coincidencia","tipo":"Origen","fecha":"Fecha","descripcion":"Detalle","referencia":"Referencia","monto":"Monto","cuenta":"Cuenta"}), ["Monto"]), use_container_width=True, hide_index=True)
+                    st.dataframe(mostrar.rename(columns={"confianza":"Coincidencia","tipo":"Origen","fecha":"Fecha","descripcion":"Detalle","referencia":"Referencia","monto":"Monto","cuenta":"Cuenta"}), use_container_width=True, hide_index=True)
                     opciones_cand = [f"{i} | {r.tipo} | {r.descripcion} | {money(r.monto)} | {r.confianza:.0f}%" for i,r in cand.iterrows()]
                     sel = st.selectbox("Coincidencia propuesta", opciones_cand)
                     idx = int(sel.split(" | ",1)[0])
@@ -4006,27 +3970,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                         CASE WHEN conciliado=1 THEN 'Sí' ELSE 'No' END conciliado,
                                         origen,match_tipo,match_id,asiento_id,observacion
                                         FROM cartola_bancaria WHERE banco_id=? ORDER BY fecha,id DESC""", conn, params=[int(label.split(" - ")[0])])
-            st.dataframe(formatear_montos_df(dfm, ["cargo","abono","saldo"]), use_container_width=True, hide_index=True)
-            if not dfm.empty:
-                banco_nombre = label.split(" - ",1)[1]
-                botones_reporte(dfm.rename(columns={"fecha":"Fecha","descripcion":"Descripción","referencia":"Referencia","cargo":"Cargo","abono":"Abono","saldo":"Saldo","conciliado":"Conciliado","origen":"Origen","match_tipo":"Tipo match","match_id":"ID match","asiento_id":"Asiento","observacion":"Observación"}), f"Cartola Bancaria - {banco_nombre}", "cartola_bancaria", datos_empresa(conn), f"Cuenta: {banco_nombre}", {"Cargos":dfm['cargo'].sum(),"Abonos":dfm['abono'].sum()}, "cartola_rep")
-
-            st.divider()
-            st.subheader("Administrar importaciones")
-            lotes = pd.read_sql_query("""SELECT lote_id, MIN(fecha) desde, MAX(fecha) hasta, COUNT(*) movimientos, SUM(CASE WHEN conciliado=1 THEN 1 ELSE 0 END) conciliados FROM cartola_bancaria WHERE banco_id=? AND lote_id IS NOT NULL GROUP BY lote_id ORDER BY MAX(id) DESC""", conn, params=[int(label.split(" - ")[0])])
-            if not lotes.empty:
-                lote_sel = st.selectbox("Lote de cartola", lotes["lote_id"].tolist(), key="lote_cartola_eliminar")
-                info_lote = lotes[lotes["lote_id"]==lote_sel].iloc[0]
-                st.caption(f"{int(info_lote['movimientos'])} movimientos | {info_lote['desde']} a {info_lote['hasta']} | conciliados: {int(info_lote['conciliados'])}")
-                confirmar_borrado = st.checkbox("Confirmo que deseo eliminar este lote para volver a importarlo", key="confirma_borrar_cartola")
-                if st.button("🗑️ Eliminar lote no conciliado", disabled=not confirmar_borrado):
-                    if int(info_lote["conciliados"]) > 0:
-                        st.error("No se puede eliminar: el lote contiene movimientos ya conciliados.")
-                    else:
-                        conn.execute("DELETE FROM cartola_bancaria WHERE banco_id=? AND lote_id=? AND conciliado=0", (int(label.split(" - ")[0]), lote_sel))
-                        conn.commit(); registrar_auditoria(conn,"ELIMINAR LOTE CARTOLA",f"Banco {label}; lote {lote_sel}")
-                        st.success("Lote eliminado. Ya puedes volver a cargar la cartola con los montos corregidos.")
-                        st.rerun()
+            st.dataframe(dfm, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -4094,7 +4038,7 @@ elif menu == "📥 RCV Compras":
 
     st.title("📥 Registro de Compras - SII")
 
-    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📥 Plantilla Descargable y Carga de Excel"])
+    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📥 Plantilla Descargable y Carga de Excel", "🔄 Reclasificar contabilizadas"])
 
     with pestañas_compras[0]:
         archivo = st.file_uploader(
@@ -4172,6 +4116,57 @@ elif menu == "📥 RCV Compras":
                 st.success("¡Plantilla adjuntada y procesada con éxito! Revisa la bandeja de revisión abajo.")
             except Exception as e:
                 st.error(f"Error procesando la plantilla adjunta: {e}")
+
+
+    with pestañas_compras[2]:
+        st.subheader("🔄 Reclasificar compras ya contabilizadas")
+        st.caption("Genera un asiento de reclasificación. No modifica IVA Crédito Fiscal ni Proveedores y mantiene el documento original.")
+
+        compras_reclas = compras_para_reclasificar(conn)
+        if compras_reclas.empty:
+            st.info("No hay compras contabilizadas para reclasificar.")
+        else:
+            filtro = st.text_input("Buscar por proveedor, RUT o folio", key="buscar_reclas_compra")
+            vista = compras_reclas.copy()
+            if filtro.strip():
+                q = filtro.strip().lower()
+                mascara = (
+                    vista["proveedor"].fillna("").astype(str).str.lower().str.contains(q, regex=False)
+                    | vista["rut"].fillna("").astype(str).str.lower().str.contains(q, regex=False)
+                    | vista["folio"].fillna("").astype(str).str.lower().str.contains(q, regex=False)
+                )
+                vista = vista[mascara].copy()
+
+            vista["Seleccionar"] = False
+            vista["Neto"] = vista["monto_neto"].apply(money)
+            vista["Total"] = vista["monto_total"].apply(money)
+            editor = st.data_editor(
+                vista[["Seleccionar", "compra_id", "fecha", "rut", "proveedor", "tipo_doc", "folio", "Neto", "Total", "cuenta_gasto"]].rename(columns={
+                    "compra_id":"ID", "fecha":"Fecha", "rut":"RUT", "proveedor":"Proveedor", "tipo_doc":"Tipo", "folio":"Folio", "cuenta_gasto":"Cuenta actual"
+                }),
+                use_container_width=True,
+                hide_index=True,
+                disabled=["ID","Fecha","RUT","Proveedor","Tipo","Folio","Neto","Total","Cuenta actual"],
+                key="editor_reclas_compras"
+            )
+
+            seleccionados = editor.loc[editor["Seleccionar"] == True, "ID"].astype(int).tolist()
+            opciones_reclas = cuentas_imputables(conn)
+            etiquetas_reclas = opciones_reclas["etiqueta"].tolist()
+            nueva_etiqueta = st.selectbox("Nueva cuenta contable", etiquetas_reclas, key="nueva_cuenta_reclas")
+            nueva_codigo = nueva_etiqueta.split(" - ", 1)[0]
+            recordar = st.checkbox("Usar esta cuenta para futuras compras de estos proveedores", value=False, key="recordar_reclas")
+
+            if seleccionados:
+                st.info(f"{len(seleccionados)} compra(s) seleccionada(s). Se generará un asiento de reclasificación por cada documento.")
+            confirmar = st.checkbox("Confirmo la reclasificación contable seleccionada", key="confirmar_reclas")
+            if st.button("🔄 RECLASIFICAR COMPRAS", type="primary", disabled=(not seleccionados or not confirmar), key="btn_reclas_compras"):
+                try:
+                    r = reclasificar_compras(conn, seleccionados, nueva_codigo, recordar)
+                    st.success(f"Reclasificación completada: {r['reclasificadas']} compra(s). Omitidas: {r['omitidas']}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No fue posible reclasificar: {e}")
 
     if "rcv_compras" in st.session_state and isinstance(st.session_state["rcv_compras"], pd.DataFrame):
 
@@ -4610,9 +4605,7 @@ elif menu == "👥 Clientes":
                     }
                 )
 
-                st.dataframe(formatear_montos_df(mostrar, ["Cargo", "Abono", "Saldo"]), use_container_width=True, hide_index=True)
-                entidad = conn.execute("SELECT rut, COALESCE(NULLIF(razon_social,''),nombre) nombre FROM clientes WHERE id=?", (cliente_id,)).fetchone()
-                botones_reporte(mostrar, f"Estado de Cuenta - Cliente {entidad['nombre']}", f"estado_cuenta_cliente_{normalizar_rut(entidad['rut'])}", datos_empresa(conn), f"Cliente: {entidad['rut']} - {entidad['nombre']}", {"Facturado":cargo,"Pagado":abono,"Saldo":saldo}, "cliente_ec")
+                st.dataframe(mostrar, use_container_width=True, hide_index=True)
 
     with pestañas[2]:
         with st.form("nuevo_cliente"):
@@ -4721,10 +4714,20 @@ elif menu == "🏢 Proveedores":
                 c2.metric("Pagado", money(abono))
                 c3.metric("Saldo", money(saldo))
 
-                mostrar = df[["fecha","Documento","glosa","cargo","abono","saldo"]].rename(columns={"fecha":"Fecha","glosa":"Glosa","cargo":"Cargo","abono":"Abono","saldo":"Saldo"})
-                st.dataframe(formatear_montos_df(mostrar, ["Cargo", "Abono", "Saldo"]), use_container_width=True, hide_index=True)
-                entidad = conn.execute("SELECT rut, COALESCE(NULLIF(razon_social,''),nombre) nombre FROM proveedores WHERE id=?", (proveedor_id,)).fetchone()
-                botones_reporte(mostrar, f"Estado de Cuenta - Proveedor {entidad['nombre']}", f"estado_cuenta_proveedor_{normalizar_rut(entidad['rut'])}", datos_empresa(conn), f"Proveedor: {entidad['rut']} - {entidad['nombre']}", {"Compras":cargo,"Pagado":abono,"Saldo":saldo}, "proveedor_ec")
+                st.dataframe(
+                    df[
+                        [
+                            "fecha",
+                            "Documento",
+                            "glosa",
+                            "cargo",
+                            "abono",
+                            "saldo",
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True
+                )
 
     with pestañas[2]:
         with st.form("nuevo_proveedor"):
@@ -4887,24 +4890,30 @@ elif menu == "💵 Pagos":
 # ============================================================
 
 elif menu == "📒 Libro Diario":
+
     st.title("📒 Libro Diario")
-    c1,c2=st.columns(2)
-    desde_ld=c1.date_input("Desde", date(date.today().year,1,1), key="ld_desde")
-    hasta_ld=c2.date_input("Hasta", date.today(), key="ld_hasta")
-    df = pd.read_sql_query("""
-        SELECT fecha AS Fecha, asiento_id AS Asiento, codigo_cuenta AS Código, cuenta AS Cuenta,
-               debe AS Debe, haber AS Haber, glosa AS Glosa, origen AS Origen
-        FROM libro_diario WHERE fecha BETWEEN ? AND ?
-        ORDER BY fecha, asiento_id, id
-        """, conn, params=[desde_ld.strftime("%Y-%m-%d"),hasta_ld.strftime("%Y-%m-%d")])
-    if df.empty:
-        st.info("No hay movimientos para el período seleccionado.")
-    else:
-        debe=df["Debe"].sum(); haber=df["Haber"].sum()
-        a,b,c=st.columns(3); a.metric("Debe",money(debe)); b.metric("Haber",money(haber)); c.metric("Diferencia",money(debe-haber))
-        st.dataframe(formatear_montos_df(df,["Debe","Haber"]), use_container_width=True, hide_index=True)
-        periodo=f"Período: {desde_ld.strftime('%d-%m-%Y')} al {hasta_ld.strftime('%d-%m-%Y')}"
-        botones_reporte(df,"Libro Diario","libro_diario",datos_empresa(conn),periodo,{"Debe":debe,"Haber":haber,"Diferencia":debe-haber},"libro_diario")
+
+    df = pd.read_sql_query(
+        """
+        SELECT
+            fecha AS Fecha,
+            asiento_id AS Asiento,
+            codigo_cuenta AS Código,
+            cuenta AS Cuenta,
+            debe AS Debe,
+            haber AS Haber,
+            glosa AS Glosa,
+            origen AS Origen
+        FROM libro_diario
+        ORDER BY
+            fecha DESC,
+            asiento_id DESC,
+            id DESC
+        """,
+        conn
+    )
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -4912,24 +4921,23 @@ elif menu == "📒 Libro Diario":
 # ============================================================
 
 elif menu == "📚 Mayor":
+
     st.title("📚 Libro Mayor")
+
     cuentas = cuentas_imputables(conn)
     opciones = dict(zip(cuentas["etiqueta"], cuentas["codigo"]))
+
     seleccion = st.selectbox("Cuenta", list(opciones.keys()))
     codigo = opciones[seleccion]
-    c1,c2=st.columns(2)
-    desde_m=c1.date_input("Desde", date(date.today().year,1,1), key="mayor_desde")
-    hasta_m=c2.date_input("Hasta", date.today(), key="mayor_hasta")
-    df = obtener_mayor(conn, codigo, desde_m.strftime("%Y-%m-%d"), hasta_m.strftime("%Y-%m-%d"))
+
+    df = obtener_mayor(conn, codigo)
+
     if df.empty:
         st.info("La cuenta no tiene movimientos.")
     else:
         saldo = df.iloc[-1]["Saldo"]
         st.metric("Saldo", money(saldo))
-        rep=df.drop(columns=["Movimiento"],errors="ignore")
-        st.dataframe(formatear_montos_df(rep,["Debe","Haber","Saldo"]), use_container_width=True, hide_index=True)
-        periodo=f"Cuenta: {seleccion} | Período: {desde_m.strftime('%d-%m-%Y')} al {hasta_m.strftime('%d-%m-%Y')}"
-        botones_reporte(rep,f"Libro Mayor - {seleccion}",f"libro_mayor_{codigo.replace('.','_')}",datos_empresa(conn),periodo,{"Debe":df['Debe'].sum(),"Haber":df['Haber'].sum(),"Saldo":saldo},"libro_mayor")
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -4937,19 +4945,38 @@ elif menu == "📚 Mayor":
 # ============================================================
 
 elif menu == "⚖️ Balance de Comprobación":
+
     st.title("⚖ Balance de Comprobación")
+
     col1, col2 = st.columns(2)
-    with col1: desde = st.date_input("Desde", date(date.today().year, 1, 1), key="bc_desde")
-    with col2: hasta = st.date_input("Hasta", date.today(), key="bc_hasta")
-    df = balance_comprobacion(conn, desde.strftime("%Y-%m-%d"), hasta.strftime("%Y-%m-%d"))
+
+    with col1:
+        desde = st.date_input("Desde", date(date.today().year, 1, 1))
+
+    with col2:
+        hasta = st.date_input("Hasta", date.today())
+
+    df = balance_comprobacion(
+        conn,
+        desde.strftime("%Y-%m-%d"),
+        hasta.strftime("%Y-%m-%d")
+    )
+
     if not df.empty:
-        debe = df["Debe"].sum(); haber = df["Haber"].sum()
-        c1, c2, c3 = st.columns(3); c1.metric("Debe", money(debe)); c2.metric("Haber", money(haber)); c3.metric("Diferencia", money(debe - haber))
-        if abs(debe - haber) < 0.01: st.success("🟢 Balance cuadrado.")
-        else: st.error("🔴 Existe diferencia.")
-        st.dataframe(formatear_montos_df(df,["Debe","Haber","Saldo"]), use_container_width=True, hide_index=True)
-        periodo=f"Período: {desde.strftime('%d-%m-%Y')} al {hasta.strftime('%d-%m-%Y')}"
-        botones_reporte(df,"Balance de Comprobación","balance_comprobacion",datos_empresa(conn),periodo,{"Debe":debe,"Haber":haber,"Diferencia":debe-haber},"balance_comp")
+        debe = df["Debe"].sum()
+        haber = df["Haber"].sum()
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Debe", money(debe))
+        c2.metric("Haber", money(haber))
+        c3.metric("Diferencia", money(debe - haber))
+
+        if abs(debe - haber) < 0.01:
+            st.success("🟢 Balance cuadrado.")
+        else:
+            st.error("🔴 Existe diferencia.")
+
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 # ============================================================
