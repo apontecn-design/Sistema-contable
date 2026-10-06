@@ -578,6 +578,7 @@ def crear_esquema(conn):
     agregar_columna(conn, "pagos_clientes", "monto_recibido", "REAL DEFAULT 0")
     agregar_columna(conn, "pagos_clientes", "cuenta_anticipo", "TEXT")
     agregar_columna(conn, "pagos_clientes", "cartola_id", "INTEGER")
+    agregar_columna(conn, "pagos_clientes", "asiento_origen_id", "INTEGER")
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pagos_proveedores (
@@ -4165,6 +4166,89 @@ def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuent
     return asiento
 
 
+def anticipos_contables_sin_asignar(conn):
+    """Asientos manuales Banco / Anticipos de clientes aún no vinculados a un auxiliar."""
+    cuentas=conn.execute("""
+        SELECT codigo,nombre FROM plan_cuentas
+        WHERE LOWER(nombre) LIKE '%anticipo%cliente%'
+        ORDER BY codigo
+    """).fetchall()
+    codigos=[x["codigo"] for x in cuentas]
+    if not codigos:
+        return pd.DataFrame()
+    marks=",".join("?" for _ in codigos)
+    sql=f"""
+        SELECT ld.asiento_id,
+               MIN(ld.fecha) AS fecha,
+               MAX(CASE WHEN ld.codigo_cuenta IN ({marks}) THEN ld.codigo_cuenta END) AS cuenta_anticipo,
+               SUM(CASE WHEN ld.codigo_cuenta IN ({marks}) THEN COALESCE(ld.haber,0)-COALESCE(ld.debe,0) ELSE 0 END) AS monto,
+               MAX(CASE WHEN ld.codigo_cuenta IN ({marks}) THEN ld.glosa END) AS glosa
+        FROM libro_diario ld
+        WHERE ld.asiento_id IS NOT NULL
+        GROUP BY ld.asiento_id
+        HAVING SUM(CASE WHEN ld.codigo_cuenta IN ({marks}) THEN COALESCE(ld.haber,0)-COALESCE(ld.debe,0) ELSE 0 END)>0.01
+           AND NOT EXISTS (
+               SELECT 1 FROM pagos_clientes p
+               WHERE p.asiento_origen_id=ld.asiento_id
+           )
+        ORDER BY MIN(ld.fecha),ld.asiento_id
+    """
+    params=codigos+codigos+codigos
+    return pd.read_sql_query(sql,conn,params=params)
+
+
+def asignar_anticipo_contable_a_cliente(conn, asiento_id, cliente_id):
+    """Vincula a un cliente un anticipo ya contabilizado. No crea ni modifica asientos."""
+    disponibles=anticipos_contables_sin_asignar(conn)
+    fila=disponibles.loc[disponibles["asiento_id"]==int(asiento_id)]
+    if fila.empty:
+        raise ValueError("El asiento ya fue asignado o no corresponde a un anticipo disponible.")
+    r=fila.iloc[0]
+    cliente=conn.execute("SELECT * FROM clientes WHERE id=?",(int(cliente_id),)).fetchone()
+    if not cliente:
+        raise ValueError("Cliente no encontrado.")
+    monto=clp_round(float(r["monto"] or 0))
+    if monto<=0:
+        raise ValueError("El asiento no tiene saldo de anticipo asignable.")
+
+    # Intentar enlazar también la cartola original, sin modificarla.
+    cartola=conn.execute("""
+        SELECT id,banco_id FROM cartola_bancaria
+        WHERE asiento_id=? AND COALESCE(abono,0)>0
+        ORDER BY id LIMIT 1
+    """,(int(asiento_id),)).fetchone()
+    cartola_id=int(cartola["id"]) if cartola else None
+    cuenta_banco=None
+    if cartola:
+        banco=conn.execute("SELECT cuenta_contable FROM bancos WHERE id=?",(cartola["banco_id"],)).fetchone()
+        cuenta_banco=banco["cuenta_contable"] if banco else None
+
+    nombre=limpiar_texto(cliente["razon_social"] or cliente["nombre"] or "Cliente")
+    glosa=limpiar_texto(r["glosa"] or f"Anticipo existente asignado a {nombre}")
+    try:
+        conn.execute("""INSERT INTO pagos_clientes
+            (fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id,
+             monto_recibido,cuenta_anticipo,cartola_id,asiento_origen_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (r["fecha"],int(cliente_id),0,"Anticipo existente",cuenta_banco,glosa,
+             f"ASIG-ANT-{int(asiento_id)}",monto,r["cuenta_anticipo"],cartola_id,int(asiento_id)))
+        # Si encontramos la cartola, añadimos solo trazabilidad de cliente cuando no existía.
+        if cartola_id:
+            conn.execute("""
+                UPDATE cartola_bancaria
+                SET match_tipo=CASE WHEN COALESCE(match_tipo,'')='' THEN 'CLIENTE_ANTICIPO' ELSE match_tipo END,
+                    match_id=CASE WHEN match_id IS NULL THEN ? ELSE match_id END
+                WHERE id=?
+            """,(int(cliente_id),cartola_id))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    registrar_auditoria(conn,"ASIGNAR ANTICIPO EXISTENTE",
+                        f"Asiento {asiento_id} -> cliente {cliente_id}, monto {monto}, sin nuevo asiento")
+    return monto
+
+
 def recuperar_anticipos_historicos_cliente(conn, cliente_id):
     """Recupera anticipos CLIENTE_ANTICIPO creados por versiones antiguas sin alterar sus asientos."""
     movimientos=conn.execute("""
@@ -6804,6 +6888,40 @@ elif menu == "📊 Conciliación":
             SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre
             FROM clientes WHERE activo=1 ORDER BY nombre
         """).fetchall()
+
+        with st.expander("🧾 Asignar anticipo existente a un cliente"):
+            st.caption("Úsalo para anticipos que ya fueron contabilizados directamente contra la cuenta Anticipos de clientes, pero quedaron sin cliente en el auxiliar. No crea ni modifica el asiento original.")
+            ant_sin_asig=anticipos_contables_sin_asignar(conn)
+            if ant_sin_asig.empty:
+                st.info("No hay anticipos contables pendientes de asignar.")
+            elif not clientes_aux:
+                st.info("No hay clientes activos.")
+            else:
+                ver_ant=ant_sin_asig[["asiento_id","fecha","cuenta_anticipo","monto","glosa"]].rename(
+                    columns={"asiento_id":"Asiento","fecha":"Fecha","cuenta_anticipo":"Cuenta","monto":"Monto","glosa":"Glosa"}
+                )
+                st.dataframe(formatear_montos_df(ver_ant),use_container_width=True,hide_index=True)
+                mapa_ant={
+                    f"Asiento {int(r.asiento_id)} | {r.fecha} | {money(r.monto)} | {r.glosa}":int(r.asiento_id)
+                    for r in ant_sin_asig.itertuples()
+                }
+                ant_lab=st.selectbox("Anticipo contable",list(mapa_ant.keys()),key="asignar_ant_existente")
+                mapa_cli_asig={f"{x['rut']} - {x['nombre']}":x["id"] for x in clientes_aux}
+                cli_lab_asig=st.selectbox("Asignar al cliente",list(mapa_cli_asig.keys()),key="asignar_ant_cliente")
+                conf_asig=st.checkbox(
+                    "Confirmo que este anticipo pertenece al cliente seleccionado.",
+                    key="confirmar_asignacion_anticipo"
+                )
+                if st.button("🔗 Asignar anticipo al auxiliar",type="primary",
+                             disabled=not conf_asig,key="btn_asignar_ant_existente"):
+                    try:
+                        monto_asig=asignar_anticipo_contable_a_cliente(
+                            conn,mapa_ant[ant_lab],mapa_cli_asig[cli_lab_asig]
+                        )
+                        st.success(f"Anticipo por {money(monto_asig)} asignado al auxiliar. El asiento contable original no fue modificado.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo asignar el anticipo: {e}")
         if not clientes_aux:
             st.info("No hay clientes activos.")
         else:
