@@ -4038,6 +4038,125 @@ def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, 
 
 
 
+def documentos_pendientes_cliente(conn, cliente_id):
+    return pd.read_sql_query("""
+        SELECT v.id,v.fecha,v.folio,v.tipo_doc,v.monto_total total,
+               COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0) aplicado,
+               MAX(ABS(v.monto_total)-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0),0) pendiente
+        FROM ventas v
+        WHERE v.cliente_id=?
+          AND ABS(v.monto_total)-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0) > 0.01
+        ORDER BY v.fecha,v.id
+    """, conn, params=(int(cliente_id),))
+
+
+def contabilizar_cobro_cliente_desde_cartola(conn, movimiento_id, cliente_id, venta_ids,
+                                               cuenta_diferencia=None, glosa_diferencia=""):
+    """Conciliación de abono: aplica a facturas del cliente y lleva cualquier exceso a otra cuenta."""
+    mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
+    if not mov: raise ValueError("Movimiento bancario no encontrado.")
+    if int(mov["conciliado"] or 0)==1: raise ValueError("Este movimiento ya está conciliado.")
+    if float(mov["abono"] or 0)<=0: raise ValueError("El cobro debe corresponder a un abono/entrada bancaria.")
+    if periodo_cerrado(conn,mov["fecha"]): raise ValueError("El período contable está cerrado.")
+    banco=conn.execute("SELECT * FROM bancos WHERE id=?",(mov["banco_id"],)).fetchone()
+    if not banco or not banco["cuenta_contable"]: raise ValueError("La cuenta bancaria no tiene cuenta contable configurada.")
+    roles=cargar_roles(conn); rol_cli=roles.get("clientes")
+    if not rol_cli: raise ValueError("La cuenta Clientes no está configurada.")
+    cliente=conn.execute("SELECT * FROM clientes WHERE id=?",(int(cliente_id),)).fetchone()
+    if not cliente: raise ValueError("Cliente no encontrado.")
+    venta_ids=[int(x) for x in venta_ids]
+    if not venta_ids: raise ValueError("Selecciona al menos una factura.")
+    docs=documentos_pendientes_cliente(conn,cliente_id)
+    docs=docs[docs["id"].isin(venta_ids)].copy()
+    if docs.empty: raise ValueError("Las facturas seleccionadas ya no tienen saldo pendiente.")
+
+    monto_banco=clp_round(float(mov["abono"] or 0))
+    saldo_docs=clp_round(float(docs["pendiente"].sum()))
+    monto_cliente=min(monto_banco,saldo_docs)
+    diferencia=clp_round(monto_banco-monto_cliente)
+    if diferencia>0 and not cuenta_diferencia:
+        raise ValueError(f"Existe un sobrante de {money(diferencia)}. Selecciona la cuenta donde deseas registrarlo.")
+    if diferencia>0 and cuenta_diferencia in (banco["cuenta_contable"],rol_cli[0]):
+        raise ValueError("La cuenta del sobrante debe ser distinta de Banco y Clientes.")
+
+    nombre=limpiar_texto(cliente["razon_social"] or cliente["nombre"] or "Cliente")
+    folios=", ".join(str(x) for x in docs["folio"].tolist())
+    glosa=f"Cobro cliente {nombre} - Doc. {folios}"
+    asiento=siguiente_asiento(conn)+1
+    lote="CONC-CLI-"+datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    plan=Plan(conn)
+    try:
+        # Banco por el total efectivamente recibido
+        conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                        VALUES(?,?,?,?,?,?,?,?,?)""",
+                     (mov["fecha"],plan.todos.get(banco["cuenta_contable"],banco["cuenta_contable"]),
+                      monto_banco,0,glosa,banco["cuenta_contable"],asiento,lote,"CONCILIACION_COBRO_CLIENTE"))
+        # Clientes solo por lo aplicado a documentos
+        conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                        VALUES(?,?,?,?,?,?,?,?,?)""",
+                     (mov["fecha"],plan.todos.get(rol_cli[0],rol_cli[0]),0,monto_cliente,glosa,rol_cli[0],asiento,lote,"CONCILIACION_COBRO_CLIENTE"))
+        # Sobrante: normalmente Anticipos recibidos de clientes (pasivo)
+        if diferencia>0:
+            gd=limpiar_texto(glosa_diferencia) or f"Anticipo/sobrante cliente {nombre}"
+            conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                            VALUES(?,?,?,?,?,?,?,?,?)""",
+                         (mov["fecha"],plan.todos.get(cuenta_diferencia,cuenta_diferencia),0,diferencia,gd,
+                          cuenta_diferencia,asiento,lote,"CONCILIACION_DIFERENCIA_CLIENTE"))
+        cur=conn.execute("""INSERT INTO pagos_clientes(fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
+                            VALUES(?,?,?,?,?,?,?)""",
+                         (mov["fecha"],int(cliente_id),monto_cliente,"Banco",banco["cuenta_contable"],glosa,lote))
+        restante=monto_cliente
+        aplicaciones=[]
+        for r in docs.itertuples(index=False):
+            if restante<=0: break
+            aplicar=min(restante,clp_round(float(r.pendiente)))
+            if aplicar>0:
+                conn.execute("INSERT INTO aplicaciones_clientes(pago_id,venta_id,monto) VALUES(?,?,?)",(cur.lastrowid,int(r.id),aplicar))
+                aplicaciones.append((int(r.id),aplicar)); restante=clp_round(restante-aplicar)
+        obs=glosa + (f" | Sobrante {money(diferencia)} -> {cuenta_diferencia}" if diferencia>0 else "")
+        conn.execute("""UPDATE cartola_bancaria SET conciliado=1,observacion=?,asiento_id=?,match_tipo='CLIENTE',match_id=?,match_confianza=100 WHERE id=?""",
+                     (obs,asiento,int(cliente_id),int(movimiento_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    registrar_auditoria(conn,"COBRO CLIENTE DESDE CARTOLA",
+                        f"Movimiento {movimiento_id} -> cliente {cliente_id}, aplicado {monto_cliente}, sobrante {diferencia}, asiento {asiento}")
+    return asiento,aplicaciones,diferencia
+
+
+def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuenta_anticipo):
+    """Registra un abono sin factura como anticipo/saldo a favor del cliente y lo deja en su auxiliar."""
+    mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
+    if not mov: raise ValueError("Movimiento bancario no encontrado.")
+    if int(mov["conciliado"] or 0)==1: raise ValueError("Este movimiento ya está conciliado.")
+    monto=clp_round(float(mov["abono"] or 0))
+    if monto<=0: raise ValueError("Debe ser un abono/entrada bancaria.")
+    banco=conn.execute("SELECT * FROM bancos WHERE id=?",(mov["banco_id"],)).fetchone()
+    if not banco or not banco["cuenta_contable"]: raise ValueError("La cuenta bancaria no tiene cuenta contable configurada.")
+    cliente=conn.execute("SELECT * FROM clientes WHERE id=?",(int(cliente_id),)).fetchone()
+    if not cliente: raise ValueError("Cliente no encontrado.")
+    if not cuenta_anticipo: raise ValueError("Selecciona la cuenta de anticipo/saldo a favor.")
+    nombre=limpiar_texto(cliente["razon_social"] or cliente["nombre"] or "Cliente")
+    glosa=f"Anticipo / cobro sin documento cliente {nombre}"
+    asiento=siguiente_asiento(conn)+1; lote="CONC-CLI-SD-"+datetime.now().strftime("%Y%m%d-%H%M%S-%f"); plan=Plan(conn)
+    try:
+        for codigo,debe,haber in [(banco["cuenta_contable"],monto,0),(cuenta_anticipo,0,monto)]:
+            conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                            VALUES(?,?,?,?,?,?,?,?,?)""",
+                         (mov["fecha"],plan.todos.get(codigo,codigo),debe,haber,glosa,codigo,asiento,lote,"CONCILIACION_ANTICIPO_CLIENTE"))
+        # Monto cero en pagos_clientes evita rebajar CxC; la glosa deja trazabilidad en auxiliar.
+        conn.execute("""INSERT INTO pagos_clientes(fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
+                        VALUES(?,?,?,?,?,?,?)""",
+                     (mov["fecha"],int(cliente_id),0,"Banco",banco["cuenta_contable"],f"{glosa} | recibido {money(monto)}",lote))
+        conn.execute("""UPDATE cartola_bancaria SET conciliado=1,observacion=?,asiento_id=?,match_tipo='CLIENTE_ANTICIPO',match_id=?,match_confianza=100 WHERE id=?""",
+                     (glosa,asiento,int(cliente_id),int(movimiento_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    registrar_auditoria(conn,"ANTICIPO CLIENTE DESDE CARTOLA",f"Movimiento {movimiento_id} -> cliente {cliente_id}, monto {monto}, asiento {asiento}")
+    return asiento
+
+
 def documentos_pendientes_proveedor(conn, proveedor_id):
     """Devuelve documentos de compra con saldo pendiente para un proveedor."""
     return pd.read_sql_query("""
@@ -5238,6 +5357,71 @@ elif menu == "🏦 Bancos y Cartolas":
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"No se pudo contabilizar el pago: {e}")
+
+                if float(mov_sel["abono"] or 0) > 0:
+                    st.divider()
+                    st.subheader("👥 Cobro / anticipo de cliente")
+                    st.caption("Aplica el abono a facturas pendientes o regístralo como anticipo/saldo a favor del cliente. Si el abono supera las facturas elegidas, puedes enviar el sobrante a Anticipos de clientes u otra cuenta.")
+                    clientes_cobro=pd.read_sql_query("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM clientes WHERE activo=1 ORDER BY nombre",conn)
+                    if clientes_cobro.empty:
+                        st.info("No hay clientes activos registrados.")
+                    else:
+                        cli_labels=[f"{r.id} | {r.rut} | {r.nombre}" for r in clientes_cobro.itertuples()]
+                        cli_label=st.selectbox("Cliente",cli_labels,key=f"cobro_cli_{movimiento_id}")
+                        cli_id=int(cli_label.split(" | ",1)[0])
+                        docs_cli=documentos_pendientes_cliente(conn,cli_id)
+                        modo_cli=st.radio("Aplicación del abono",
+                                          ["Aplicar a factura(s) pendiente(s)","Anticipo / cobro sin documento"],
+                                          key=f"modo_cobro_cli_{movimiento_id}",horizontal=True)
+                        if modo_cli=="Aplicar a factura(s) pendiente(s)":
+                            if docs_cli.empty:
+                                st.info("Este cliente no tiene facturas pendientes. Usa ‘Anticipo / cobro sin documento’ si corresponde.")
+                            else:
+                                show=docs_cli.copy()
+                                for col in ["total","aplicado","pendiente"]: show[col]=show[col].apply(money)
+                                st.dataframe(show.rename(columns={"fecha":"Fecha","folio":"Folio","tipo_doc":"Tipo doc.","total":"Total","aplicado":"Cobrado","pendiente":"Saldo pendiente"}),use_container_width=True,hide_index=True)
+                                docmap={f"{int(r.id)} | {r.fecha} | Folio {r.folio} | pendiente {money(r.pendiente)}":int(r.id) for r in docs_cli.itertuples()}
+                                sellabs=st.multiselect("Factura(s) que paga este abono",list(docmap.keys()),key=f"docs_cobro_cli_{movimiento_id}")
+                                ids=[docmap[x] for x in sellabs]
+                                disponible=clp_round(float(docs_cli[docs_cli["id"].isin(ids)]["pendiente"].sum())) if ids else 0
+                                monto=clp_round(float(mov_sel["abono"] or 0))
+                                sobrante=max(0,clp_round(monto-disponible)) if ids else 0
+                                cuenta_sobrante=None; glosa_sobrante=""
+                                if ids:
+                                    x1,x2,x3=st.columns(3)
+                                    x1.metric("Abono bancario",money(monto)); x2.metric("Aplicado a facturas",money(min(monto,disponible))); x3.metric("Sobrante",money(sobrante))
+                                    if disponible>monto:
+                                        st.info(f"Cobro parcial: quedarán {money(disponible-monto)} pendientes en las facturas seleccionadas.")
+                                    elif sobrante>0:
+                                        st.warning("El cliente pagó más que las facturas seleccionadas. Indica dónde registrar el sobrante; normalmente Anticipos recibidos de clientes.")
+                                        cd=cuentas_imputables(conn); md=dict(zip(cd.etiqueta,cd.codigo))
+                                        labels=list(md.keys())
+                                        pred=next((x for x in labels if x.startswith("2.1.03.01") or "Anticipos recibidos de clientes" in x),labels[0] if labels else "")
+                                        idxpred=labels.index(pred) if pred in labels else 0
+                                        sl=st.selectbox("Cuenta para el sobrante",labels,index=idxpred,key=f"sobrante_cli_{movimiento_id}")
+                                        cuenta_sobrante=md.get(sl)
+                                        glosa_sobrante=st.text_input("Glosa del sobrante",value=f"Anticipo/sobrante {cli_label.split(' | ',2)[-1]}",key=f"glosa_sobrante_cli_{movimiento_id}")
+                                conf=st.checkbox("Confirmo la aplicación de este abono al cliente y facturas seleccionadas.",key=f"conf_cobro_cli_{movimiento_id}")
+                                falta=bool(ids and sobrante>0 and not cuenta_sobrante)
+                                if st.button("💰 Contabilizar cobro de cliente",type="primary",disabled=(not conf or not ids or falta),key=f"btn_cobro_cli_{movimiento_id}"):
+                                    try:
+                                        asi,aps,sob=contabilizar_cobro_cliente_desde_cartola(conn,movimiento_id,cli_id,ids,cuenta_sobrante,glosa_sobrante)
+                                        st.success(f"Cobro contabilizado y conciliado en asiento {asi}."+ (f" Sobrante registrado: {money(sob)}." if sob else ""))
+                                        st.rerun()
+                                    except Exception as e: st.error(f"No se pudo contabilizar el cobro: {e}")
+                        else:
+                            cuentas=cuentas_imputables(conn); mapa=dict(zip(cuentas.etiqueta,cuentas.codigo)); labels=list(mapa.keys())
+                            pred=next((x for x in labels if x.startswith("2.1.03.01") or "Anticipos recibidos de clientes" in x),labels[0] if labels else "")
+                            idxpred=labels.index(pred) if pred in labels else 0
+                            selcta=st.selectbox("Cuenta de anticipo / saldo a favor",labels,index=idxpred,key=f"cta_ant_cli_{movimiento_id}")
+                            st.info(f"Se registrará {money(float(mov_sel['abono'] or 0))} como anticipo/cobro sin documento del cliente seleccionado, sin cancelar facturas.")
+                            conf=st.checkbox("Confirmo que este abono corresponde al cliente y no deseo aplicarlo a una factura.",key=f"conf_ant_cli_{movimiento_id}")
+                            if st.button("💰 Registrar anticipo de cliente",type="primary",disabled=not conf,key=f"btn_ant_cli_{movimiento_id}"):
+                                try:
+                                    asi=contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cli_id,mapa.get(selcta))
+                                    st.success(f"Anticipo/cobro sin documento contabilizado y conciliado en asiento {asi}.")
+                                    st.rerun()
+                                except Exception as e: st.error(f"No se pudo registrar el anticipo: {e}")
 
                 st.divider()
                 st.subheader("Imputación manual del movimiento")
