@@ -35,6 +35,25 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Identidad visual SGCI: verde sobrio, superficies claras y navegación compacta.
+st.markdown("""
+<style>
+:root { --sgci-green:#176B55; --sgci-green-dark:#0F4F3F; --sgci-soft:#EAF5F0; --sgci-border:#DCE8E3; }
+[data-testid="stAppViewContainer"] { background:#F7F9F8; }
+[data-testid="stSidebar"] { background:#FFFFFF; border-right:1px solid var(--sgci-border); }
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color:var(--sgci-green-dark); }
+[data-testid="stSidebar"] div[role="radiogroup"] label { padding:.18rem .35rem; border-radius:8px; }
+[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:var(--sgci-soft); }
+.stButton > button, .stDownloadButton > button { border-radius:8px; border:1px solid #BFD8CD; }
+.stButton > button[kind="primary"] { background:var(--sgci-green)!important; border-color:var(--sgci-green)!important; color:white!important; }
+.stButton > button[kind="primary"]:hover { background:var(--sgci-green-dark)!important; border-color:var(--sgci-green-dark)!important; }
+[data-testid="stMetric"] { background:#FFFFFF; border:1px solid var(--sgci-border); padding:14px 16px; border-radius:10px; }
+[data-baseweb="tab-list"] { gap:.35rem; }
+button[data-baseweb="tab"] { border-radius:8px 8px 0 0; }
+hr { border-color:var(--sgci-border)!important; }
+</style>
+""", unsafe_allow_html=True)
+
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
@@ -3742,6 +3761,73 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
     return asiento_id, aplicaciones
 
 
+def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id):
+    """Contabiliza un cargo bancario como pago a proveedor sin aplicarlo a una factura específica.
+
+    Se usa para pagos de saldos anteriores o documentos que todavía no están cargados en SGCI.
+    El pago queda en el auxiliar del proveedor y puede producir temporalmente un saldo deudor
+    hasta que se incorporen los saldos iniciales/documentos históricos.
+    """
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+    if not mov:
+        raise ValueError("Movimiento bancario no encontrado.")
+    if int(mov["conciliado"] or 0) == 1:
+        raise ValueError("Este movimiento ya está conciliado.")
+    if float(mov["cargo"] or 0) <= 0:
+        raise ValueError("El pago a proveedor debe corresponder a un cargo/salida de la cuenta bancaria.")
+    if periodo_cerrado(conn, mov["fecha"]):
+        raise ValueError("El período contable de este movimiento está cerrado.")
+
+    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+    if not banco or not banco["cuenta_contable"]:
+        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+
+    roles = cargar_roles(conn)
+    rol_prov = roles.get("proveedores")
+    if not rol_prov:
+        raise ValueError("La cuenta de Proveedores no está configurada.")
+    cuenta_proveedores = rol_prov[0]
+    cuenta_banco = banco["cuenta_contable"]
+    if cuenta_banco == cuenta_proveedores:
+        raise ValueError("La cuenta bancaria y la cuenta de Proveedores no pueden ser la misma.")
+
+    proveedor = conn.execute("SELECT * FROM proveedores WHERE id=?", (int(proveedor_id),)).fetchone()
+    if not proveedor:
+        raise ValueError("Proveedor no encontrado.")
+
+    monto = abs(float(mov["cargo"] or 0))
+    nombre_prov = limpiar_texto(proveedor["razon_social"] or proveedor["nombre"] or "Proveedor")
+    glosa = f"Pago proveedor {nombre_prov} - saldo anterior / sin documento"
+    asiento_id = siguiente_asiento(conn) + 1
+    lote = "CONC-PROV-SD-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    plan = Plan(conn)
+
+    try:
+        for codigo, debe, haber in [(cuenta_proveedores, monto, 0.0), (cuenta_banco, 0.0, monto)]:
+            conn.execute("""INSERT INTO libro_diario
+                (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (mov["fecha"], plan.todos.get(codigo,codigo), debe, haber, glosa, codigo, asiento_id, lote, "CONCILIACION_PAGO_PROVEEDOR_SIN_DOCUMENTO"))
+
+        conn.execute("""INSERT INTO pagos_proveedores(fecha,proveedor_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
+                        VALUES(?,?,?,?,?,?,?)""",
+                     (mov["fecha"], int(proveedor_id), monto, "Banco", cuenta_banco, glosa, lote))
+
+        conn.execute("""UPDATE cartola_bancaria
+                        SET conciliado=1,observacion=?,asiento_id=?,match_tipo='PROVEEDOR_SIN_DOCUMENTO',
+                            match_id=?,match_confianza=100
+                        WHERE id=?""",
+                     (glosa, asiento_id, int(proveedor_id), int(movimiento_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    registrar_auditoria(conn, "PAGO PROVEEDOR SIN DOCUMENTO",
+                        f"Movimiento {movimiento_id} -> proveedor {proveedor_id}, asiento {asiento_id}")
+    return asiento_id
+
+
 def corregir_conciliacion_manual(conn, movimiento_id):
     """Revierte contablemente una imputación manual bancaria y reabre el movimiento para corregirlo."""
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
@@ -3792,33 +3878,52 @@ if "config_cuentas" not in st.session_state:
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title("📊 SGCI")
+st.sidebar.markdown("## SGCI")
 st.sidebar.caption("Sistema de Gestión Contable Integral")
+st.sidebar.markdown("---")
 
-menu = st.sidebar.radio(
-    "Módulo",
-    [
-        "🏠 Inicio",
-        "📊 Estados Financieros",
-        "🏦 Bancos y Cartolas",
-        "🔒 Cierre Mensual",
-        "📌 Cuentas por Cobrar/Pagar",
-        "📥 RCV Compras",
-        "📤 RCV Ventas",
-        "✍️ Asientos y Saldos",
-        "👥 Clientes",
-        "🏢 Proveedores",
-        "💵 Pagos",
-        "📒 Libro Diario",
-        "📚 Mayor",
-        "⚖️ Balance de Comprobación",
-        "📊 Conciliación",
-        "📋 Plan de Cuentas",
-        "⚙️ Reglas Contables",
-        "📦 Lotes",
-        "🧰 Matriz Contable",
-    ]
+modulo_principal = st.sidebar.radio(
+    "Navegación",
+    ["🏠 Inicio", "🏦 Banco", "💰 Cuentas por Cobrar", "💳 Cuentas por Pagar", "📚 Contabilidad", "⚙️ Administración"],
+    label_visibility="collapsed",
+    key="nav_modulo_principal"
 )
+
+nav_context = None
+if modulo_principal == "🏠 Inicio":
+    menu = "🏠 Inicio"
+elif modulo_principal == "🏦 Banco":
+    st.sidebar.caption("BANCO")
+    st.sidebar.info("Cuentas bancarias · Cartolas · Movimientos · Conciliación bancaria")
+    menu = "🏦 Bancos y Cartolas"
+elif modulo_principal == "💰 Cuentas por Cobrar":
+    st.sidebar.caption("CUENTAS POR COBRAR")
+    sub = st.sidebar.radio("Sección", ["Clientes y estados de cuenta", "Pagos de clientes", "RCV Ventas", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxc")
+    if sub == "Clientes y estados de cuenta": menu = "👥 Clientes"
+    elif sub == "Pagos de clientes": menu = "💵 Pagos"; nav_context = "clientes"
+    elif sub == "RCV Ventas": menu = "📤 RCV Ventas"
+    elif sub == "Antigüedad de saldos": menu = "📌 Cuentas por Cobrar/Pagar"; nav_context = "clientes"
+    else: menu = "📊 Conciliación"; nav_context = "clientes"
+elif modulo_principal == "💳 Cuentas por Pagar":
+    st.sidebar.caption("CUENTAS POR PAGAR")
+    sub = st.sidebar.radio("Sección", ["Proveedores y estados de cuenta", "Pagos de proveedores", "RCV Compras", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxp")
+    if sub == "Proveedores y estados de cuenta": menu = "🏢 Proveedores"
+    elif sub == "Pagos de proveedores": menu = "💵 Pagos"; nav_context = "proveedores"
+    elif sub == "RCV Compras": menu = "📥 RCV Compras"
+    elif sub == "Antigüedad de saldos": menu = "📌 Cuentas por Cobrar/Pagar"; nav_context = "proveedores"
+    else: menu = "📊 Conciliación"; nav_context = "proveedores"
+elif modulo_principal == "📚 Contabilidad":
+    st.sidebar.caption("CONTABILIDAD")
+    sub = st.sidebar.radio("Sección", ["Asientos y Saldos", "Plan de Cuentas", "Libro Diario", "Libro Mayor", "Balance de Comprobación", "Estados Financieros"], key="nav_conta")
+    menu = {
+        "Asientos y Saldos":"✍️ Asientos y Saldos", "Plan de Cuentas":"📋 Plan de Cuentas",
+        "Libro Diario":"📒 Libro Diario", "Libro Mayor":"📚 Mayor",
+        "Balance de Comprobación":"⚖️ Balance de Comprobación", "Estados Financieros":"📊 Estados Financieros"
+    }[sub]
+else:
+    st.sidebar.caption("ADMINISTRACIÓN")
+    sub = st.sidebar.radio("Sección", ["Cierre Mensual", "Reglas Contables", "Lotes", "Matriz Contable"], key="nav_admin")
+    menu = {"Cierre Mensual":"🔒 Cierre Mensual", "Reglas Contables":"⚙️ Reglas Contables", "Lotes":"📦 Lotes", "Matriz Contable":"🧰 Matriz Contable"}[sub]
 
 st.sidebar.divider()
 st.sidebar.caption("Respaldo de Datos")
@@ -3959,8 +4064,8 @@ elif menu == "📊 Estados Financieros":
 # ============================================================
 
 elif menu == "🏦 Bancos y Cartolas":
-    st.title("🏦 Bancos y Cartolas")
-    st.caption("Carga cartolas PDF/Excel/CSV, registra movimientos manuales y concilia por coincidencia de montos.")
+    st.title("🏦 Banco")
+    st.caption("Gestión bancaria, cartolas, movimientos y conciliación bancaria.")
     tabs = st.tabs(["Cuentas bancarias", "Cargar cartola", "Movimiento manual", "Conciliación", "Operaciones manuales", "Movimientos"])
 
     with tabs[0]:
@@ -4115,27 +4220,47 @@ elif menu == "🏦 Bancos y Cartolas":
                         prov_label = st.selectbox("Proveedor", prov_labels, key=f"pago_prov_{movimiento_id}")
                         prov_id = int(prov_label.split(" | ",1)[0])
                         docs_pend = documentos_pendientes_proveedor(conn, prov_id)
-                        if docs_pend.empty:
-                            st.info("Este proveedor no tiene documentos con saldo pendiente.")
+                        modo_pago_prov = st.radio(
+                            "Aplicación del pago",
+                            ["Aplicar a documento(s) pendiente(s)", "Pago sin documento / saldo anterior"],
+                            key=f"modo_pago_prov_{movimiento_id}",
+                            horizontal=True
+                        )
+
+                        if modo_pago_prov == "Aplicar a documento(s) pendiente(s)":
+                            if docs_pend.empty:
+                                st.info("Este proveedor no tiene documentos con saldo pendiente. Si el pago corresponde a un período anterior, usa ‘Pago sin documento / saldo anterior’.")
+                            else:
+                                docs_show = docs_pend.copy()
+                                for col in ["total","aplicado","pendiente"]:
+                                    docs_show[col] = docs_show[col].apply(money)
+                                st.dataframe(docs_show.rename(columns={"fecha":"Fecha","folio":"Folio","tipo_doc":"Tipo doc.","total":"Total","aplicado":"Pagado","pendiente":"Saldo pendiente"}), use_container_width=True, hide_index=True)
+                                doc_map = {f"{int(r.id)} | {r.fecha} | Folio {r.folio} | pendiente {money(r.pendiente)}": int(r.id) for r in docs_pend.itertuples()}
+                                docs_sel_labels = st.multiselect("Documento(s) que paga este movimiento", list(doc_map.keys()), key=f"docs_pago_{movimiento_id}")
+                                docs_ids = [doc_map[x] for x in docs_sel_labels]
+                                disponible = float(docs_pend[docs_pend["id"].isin(docs_ids)]["pendiente"].sum()) if docs_ids else 0.0
+                                monto_mov = float(mov_sel["cargo"] or 0)
+                                if docs_ids:
+                                    st.info(f"Cargo bancario: {money(monto_mov)} | Saldo disponible en documentos seleccionados: {money(disponible)}")
+                                    if disponible > monto_mov + 0.01:
+                                        st.caption("El pago se aplicará en el orden de los documentos seleccionados; el último puede quedar parcialmente pagado.")
+                                confirma_prov = st.checkbox("Confirmo que este movimiento corresponde al pago del proveedor y documentos seleccionados.", key=f"conf_pago_prov_{movimiento_id}")
+                                if st.button("💳 Contabilizar pago a proveedor", type="primary", disabled=(not confirma_prov or not docs_ids), key=f"btn_pago_prov_{movimiento_id}"):
+                                    try:
+                                        asiento, aplicaciones = contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, prov_id, docs_ids)
+                                        st.success(f"Pago contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado.")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"No se pudo contabilizar el pago: {e}")
                         else:
-                            docs_show = docs_pend.copy()
-                            for col in ["total","aplicado","pendiente"]:
-                                docs_show[col] = docs_show[col].apply(money)
-                            st.dataframe(docs_show.rename(columns={"fecha":"Fecha","folio":"Folio","tipo_doc":"Tipo doc.","total":"Total","aplicado":"Pagado","pendiente":"Saldo pendiente"}), use_container_width=True, hide_index=True)
-                            doc_map = {f"{int(r.id)} | {r.fecha} | Folio {r.folio} | pendiente {money(r.pendiente)}": int(r.id) for r in docs_pend.itertuples()}
-                            docs_sel_labels = st.multiselect("Documento(s) que paga este movimiento", list(doc_map.keys()), key=f"docs_pago_{movimiento_id}")
-                            docs_ids = [doc_map[x] for x in docs_sel_labels]
-                            disponible = float(docs_pend[docs_pend["id"].isin(docs_ids)]["pendiente"].sum()) if docs_ids else 0.0
                             monto_mov = float(mov_sel["cargo"] or 0)
-                            if docs_ids:
-                                st.info(f"Cargo bancario: {money(monto_mov)} | Saldo disponible en documentos seleccionados: {money(disponible)}")
-                                if disponible > monto_mov + 0.01:
-                                    st.caption("El pago se aplicará en el orden de los documentos seleccionados; el último puede quedar parcialmente pagado.")
-                            confirma_prov = st.checkbox("Confirmo que este movimiento corresponde al pago del proveedor y documentos seleccionados.", key=f"conf_pago_prov_{movimiento_id}")
-                            if st.button("💳 Contabilizar pago a proveedor", type="primary", disabled=(not confirma_prov or not docs_ids), key=f"btn_pago_prov_{movimiento_id}"):
+                            st.info(f"Se registrará {money(monto_mov)} como pago de {prov_label.split(' | ',2)[-1]}, sin asociarlo a una factura. Quedará visible en el estado de cuenta del proveedor.")
+                            st.caption("Esta opción es apropiada para saldos anteriores o documentos que aún no están cargados. Hasta incorporar el saldo inicial, el auxiliar puede mostrar temporalmente un saldo deudor.")
+                            confirma_sin_doc = st.checkbox("Confirmo que el pago corresponde a este proveedor y no deseo asociarlo a un documento.", key=f"conf_pago_prov_sd_{movimiento_id}")
+                            if st.button("💳 Contabilizar pago sin documento", type="primary", disabled=not confirma_sin_doc, key=f"btn_pago_prov_sd_{movimiento_id}"):
                                 try:
-                                    asiento, aplicaciones = contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, prov_id, docs_ids)
-                                    st.success(f"Pago contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado.")
+                                    asiento = contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, prov_id)
+                                    st.success(f"Pago sin documento contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado.")
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"No se pudo contabilizar el pago: {e}")
