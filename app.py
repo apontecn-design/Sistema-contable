@@ -4167,7 +4167,7 @@ def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuent
 
 
 def anticipos_contables_sin_asignar(conn):
-    """Asientos manuales Banco / Anticipos de clientes aún no vinculados a un auxiliar."""
+    """Anticipos contabilizados que todavía no tienen cliente asociado en el auxiliar."""
     cuentas=conn.execute("""
         SELECT codigo,nombre FROM plan_cuentas
         WHERE LOWER(nombre) LIKE '%anticipo%cliente%'
@@ -4176,6 +4176,7 @@ def anticipos_contables_sin_asignar(conn):
     codigos=[x["codigo"] for x in cuentas]
     if not codigos:
         return pd.DataFrame()
+
     marks=",".join("?" for _ in codigos)
     sql=f"""
         SELECT ld.asiento_id,
@@ -4187,9 +4188,32 @@ def anticipos_contables_sin_asignar(conn):
         WHERE ld.asiento_id IS NOT NULL
         GROUP BY ld.asiento_id
         HAVING SUM(CASE WHEN ld.codigo_cuenta IN ({marks}) THEN COALESCE(ld.haber,0)-COALESCE(ld.debe,0) ELSE 0 END)>0.01
+
+           -- Excluir anticipos que ya fueron asignados por esta herramienta.
            AND NOT EXISTS (
                SELECT 1 FROM pagos_clientes p
                WHERE p.asiento_origen_id=ld.asiento_id
+           )
+
+           -- Excluir anticipos que ya nacieron correctamente asociados desde Banco,
+           -- aunque no tengan asiento_origen_id (casos CLIENTE_ANTICIPO como 562 y 563).
+           AND NOT EXISTS (
+               SELECT 1
+               FROM cartola_bancaria cb
+               WHERE cb.asiento_id=ld.asiento_id
+                 AND cb.conciliado=1
+                 AND cb.match_tipo='CLIENTE_ANTICIPO'
+                 AND cb.match_id IS NOT NULL
+           )
+
+           -- Respaldo adicional: excluir pagos del auxiliar que ya estén enlazados
+           -- a la misma cartola/asiento.
+           AND NOT EXISTS (
+               SELECT 1
+               FROM pagos_clientes p
+               JOIN cartola_bancaria cb ON cb.id=p.cartola_id
+               WHERE cb.asiento_id=ld.asiento_id
+                 AND p.cliente_id IS NOT NULL
            )
         ORDER BY MIN(ld.fecha),ld.asiento_id
     """
