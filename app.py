@@ -574,6 +574,11 @@ def crear_esquema(conn):
         )
     """)
 
+    # Trazabilidad de anticipos de clientes: separa lo recibido de lo ya aplicado a CxC.
+    agregar_columna(conn, "pagos_clientes", "monto_recibido", "REAL DEFAULT 0")
+    agregar_columna(conn, "pagos_clientes", "cuenta_anticipo", "TEXT")
+    agregar_columna(conn, "pagos_clientes", "cartola_id", "INTEGER")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS pagos_proveedores (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4144,11 +4149,13 @@ def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuent
             conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
                             VALUES(?,?,?,?,?,?,?,?,?)""",
                          (mov["fecha"],plan.todos.get(codigo,codigo),debe,haber,glosa,codigo,asiento,lote,"CONCILIACION_ANTICIPO_CLIENTE"))
-        # Conserva el monto real en el auxiliar. Al no crear aplicaciones todavía,
-        # queda 100% disponible para aplicarlo posteriormente desde Conciliación auxiliar.
-        conn.execute("""INSERT INTO pagos_clientes(fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
-                        VALUES(?,?,?,?,?,?,?)""",
-                     (mov["fecha"],int(cliente_id),monto,"Banco",banco["cuenta_contable"],glosa,lote))
+        # El anticipo todavía NO rebaja Clientes/CxC. Guardamos por separado el efectivo recibido
+        # para que quede disponible y pueda aplicarse posteriormente a facturas.
+        conn.execute("""INSERT INTO pagos_clientes
+                        (fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id,monto_recibido,cuenta_anticipo,cartola_id)
+                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                     (mov["fecha"],int(cliente_id),0,"Banco",banco["cuenta_contable"],glosa,lote,
+                      monto,cuenta_anticipo,int(movimiento_id)))
         conn.execute("""UPDATE cartola_bancaria SET conciliado=1,observacion=?,asiento_id=?,match_tipo='CLIENTE_ANTICIPO',match_id=?,match_confianza=100 WHERE id=?""",
                      (glosa,asiento,int(cliente_id),int(movimiento_id)))
         conn.commit()
@@ -4158,47 +4165,181 @@ def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuent
     return asiento
 
 
+def recuperar_anticipos_historicos_cliente(conn, cliente_id):
+    """Recupera anticipos CLIENTE_ANTICIPO creados por versiones antiguas sin alterar sus asientos."""
+    movimientos=conn.execute("""
+        SELECT cb.*, b.cuenta_contable AS cuenta_banco
+        FROM cartola_bancaria cb
+        LEFT JOIN bancos b ON b.id=cb.banco_id
+        WHERE cb.conciliado=1
+          AND cb.match_tipo='CLIENTE_ANTICIPO'
+          AND cb.match_id=?
+          AND COALESCE(cb.abono,0)>0
+        ORDER BY cb.fecha,cb.id
+    """,(int(cliente_id),)).fetchall()
+    creados=0
+    for mov in movimientos:
+        existe=conn.execute(
+            "SELECT id FROM pagos_clientes WHERE cartola_id=?",
+            (int(mov["id"]),)
+        ).fetchone()
+        if existe:
+            continue
+
+        # Las versiones antiguas dejaron una fila monto=0. La reutilizamos si puede identificarse.
+        viejo=conn.execute("""
+            SELECT id FROM pagos_clientes
+            WHERE cliente_id=? AND fecha=? AND COALESCE(monto,0)=0
+              AND (cartola_id IS NULL OR cartola_id=0)
+            ORDER BY id DESC LIMIT 1
+        """,(int(cliente_id),mov["fecha"])).fetchone()
+
+        cuenta_ant=None
+        if mov["asiento_id"]:
+            fila=conn.execute("""
+                SELECT codigo_cuenta FROM libro_diario
+                WHERE asiento_id=? AND COALESCE(haber,0)>0
+                  AND codigo_cuenta<>?
+                ORDER BY haber DESC LIMIT 1
+            """,(mov["asiento_id"],mov["cuenta_banco"])).fetchone()
+            if fila:
+                cuenta_ant=fila[0]
+
+        if not cuenta_ant:
+            fila=conn.execute("""
+                SELECT codigo FROM plan_cuentas
+                WHERE LOWER(nombre) LIKE '%anticipo%cliente%'
+                ORDER BY codigo LIMIT 1
+            """).fetchone()
+            cuenta_ant=fila[0] if fila else None
+
+        monto=clp_round(float(mov["abono"] or 0))
+        glosa=mov["observacion"] or mov["descripcion"] or "Anticipo de cliente recuperado"
+        if viejo:
+            conn.execute("""
+                UPDATE pagos_clientes
+                SET monto_recibido=?, cuenta_anticipo=?, cartola_id=?,
+                    glosa=COALESCE(NULLIF(glosa,''),?)
+                WHERE id=?
+            """,(monto,cuenta_ant,int(mov["id"]),glosa,int(viejo["id"])))
+        else:
+            conn.execute("""INSERT INTO pagos_clientes
+                (fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id,monto_recibido,cuenta_anticipo,cartola_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (mov["fecha"],int(cliente_id),0,"Banco",mov["cuenta_banco"],glosa,
+                 f"RECUP-CARTOLA-{int(mov['id'])}",monto,cuenta_ant,int(mov["id"])))
+        creados+=1
+    if creados:
+        conn.commit()
+    return creados
+
+
 def abonos_disponibles_cliente(conn, cliente_id):
-    """Pagos del cliente que todavía tienen monto disponible para aplicar a facturas."""
+    """Anticipos/cobros recibidos todavía disponibles para aplicar a facturas."""
+    recuperar_anticipos_historicos_cliente(conn,cliente_id)
     return pd.read_sql_query("""
-        SELECT p.id,p.fecha,p.monto,
+        SELECT p.id,p.fecha,
+               CASE WHEN COALESCE(p.monto_recibido,0)>0 THEN p.monto_recibido ELSE p.monto END AS monto,
                COALESCE(p.glosa,'Pago recibido') glosa,
                COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0) aplicado,
-               MAX(p.monto-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0),0) disponible
+               MAX(
+                 (CASE WHEN COALESCE(p.monto_recibido,0)>0 THEN p.monto_recibido ELSE p.monto END)
+                 - COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0),0
+               ) disponible
         FROM pagos_clientes p
         WHERE p.cliente_id=?
-          AND p.monto-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0) > 0.01
+          AND (CASE WHEN COALESCE(p.monto_recibido,0)>0 THEN p.monto_recibido ELSE p.monto END)
+              - COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0) > 0.01
         ORDER BY p.fecha,p.id
     """,conn,params=(int(cliente_id),))
 
 
 def aplicar_abono_auxiliar_cliente(conn, cliente_id, pago_id, venta_ids):
-    """Aplica saldo ya contabilizado de un pago a facturas. No genera asiento contable."""
-    pago=conn.execute("SELECT * FROM pagos_clientes WHERE id=? AND cliente_id=?",(int(pago_id),int(cliente_id))).fetchone()
-    if not pago: raise ValueError("Abono no encontrado para este cliente.")
-    aplicado=conn.execute("SELECT COALESCE(SUM(monto),0) FROM aplicaciones_clientes WHERE pago_id=?",(int(pago_id),)).fetchone()[0]
-    disponible=clp_round(float(pago["monto"] or 0)-float(aplicado or 0))
-    if disponible<=0: raise ValueError("Este abono ya no tiene saldo disponible.")
+    """Aplica un saldo recibido a facturas. Si era anticipo, reclasifica Pasivo -> Clientes."""
+    pago=conn.execute("SELECT * FROM pagos_clientes WHERE id=? AND cliente_id=?",
+                      (int(pago_id),int(cliente_id))).fetchone()
+    if not pago:
+        raise ValueError("Abono no encontrado para este cliente.")
+
+    total_recibido=clp_round(float(pago["monto_recibido"] or pago["monto"] or 0))
+    aplicado_previo=conn.execute(
+        "SELECT COALESCE(SUM(monto),0) FROM aplicaciones_clientes WHERE pago_id=?",
+        (int(pago_id),)
+    ).fetchone()[0]
+    disponible=clp_round(total_recibido-float(aplicado_previo or 0))
+    if disponible<=0:
+        raise ValueError("Este abono ya no tiene saldo disponible.")
+
     venta_ids=[int(x) for x in venta_ids]
-    if not venta_ids: raise ValueError("Selecciona al menos una factura.")
+    if not venta_ids:
+        raise ValueError("Selecciona al menos una factura.")
     docs=documentos_pendientes_cliente(conn,cliente_id)
     docs=docs[docs["id"].isin(venta_ids)].copy()
-    if docs.empty: raise ValueError("Las facturas seleccionadas ya no tienen saldo pendiente.")
-    restante=disponible; aplicaciones=[]
+    if docs.empty:
+        raise ValueError("Las facturas seleccionadas ya no tienen saldo pendiente.")
+
+    monto_aplicar=min(disponible,clp_round(float(docs["pendiente"].sum())))
+    es_anticipo=bool(pago["cuenta_anticipo"]) and float(pago["monto_recibido"] or 0)>0
+    asiento=None
+    lote=None
+
     try:
+        if es_anticipo and monto_aplicar>0:
+            roles=cargar_roles(conn)
+            rol_cli=roles.get("clientes")
+            if not rol_cli:
+                raise ValueError("La cuenta Clientes no está configurada.")
+            cuenta_cli=rol_cli[0]
+            cuenta_ant=pago["cuenta_anticipo"]
+            if not cuenta_ant:
+                raise ValueError("No se pudo identificar la cuenta contable del anticipo.")
+            fecha_aplicacion=datetime.now().strftime("%Y-%m-%d")
+            # La aplicación usa la fecha actual; si el período está cerrado, no se modifica el pasado.
+            if periodo_cerrado(conn,fecha_aplicacion):
+                raise ValueError("El período contable actual está cerrado.")
+            asiento=siguiente_asiento(conn)+1
+            lote="APL-ANT-CLI-"+datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            plan=Plan(conn)
+            cliente=conn.execute("SELECT COALESCE(NULLIF(razon_social,''),nombre) nombre FROM clientes WHERE id=?",
+                                 (int(cliente_id),)).fetchone()
+            nombre=limpiar_texto(cliente["nombre"] if cliente else "Cliente")
+            glosa=f"Aplicación anticipo cliente {nombre} a documentos"
+            # Dr Anticipos recibidos de clientes / Cr Clientes
+            conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                            VALUES(?,?,?,?,?,?,?,?,?)""",
+                         (fecha_aplicacion,plan.todos.get(cuenta_ant,cuenta_ant),monto_aplicar,0,
+                          glosa,cuenta_ant,asiento,lote,"APLICACION_ANTICIPO_CLIENTE"))
+            conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                            VALUES(?,?,?,?,?,?,?,?,?)""",
+                         (fecha_aplicacion,plan.todos.get(cuenta_cli,cuenta_cli),0,monto_aplicar,
+                          glosa,cuenta_cli,asiento,lote,"APLICACION_ANTICIPO_CLIENTE"))
+
+        restante=disponible
+        aplicaciones=[]
         for r in docs.itertuples(index=False):
-            if restante<=0: break
+            if restante<=0:
+                break
             monto=min(restante,clp_round(float(r.pendiente)))
             if monto>0:
                 conn.execute("INSERT INTO aplicaciones_clientes(pago_id,venta_id,monto) VALUES(?,?,?)",
                              (int(pago_id),int(r.id),monto))
                 aplicaciones.append((int(r.id),monto))
                 restante=clp_round(restante-monto)
+
+        # Solo lo efectivamente aplicado rebaja CxC en el auxiliar.
+        if es_anticipo:
+            conn.execute("UPDATE pagos_clientes SET monto=COALESCE(monto,0)+? WHERE id=?",
+                         (sum(x[1] for x in aplicaciones),int(pago_id)))
         conn.commit()
     except Exception:
-        conn.rollback(); raise
-    registrar_auditoria(conn,"APLICACION AUXILIAR CLIENTE",
-                        f"Cliente {cliente_id}, pago {pago_id}, aplicado {sum(x[1] for x in aplicaciones)}, saldo abono {restante}")
+        conn.rollback()
+        raise
+
+    registrar_auditoria(
+        conn,"APLICACION AUXILIAR CLIENTE",
+        f"Cliente {cliente_id}, pago {pago_id}, aplicado {sum(x[1] for x in aplicaciones)}, "
+        f"saldo abono {restante}, asiento reclasificacion {asiento or 'no requerido'}"
+    )
     return aplicaciones,restante
 
 
@@ -6657,7 +6798,7 @@ elif menu == "📊 Conciliación":
 
     with pestañas[0]:
         st.subheader("Aplicar abonos de clientes")
-        st.caption("Relaciona abonos ya registrados con facturas pendientes. Esta operación solo concilia el auxiliar: no genera un nuevo asiento contable ni vuelve a mover Banco.")
+        st.caption("Relaciona abonos ya registrados con facturas pendientes. No vuelve a mover Banco. Si el saldo estaba contabilizado como anticipo de cliente, SGCI genera únicamente la reclasificación Anticipos → Clientes necesaria al aplicarlo.")
 
         clientes_aux=conn.execute("""
             SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre
@@ -6711,7 +6852,7 @@ elif menu == "📊 Conciliación":
                     st.info(f"Las facturas seleccionadas conservarán {money(saldo_docs_aux)} pendientes después de esta aplicación.")
 
                 confirma_aux=st.checkbox(
-                    "Confirmo que deseo aplicar este abono a las facturas seleccionadas. No se generará un nuevo asiento contable.",
+                    "Confirmo la aplicación. Si corresponde a un anticipo, SGCI realizará automáticamente la reclasificación contable sin volver a mover Banco.",
                     key="aux_confirma_cliente"
                 )
                 if st.button("🔗 Aplicar abono a factura(s)",type="primary",
