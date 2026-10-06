@@ -3592,6 +3592,26 @@ def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
     return nuevos, repetidos, lote
 
 
+def numero_cartola_clp(valor):
+    """Interpreta montos enteros CLP de cartolas chilenas.
+    Ej.: 25.000 -> 25000; 2.028.758 -> 2028758; 754 -> 754.
+    No se usa para UF, porcentajes ni RCV.
+    """
+    if valor is None:
+        return 0.0
+    s = str(valor).strip().replace("$", "").replace(" ", "")
+    if not s:
+        return 0.0
+    negativo = s.startswith("-")
+    s = s.lstrip("+-")
+    # En cartolas CLP BCI el punto es separador de miles y no separador decimal.
+    s = s.replace(".", "").replace(",", "")
+    if not s.isdigit():
+        return 0.0
+    n = int(s)
+    return float(-n if negativo else n)
+
+
 def leer_cartola_pdf(uploaded_file, password=""):
     """Extrae cartolas PDF de texto. Soporta PDF protegido con contraseña.
 
@@ -3642,8 +3662,8 @@ def leer_cartola_pdf(uploaded_file, password=""):
             continue
         fecha_txt, cuerpo, referencia, monto_txt, saldo_txt = m.groups()
         cuerpo_upper = cuerpo.upper()
-        monto = numero(monto_txt)
-        saldo = numero(saldo_txt)
+        monto = numero_cartola_clp(monto_txt)
+        saldo = numero_cartola_clp(saldo_txt)
 
         # Determinación por descripción para el formato BCI. Si el banco usa
         # términos de abono, se clasifica como abono; en caso contrario cargo.
