@@ -4144,10 +4144,11 @@ def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuent
             conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
                             VALUES(?,?,?,?,?,?,?,?,?)""",
                          (mov["fecha"],plan.todos.get(codigo,codigo),debe,haber,glosa,codigo,asiento,lote,"CONCILIACION_ANTICIPO_CLIENTE"))
-        # Monto cero en pagos_clientes evita rebajar CxC; la glosa deja trazabilidad en auxiliar.
+        # Conserva el monto real en el auxiliar. Al no crear aplicaciones todavía,
+        # queda 100% disponible para aplicarlo posteriormente desde Conciliación auxiliar.
         conn.execute("""INSERT INTO pagos_clientes(fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
                         VALUES(?,?,?,?,?,?,?)""",
-                     (mov["fecha"],int(cliente_id),0,"Banco",banco["cuenta_contable"],f"{glosa} | recibido {money(monto)}",lote))
+                     (mov["fecha"],int(cliente_id),monto,"Banco",banco["cuenta_contable"],glosa,lote))
         conn.execute("""UPDATE cartola_bancaria SET conciliado=1,observacion=?,asiento_id=?,match_tipo='CLIENTE_ANTICIPO',match_id=?,match_confianza=100 WHERE id=?""",
                      (glosa,asiento,int(cliente_id),int(movimiento_id)))
         conn.commit()
@@ -4155,6 +4156,50 @@ def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuent
         conn.rollback(); raise
     registrar_auditoria(conn,"ANTICIPO CLIENTE DESDE CARTOLA",f"Movimiento {movimiento_id} -> cliente {cliente_id}, monto {monto}, asiento {asiento}")
     return asiento
+
+
+def abonos_disponibles_cliente(conn, cliente_id):
+    """Pagos del cliente que todavía tienen monto disponible para aplicar a facturas."""
+    return pd.read_sql_query("""
+        SELECT p.id,p.fecha,p.monto,
+               COALESCE(p.glosa,'Pago recibido') glosa,
+               COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0) aplicado,
+               MAX(p.monto-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0),0) disponible
+        FROM pagos_clientes p
+        WHERE p.cliente_id=?
+          AND p.monto-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0) > 0.01
+        ORDER BY p.fecha,p.id
+    """,conn,params=(int(cliente_id),))
+
+
+def aplicar_abono_auxiliar_cliente(conn, cliente_id, pago_id, venta_ids):
+    """Aplica saldo ya contabilizado de un pago a facturas. No genera asiento contable."""
+    pago=conn.execute("SELECT * FROM pagos_clientes WHERE id=? AND cliente_id=?",(int(pago_id),int(cliente_id))).fetchone()
+    if not pago: raise ValueError("Abono no encontrado para este cliente.")
+    aplicado=conn.execute("SELECT COALESCE(SUM(monto),0) FROM aplicaciones_clientes WHERE pago_id=?",(int(pago_id),)).fetchone()[0]
+    disponible=clp_round(float(pago["monto"] or 0)-float(aplicado or 0))
+    if disponible<=0: raise ValueError("Este abono ya no tiene saldo disponible.")
+    venta_ids=[int(x) for x in venta_ids]
+    if not venta_ids: raise ValueError("Selecciona al menos una factura.")
+    docs=documentos_pendientes_cliente(conn,cliente_id)
+    docs=docs[docs["id"].isin(venta_ids)].copy()
+    if docs.empty: raise ValueError("Las facturas seleccionadas ya no tienen saldo pendiente.")
+    restante=disponible; aplicaciones=[]
+    try:
+        for r in docs.itertuples(index=False):
+            if restante<=0: break
+            monto=min(restante,clp_round(float(r.pendiente)))
+            if monto>0:
+                conn.execute("INSERT INTO aplicaciones_clientes(pago_id,venta_id,monto) VALUES(?,?,?)",
+                             (int(pago_id),int(r.id),monto))
+                aplicaciones.append((int(r.id),monto))
+                restante=clp_round(restante-monto)
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    registrar_auditoria(conn,"APLICACION AUXILIAR CLIENTE",
+                        f"Cliente {cliente_id}, pago {pago_id}, aplicado {sum(x[1] for x in aplicaciones)}, saldo abono {restante}")
+    return aplicaciones,restante
 
 
 def documentos_pendientes_proveedor(conn, proveedor_id):
@@ -4168,6 +4213,72 @@ def documentos_pendientes_proveedor(conn, proveedor_id):
           AND ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0) > 0.01
         ORDER BY c.fecha, c.id
     """, conn, params=[int(proveedor_id)])
+
+
+def pagos_disponibles_proveedor(conn, proveedor_id):
+    """Pagos ya contabilizados al proveedor que todavía tienen saldo disponible para aplicar."""
+    return pd.read_sql_query("""
+        SELECT p.id,p.fecha,p.monto,
+               COALESCE(p.glosa,'Pago a proveedor') glosa,
+               COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.pago_id=p.id),0) aplicado,
+               MAX(p.monto-COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.pago_id=p.id),0),0) disponible
+        FROM pagos_proveedores p
+        WHERE p.proveedor_id=?
+          AND p.monto-COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.pago_id=p.id),0) > 0.01
+        ORDER BY p.fecha,p.id
+    """,conn,params=(int(proveedor_id),))
+
+
+def aplicar_pago_auxiliar_proveedor(conn, proveedor_id, pago_id, compra_ids):
+    """Aplica saldo ya contabilizado de un pago a documentos del proveedor. No genera asiento."""
+    pago=conn.execute(
+        "SELECT * FROM pagos_proveedores WHERE id=? AND proveedor_id=?",
+        (int(pago_id),int(proveedor_id))
+    ).fetchone()
+    if not pago:
+        raise ValueError("Pago no encontrado para este proveedor.")
+
+    aplicado=conn.execute(
+        "SELECT COALESCE(SUM(ABS(monto)),0) FROM aplicaciones_proveedores WHERE pago_id=?",
+        (int(pago_id),)
+    ).fetchone()[0]
+    disponible=clp_round(float(pago["monto"] or 0)-float(aplicado or 0))
+    if disponible<=0:
+        raise ValueError("Este pago ya no tiene saldo disponible.")
+
+    compra_ids=[int(x) for x in compra_ids]
+    if not compra_ids:
+        raise ValueError("Selecciona al menos un documento.")
+
+    docs=documentos_pendientes_proveedor(conn,proveedor_id)
+    docs=docs[docs["id"].isin(compra_ids)].copy()
+    if docs.empty:
+        raise ValueError("Los documentos seleccionados ya no tienen saldo pendiente.")
+
+    restante=disponible
+    aplicaciones=[]
+    try:
+        for r in docs.itertuples(index=False):
+            if restante<=0:
+                break
+            monto=min(restante,clp_round(float(r.pendiente)))
+            if monto>0:
+                conn.execute(
+                    "INSERT INTO aplicaciones_proveedores(pago_id,compra_id,monto) VALUES(?,?,?)",
+                    (int(pago_id),int(r.id),monto)
+                )
+                aplicaciones.append((int(r.id),monto))
+                restante=clp_round(restante-monto)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    registrar_auditoria(
+        conn,"APLICACION AUXILIAR PROVEEDOR",
+        f"Proveedor {proveedor_id}, pago {pago_id}, aplicado {sum(x[1] for x in aplicaciones)}, saldo pago {restante}"
+    )
+    return aplicaciones,restante
 
 
 def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id, compra_ids,
@@ -6545,6 +6656,76 @@ elif menu == "📊 Conciliación":
     pestañas = st.tabs(["Clientes", "Proveedores"])
 
     with pestañas[0]:
+        st.subheader("Aplicar abonos de clientes")
+        st.caption("Relaciona abonos ya registrados con facturas pendientes. Esta operación solo concilia el auxiliar: no genera un nuevo asiento contable ni vuelve a mover Banco.")
+
+        clientes_aux=conn.execute("""
+            SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre
+            FROM clientes WHERE activo=1 ORDER BY nombre
+        """).fetchall()
+        if not clientes_aux:
+            st.info("No hay clientes activos.")
+        else:
+            mapa_cli_aux={f"{x['rut']} - {x['nombre']}":x["id"] for x in clientes_aux}
+            lab_cli_aux=st.selectbox("Cliente",list(mapa_cli_aux.keys()),key="aux_cliente_sel")
+            id_cli_aux=mapa_cli_aux[lab_cli_aux]
+            abonos_aux=abonos_disponibles_cliente(conn,id_cli_aux)
+            docs_aux=documentos_pendientes_cliente(conn,id_cli_aux)
+
+            c1,c2=st.columns(2)
+            c1.metric("Abonos disponibles",money(abonos_aux["disponible"].sum() if not abonos_aux.empty else 0))
+            c2.metric("Facturas pendientes",money(docs_aux["pendiente"].sum() if not docs_aux.empty else 0))
+
+            if abonos_aux.empty:
+                st.info("Este cliente no tiene abonos pendientes de aplicar.")
+            elif docs_aux.empty:
+                st.info("Este cliente tiene abonos disponibles, pero no tiene facturas pendientes.")
+                ver_ab=abonos_aux[["fecha","glosa","monto","aplicado","disponible"]].copy()
+                st.dataframe(formatear_montos_df(ver_ab),use_container_width=True,hide_index=True)
+            else:
+                st.markdown("#### 1. Selecciona el abono")
+                ver_ab=abonos_aux[["id","fecha","glosa","monto","aplicado","disponible"]].copy()
+                st.dataframe(formatear_montos_df(ver_ab),use_container_width=True,hide_index=True)
+                mapa_ab={f"#{int(r.id)} | {r.fecha} | {money(r.disponible)} disponibles | {r.glosa}":int(r.id) for r in abonos_aux.itertuples()}
+                lab_ab=st.selectbox("Abono disponible",list(mapa_ab.keys()),key="aux_abono_sel")
+                pago_id_aux=mapa_ab[lab_ab]
+                fila_ab=abonos_aux.loc[abonos_aux["id"]==pago_id_aux].iloc[0]
+                disponible_aux=clp_round(float(fila_ab["disponible"]))
+
+                st.markdown("#### 2. Selecciona las facturas")
+                ver_docs=docs_aux[["id","fecha","folio","tipo_doc","total","aplicado","pendiente"]].copy()
+                st.dataframe(formatear_montos_df(ver_docs),use_container_width=True,hide_index=True)
+                mapa_docs_aux={f"#{int(r.id)} | {r.fecha} | Folio {r.folio} | saldo {money(r.pendiente)}":int(r.id) for r in docs_aux.itertuples()}
+                labs_docs_aux=st.multiselect("Factura(s) a conciliar",list(mapa_docs_aux.keys()),key="aux_docs_sel")
+                ids_docs_aux=[mapa_docs_aux[x] for x in labs_docs_aux]
+                total_docs_aux=clp_round(float(docs_aux[docs_aux["id"].isin(ids_docs_aux)]["pendiente"].sum())) if ids_docs_aux else 0
+                aplicar_aux=min(disponible_aux,total_docs_aux)
+                saldo_ab_aux=clp_round(disponible_aux-aplicar_aux)
+                saldo_docs_aux=clp_round(total_docs_aux-aplicar_aux)
+
+                m1,m2,m3=st.columns(3)
+                m1.metric("Saldo del abono",money(disponible_aux))
+                m2.metric("Se aplicará",money(aplicar_aux))
+                m3.metric("Quedará disponible",money(saldo_ab_aux))
+                if ids_docs_aux and saldo_docs_aux>0:
+                    st.info(f"Las facturas seleccionadas conservarán {money(saldo_docs_aux)} pendientes después de esta aplicación.")
+
+                confirma_aux=st.checkbox(
+                    "Confirmo que deseo aplicar este abono a las facturas seleccionadas. No se generará un nuevo asiento contable.",
+                    key="aux_confirma_cliente"
+                )
+                if st.button("🔗 Aplicar abono a factura(s)",type="primary",
+                             disabled=(not confirma_aux or not ids_docs_aux),key="aux_aplicar_cliente"):
+                    try:
+                        apps_aux,saldo_aux=aplicar_abono_auxiliar_cliente(conn,id_cli_aux,pago_id_aux,ids_docs_aux)
+                        total_ap_aux=sum(x[1] for x in apps_aux)
+                        st.success(f"Aplicación auxiliar realizada por {money(total_ap_aux)}. Saldo disponible del abono: {money(saldo_aux)}.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo aplicar el abono: {e}")
+
+        st.divider()
+        st.subheader("Control contable del auxiliar")
         df = conciliacion_clientes(conn)
         if df.empty:
             st.warning("No se pudo determinar la cuenta de clientes.")
@@ -6557,6 +6738,104 @@ elif menu == "📊 Conciliación":
                 st.error(f"🔴 Diferencia: {money(diferencia)}")
 
     with pestañas[1]:
+        st.subheader("Aplicar pagos de proveedores")
+        st.caption("Relaciona pagos ya contabilizados con documentos pendientes. Esta operación solo concilia el auxiliar: no genera un nuevo asiento contable ni vuelve a mover Banco.")
+
+        proveedores_aux=conn.execute("""
+            SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre
+            FROM proveedores WHERE activo=1 ORDER BY nombre
+        """).fetchall()
+
+        if not proveedores_aux:
+            st.info("No hay proveedores activos.")
+        else:
+            mapa_prov_aux={f"{x['rut']} - {x['nombre']}":x["id"] for x in proveedores_aux}
+            lab_prov_aux=st.selectbox("Proveedor",list(mapa_prov_aux.keys()),key="aux_proveedor_sel")
+            id_prov_aux=mapa_prov_aux[lab_prov_aux]
+
+            pagos_aux=pagos_disponibles_proveedor(conn,id_prov_aux)
+            docs_prov_aux=documentos_pendientes_proveedor(conn,id_prov_aux)
+
+            p1,p2=st.columns(2)
+            p1.metric("Pagos disponibles",money(pagos_aux["disponible"].sum() if not pagos_aux.empty else 0))
+            p2.metric("Documentos pendientes",money(docs_prov_aux["pendiente"].sum() if not docs_prov_aux.empty else 0))
+
+            if pagos_aux.empty:
+                st.info("Este proveedor no tiene pagos pendientes de aplicar.")
+            elif docs_prov_aux.empty:
+                st.info("Este proveedor tiene pagos disponibles, pero no tiene documentos pendientes.")
+                ver_pag=pagos_aux[["fecha","glosa","monto","aplicado","disponible"]].copy()
+                st.dataframe(formatear_montos_df(ver_pag),use_container_width=True,hide_index=True)
+            else:
+                st.markdown("#### 1. Selecciona el pago")
+                ver_pag=pagos_aux[["id","fecha","glosa","monto","aplicado","disponible"]].copy()
+                st.dataframe(formatear_montos_df(ver_pag),use_container_width=True,hide_index=True)
+
+                mapa_pag={
+                    f"#{int(r.id)} | {r.fecha} | {money(r.disponible)} disponibles | {r.glosa}":int(r.id)
+                    for r in pagos_aux.itertuples()
+                }
+                lab_pag=st.selectbox("Pago disponible",list(mapa_pag.keys()),key="aux_pago_prov_sel")
+                pago_id_prov=mapa_pag[lab_pag]
+                fila_pag=pagos_aux.loc[pagos_aux["id"]==pago_id_prov].iloc[0]
+                disponible_prov=clp_round(float(fila_pag["disponible"]))
+
+                st.markdown("#### 2. Selecciona los documentos")
+                ver_docs_prov=docs_prov_aux[["id","fecha","folio","tipo_doc","total","aplicado","pendiente"]].copy()
+                st.dataframe(formatear_montos_df(ver_docs_prov),use_container_width=True,hide_index=True)
+
+                mapa_docs_prov={
+                    f"#{int(r.id)} | {r.fecha} | Folio {r.folio} | saldo {money(r.pendiente)}":int(r.id)
+                    for r in docs_prov_aux.itertuples()
+                }
+                labs_docs_prov=st.multiselect(
+                    "Documento(s) a conciliar",
+                    list(mapa_docs_prov.keys()),
+                    key="aux_docs_proveedor_sel"
+                )
+                ids_docs_prov=[mapa_docs_prov[x] for x in labs_docs_prov]
+                total_docs_prov=clp_round(
+                    float(docs_prov_aux[docs_prov_aux["id"].isin(ids_docs_prov)]["pendiente"].sum())
+                ) if ids_docs_prov else 0
+
+                aplicar_prov=min(disponible_prov,total_docs_prov)
+                saldo_pago_prov=clp_round(disponible_prov-aplicar_prov)
+                saldo_docs_prov=clp_round(total_docs_prov-aplicar_prov)
+
+                q1,q2,q3=st.columns(3)
+                q1.metric("Saldo del pago",money(disponible_prov))
+                q2.metric("Se aplicará",money(aplicar_prov))
+                q3.metric("Quedará disponible",money(saldo_pago_prov))
+
+                if ids_docs_prov and saldo_docs_prov>0:
+                    st.info(f"Los documentos seleccionados conservarán {money(saldo_docs_prov)} pendientes después de esta aplicación.")
+
+                confirma_prov_aux=st.checkbox(
+                    "Confirmo que deseo aplicar este pago a los documentos seleccionados. No se generará un nuevo asiento contable.",
+                    key="aux_confirma_proveedor"
+                )
+
+                if st.button(
+                    "🔗 Aplicar pago a documento(s)",
+                    type="primary",
+                    disabled=(not confirma_prov_aux or not ids_docs_prov),
+                    key="aux_aplicar_proveedor"
+                ):
+                    try:
+                        apps_prov,saldo_prov=aplicar_pago_auxiliar_proveedor(
+                            conn,id_prov_aux,pago_id_prov,ids_docs_prov
+                        )
+                        total_ap_prov=sum(x[1] for x in apps_prov)
+                        st.success(
+                            f"Aplicación auxiliar realizada por {money(total_ap_prov)}. "
+                            f"Saldo disponible del pago: {money(saldo_prov)}."
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo aplicar el pago: {e}")
+
+        st.divider()
+        st.subheader("Control contable del auxiliar")
         df = conciliacion_proveedores(conn)
         if df.empty:
             st.warning("No se pudo determinar la cuenta de proveedores.")
