@@ -5581,6 +5581,119 @@ elif menu == "📋 Plan de Cuentas":
                 except Exception as e:
                     st.error(str(e))
 
+    with pestañas[3]:
+        st.subheader("Editar cuenta existente")
+        st.caption("Permite corregir la estructura de una cuenta sin cambiar su código contable ni eliminar sus movimientos.")
+
+        cuentas_editar = pd.read_sql_query(
+            """
+            SELECT codigo, nombre, categoria, tipo, padre_codigo, nivel
+            FROM plan_cuentas
+            ORDER BY codigo
+            """,
+            conn
+        )
+
+        if cuentas_editar.empty:
+            st.info("No hay cuentas contables para editar.")
+        else:
+            etiquetas_editar = (cuentas_editar["codigo"] + " - " + cuentas_editar["nombre"]).tolist()
+            seleccion_editar = st.selectbox(
+                "Cuenta a editar",
+                etiquetas_editar,
+                key="editar_cuenta_seleccion"
+            )
+            codigo_editar = seleccion_editar.split(" - ", 1)[0]
+            fila_editar = cuentas_editar.loc[cuentas_editar["codigo"] == codigo_editar].iloc[0]
+
+            categorias = ["Activo", "Pasivo", "Patrimonio", "Nominal"]
+            tipos = ["Activo", "Pasivo", "Patrimonio", "Ingresos", "Gastos"]
+
+            padres_df = cuentas_editar.loc[cuentas_editar["codigo"] != codigo_editar, ["codigo", "nombre"]].copy()
+            opciones_padre = ["Sin cuenta padre"] + (padres_df["codigo"] + " - " + padres_df["nombre"]).tolist()
+            padre_actual = fila_editar["padre_codigo"]
+            padre_actual = "" if pd.isna(padre_actual) else str(padre_actual).strip()
+            indice_padre = 0
+            if padre_actual:
+                for i, etiqueta in enumerate(opciones_padre):
+                    if etiqueta.startswith(padre_actual + " - "):
+                        indice_padre = i
+                        break
+
+            with st.form("editar_cuenta_form"):
+                st.text_input("Código", value=codigo_editar, disabled=True)
+                nombre_editar = st.text_input("Nombre", value=str(fila_editar["nombre"] or ""))
+                categoria_actual = str(fila_editar["categoria"] or "Activo")
+                tipo_actual = str(fila_editar["tipo"] or "Activo")
+                categoria_editar = st.selectbox(
+                    "Categoría",
+                    categorias,
+                    index=categorias.index(categoria_actual) if categoria_actual in categorias else 0
+                )
+                tipo_editar = st.selectbox(
+                    "Tipo",
+                    tipos,
+                    index=tipos.index(tipo_actual) if tipo_actual in tipos else 0
+                )
+                padre_editar = st.selectbox(
+                    "Cuenta padre",
+                    opciones_padre,
+                    index=indice_padre
+                )
+                nivel_editar = st.number_input(
+                    "Nivel",
+                    min_value=1,
+                    max_value=10,
+                    value=int(fila_editar["nivel"] or 1),
+                    step=1
+                )
+
+                guardar_edicion = st.form_submit_button("Guardar cambios", type="primary")
+
+            if guardar_edicion:
+                nuevo_padre = None if padre_editar == "Sin cuenta padre" else padre_editar.split(" - ", 1)[0]
+                try:
+                    if nuevo_padre == codigo_editar:
+                        raise ValueError("Una cuenta no puede ser padre de sí misma.")
+
+                    ancestro = nuevo_padre
+                    visitados = set()
+                    while ancestro:
+                        if ancestro == codigo_editar:
+                            raise ValueError("La cuenta padre seleccionada generaría una jerarquía circular.")
+                        if ancestro in visitados:
+                            break
+                        visitados.add(ancestro)
+                        row_padre = conn.execute(
+                            "SELECT padre_codigo FROM plan_cuentas WHERE codigo = ?",
+                            (ancestro,)
+                        ).fetchone()
+                        if not row_padre:
+                            break
+                        ancestro = row_padre[0]
+
+                    conn.execute(
+                        """
+                        UPDATE plan_cuentas
+                        SET nombre = ?, categoria = ?, tipo = ?, padre_codigo = ?, nivel = ?
+                        WHERE codigo = ?
+                        """,
+                        (
+                            nombre_editar.strip(),
+                            categoria_editar,
+                            tipo_editar,
+                            nuevo_padre,
+                            int(nivel_editar),
+                            codigo_editar
+                        )
+                    )
+                    conn.commit()
+                    st.success(f"Cuenta {codigo_editar} actualizada correctamente.")
+                    st.rerun()
+                except Exception as e:
+                    conn.rollback()
+                    st.error(f"No se pudo actualizar la cuenta: {e}")
+
 
 # ============================================================
 # REGLAS CONTABLES
