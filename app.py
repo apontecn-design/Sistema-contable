@@ -4363,6 +4363,60 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
         conn.rollback(); raise
 
 
+def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_id, periodo, observacion=""):
+    """Vincula un cargo real de cartola con un anticipo de nómina y lo contabiliza una sola vez."""
+    mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
+    if not mov:
+        raise ValueError("Movimiento bancario no encontrado.")
+    if int(mov["conciliado"] or 0)==1:
+        raise ValueError("Este movimiento ya está conciliado.")
+    monto=clp_round(float(mov["cargo"] or 0))
+    if monto<=0:
+        raise ValueError("El anticipo de remuneración debe corresponder a un cargo/salida bancaria.")
+    if periodo_cerrado(conn,mov["fecha"]):
+        raise ValueError("El período contable de este movimiento está cerrado.")
+    if not re.fullmatch(r"\d{4}-\d{2}",str(periodo or "")):
+        raise ValueError("El período debe tener formato AAAA-MM.")
+
+    tr=conn.execute("SELECT id,rut,nombre FROM nomina_trabajadores WHERE id=? AND activo=1",(int(trabajador_id),)).fetchone()
+    if not tr:
+        raise ValueError("Trabajador activo no encontrado.")
+    banco=conn.execute("SELECT cuenta_contable FROM bancos WHERE id=?",(mov["banco_id"],)).fetchone()
+    if not banco or not banco["cuenta_contable"]:
+        raise ValueError("La cuenta bancaria no tiene cuenta contable vinculada.")
+
+    # Evita duplicar el mismo anticipo si por error se vuelve a procesar el movimiento.
+    marca=f"CARTOLA:{int(movimiento_id)}"
+    dup=conn.execute("SELECT id FROM nomina_anticipos WHERE observacion LIKE ?",(f"%{marca}%",)).fetchone()
+    if dup:
+        raise ValueError("Este movimiento de cartola ya fue vinculado previamente a un anticipo de nómina.")
+
+    cuenta_activo="1.1.07.01"
+    asiento=siguiente_asiento(conn)+1
+    glosa=f"Anticipo remuneración {tr['nombre']} - {periodo}"
+    obs=limpiar_texto(observacion) or glosa
+    obs=f"{obs} | {marca}"
+    try:
+        nomina_asiento_linea(conn,mov["fecha"],cuenta_activo,monto,0,glosa,asiento,'NOMINA_ANTICIPO_CARTOLA')
+        nomina_asiento_linea(conn,mov["fecha"],banco["cuenta_contable"],0,monto,glosa,asiento,'NOMINA_ANTICIPO_CARTOLA')
+        cur=conn.execute("""INSERT INTO nomina_anticipos
+            (trabajador_id,periodo,fecha,monto,observacion,asiento_id,contabilizado)
+            VALUES(?,?,?,?,?,?,1)""",
+            (int(trabajador_id),str(periodo),mov["fecha"],monto,obs,asiento))
+        anticipo_id=cur.lastrowid
+        conn.execute("""UPDATE cartola_bancaria
+                        SET conciliado=1,observacion=?,asiento_id=?,match_tipo='NOMINA_ANTICIPO',match_id=?,match_confianza=100
+                        WHERE id=?""",
+                     (glosa,asiento,int(anticipo_id),int(movimiento_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    registrar_auditoria(conn,"ANTICIPO NOMINA DESDE CARTOLA",
+                        f"Movimiento {movimiento_id} -> trabajador {trabajador_id}, período {periodo}, monto {monto}, asiento {asiento}")
+    return asiento, anticipo_id
+
+
 def nomina_calcular(total_imponible, total_no_imponible, afp_comision, salud_tipo, salud_modalidad, salud_valor, uf_valor, afc_manual, impuesto, prestamo, otros_desc, anticipo, afp_manual=None, salud_manual=None):
     impon=max(float(total_imponible or 0),0); noimp=max(float(total_no_imponible or 0),0)
     afp = float(afp_manual) if afp_manual is not None else impon*(10+float(afp_comision or 0))/100
@@ -5030,6 +5084,43 @@ elif menu == "🏦 Bancos y Cartolas":
 
                 mov_sel = pendientes.loc[pendientes["id"] == movimiento_id].iloc[0]
                 if float(mov_sel["cargo"] or 0) > 0:
+                    st.divider()
+                    st.subheader("👤 Nómina / trabajador")
+                    st.caption("Úsalo para conciliar anticipos quincenales pagados por cheque o transferencia. SGCI carga Anticipos de remuneraciones, acredita Banco y vincula el pago al trabajador y período.")
+                    trabajadores_banco=pd.read_sql_query(
+                        "SELECT id,rut,nombre,sueldo_base,anticipo_porcentaje FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",
+                        conn
+                    )
+                    if trabajadores_banco.empty:
+                        st.info("No hay trabajadores activos registrados en Nómina.")
+                    else:
+                        mapa_trab_banco={f"{r.rut} | {r.nombre}":r for r in trabajadores_banco.itertuples()}
+                        trab_label_banco=st.selectbox("Trabajador",list(mapa_trab_banco.keys()),key=f"nomina_trab_banco_{movimiento_id}")
+                        trab_banco=mapa_trab_banco[trab_label_banco]
+                        periodo_sugerido=str(mov_sel["fecha"])[:7] if str(mov_sel["fecha"] or "") else date.today().strftime("%Y-%m")
+                        periodo_banco=st.text_input("Período de nómina (AAAA-MM)",value=periodo_sugerido,key=f"nomina_periodo_banco_{movimiento_id}")
+                        monto_banco_nom=clp_round(float(mov_sel["cargo"] or 0))
+                        sugerido_nom=clp_round(float(trab_banco.sueldo_base or 0)*float(trab_banco.anticipo_porcentaje or 50)/100)
+                        a_nom,b_nom=st.columns(2)
+                        a_nom.metric("Movimiento bancario",money(monto_banco_nom))
+                        b_nom.metric("Anticipo habitual según ficha",money(sugerido_nom))
+                        if monto_banco_nom != sugerido_nom:
+                            st.caption("El monto bancario puede diferir del anticipo habitual. Se registrará exactamente el monto que salió del banco.")
+                        obs_nom=st.text_input("Observación",value=f"Anticipo quincenal {periodo_banco}",key=f"nomina_obs_banco_{movimiento_id}")
+                        confirma_nom=st.checkbox(
+                            "Confirmo que este cargo corresponde a un anticipo de remuneración del trabajador seleccionado.",
+                            key=f"nomina_conf_banco_{movimiento_id}"
+                        )
+                        if st.button("👤 Contabilizar y vincular anticipo",type="primary",disabled=not confirma_nom,key=f"nomina_btn_banco_{movimiento_id}"):
+                            try:
+                                asiento_nom, anticipo_id=contabilizar_anticipo_nomina_desde_cartola(
+                                    conn,movimiento_id,trab_banco.id,periodo_banco,obs_nom
+                                )
+                                st.success(f"Anticipo registrado en Nómina y conciliado. Asiento {asiento_nom} · Anticipo #{anticipo_id}.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudo registrar el anticipo: {e}")
+
                     st.divider()
                     st.subheader("🏢 Pago a proveedor")
                     st.caption("Úsalo cuando el cargo bancario paga una factura ya contabilizada en RCV. SGCI rebaja Proveedores, acredita Banco y actualiza el auxiliar del proveedor y sus documentos.")
