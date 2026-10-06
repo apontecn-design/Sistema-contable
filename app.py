@@ -4161,29 +4161,90 @@ def instalar_cuentas_nomina(conn):
 
 
 def nomina_pdf(titulo, subtitulo, columnas, filas, totales=None):
+    """PDF tabular robusto: ajusta texto largo, anchos y orientación sin superponer celdas."""
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import landscape, A4
-        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_LEFT, TA_RIGHT
         from reportlab.lib.units import cm
         from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     except Exception as e:
-        raise RuntimeError('ReportLab no está disponible para generar el PDF.') from e
+        raise RuntimeError("ReportLab no está disponible para generar el PDF.") from e
+
+    def esc(v):
+        import html
+        return html.escape("" if v is None else str(v)).replace("\n", "<br/>")
+
+    n=max(len(columnas),1)
+    page=landscape(A4)
+    usable=page[0]-2*cm
+    # Peso por contenido: las columnas narrativas reciben más ancho que códigos/montos.
+    pesos=[]
+    for j,col in enumerate(columnas):
+        muestras=[str(col)]+[str(f[j]) if j < len(f) else "" for f in filas[:80]]
+        largo=max([len(x) for x in muestras] or [8])
+        nombre=str(col).lower()
+        if any(k in nombre for k in ("glosa","descripción","cuenta","trabajador","documento","nombre")):
+            largo=max(largo,28)
+        if any(k in nombre for k in ("debe","haber","saldo","cargo","abono","monto","total","imponible","descuento")):
+            largo=min(max(largo,11),16)
+        pesos.append(min(max(largo,8),42))
+    total_p=sum(pesos)
+    widths=[usable*w/total_p for w in pesos]
+
     buf=io.BytesIO()
-    doc=SimpleDocTemplate(buf,pagesize=landscape(A4),rightMargin=1*cm,leftMargin=1*cm,topMargin=1*cm,bottomMargin=1*cm)
-    styles=getSampleStyleSheet(); story=[Paragraph(titulo,styles['Title']),Paragraph(subtitulo or '',styles['Normal']),Spacer(1,10)]
-    data=[columnas]+[[str(x) for x in f] for f in filas]
-    if totales: data.append([str(x) for x in totales])
-    widths=[(landscape(A4)[0]-2*cm)/max(len(columnas),1)]*len(columnas)
-    t=Table(data,colWidths=widths,repeatRows=1)
-    t.setStyle(TableStyle([
-        ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#176B55')),('TEXTCOLOR',(0,0),(-1,0),colors.white),
-        ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('FONTSIZE',(0,0),(-1,-1),7),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#DCE8E3')),
-        ('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F3F7F5')]),
-        ('BOTTOMPADDING',(0,0),(-1,0),7),('TOPPADDING',(0,0),(-1,0),7)
-    ]))
-    if totales: t.setStyle(TableStyle([('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold'),('BACKGROUND',(0,-1),(-1,-1),colors.HexColor('#EAF5F0'))]))
-    story.append(t); doc.build(story); buf.seek(0); return buf.getvalue()
+    doc=SimpleDocTemplate(buf,pagesize=page,rightMargin=1*cm,leftMargin=1*cm,topMargin=.8*cm,bottomMargin=.8*cm)
+    styles=getSampleStyleSheet()
+    cell=ParagraphStyle("SGCICell",parent=styles["Normal"],fontName="Helvetica",fontSize=6.5,leading=8,alignment=TA_LEFT,spaceAfter=0,spaceBefore=0)
+    head=ParagraphStyle("SGCIHead",parent=cell,fontName="Helvetica-Bold",textColor=colors.white,fontSize=6.5,leading=8)
+    story=[Paragraph(esc(titulo),styles["Title"])]
+    if subtitulo:
+        story += [Paragraph(esc(subtitulo),styles["Normal"]),Spacer(1,8)]
+
+    data=[[Paragraph(esc(x),head) for x in columnas]]
+    for f in filas:
+        data.append([Paragraph(esc(f[j] if j < len(f) else ""),cell) for j in range(n)])
+    if totales:
+        data.append([Paragraph(esc(totales[j] if j < len(totales) else ""),cell) for j in range(n)])
+
+    t=Table(data,colWidths=widths,repeatRows=1,hAlign="LEFT")
+    estilo=[
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#176B55")),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("GRID",(0,0),(-1,-1),0.30,colors.HexColor("#DCE8E3")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F3F7F5")]),
+        ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),
+        ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
+    ]
+    if totales:
+        estilo += [("FONTNAME",(0,-1),(-1,-1),"Helvetica-Bold"),
+                   ("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#EAF5F0"))]
+    t.setStyle(TableStyle(estilo))
+    story.append(t)
+    doc.build(story)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def pdf_desde_dataframe(titulo, subtitulo, df, columnas_monetarias=None, totales=None):
+    """Convierte cualquier DataFrame del SGCI en reporte PDF imprimible."""
+    if df is None or df.empty:
+        return None
+    columnas_monetarias=set(columnas_monetarias or [])
+    filas=[]
+    for _,r in df.iterrows():
+        fila=[]
+        for c in df.columns:
+            v=r[c]
+            if c in columnas_monetarias:
+                v=money(v)
+            elif pd.isna(v):
+                v=""
+            fila.append(v)
+        filas.append(fila)
+    return nomina_pdf(titulo,subtitulo,list(df.columns),filas,totales)
 
 
 def nomina_asiento_linea(conn, fecha, codigo, debe, haber, glosa, asiento_id, origen='NOMINA'):
@@ -4582,10 +4643,10 @@ elif menu == "👥 Nómina":
         else:
             per=st.selectbox('Período',periodos,key='rep_per')
             df=pd.read_sql_query("""SELECT l.*,t.rut,t.nombre,t.cargo FROM nomina_liquidaciones l JOIN nomina_trabajadores t ON t.id=l.trabajador_id WHERE l.periodo=? ORDER BY t.nombre""",conn,params=(per,))
-            cols=['rut','nombre','sueldo_periodo','gratificacion','total_imponible','total_no_imponible','afp_descuento','salud_descuento','afc_descuento','impuesto_unico','prestamo_descuento','anticipo','saldo_pagar']
+            cols=['rut','nombre','sueldo_periodo','gratificacion','asignacion_no_imponible','otros_no_imponibles','total_imponible','total_no_imponible','afp_descuento','salud_descuento','afc_descuento','impuesto_unico','prestamo_descuento','anticipo','saldo_pagar']
             vista=df[cols].copy(); st.dataframe(formatear_montos_df(vista),use_container_width=True,hide_index=True)
             st.download_button('📥 Exportar resumen CSV',vista.to_csv(index=False,sep=';').encode('utf-8-sig'),f'nomina_{per}.csv','text/csv')
-            headers=['RUT','Trabajador','Sueldo','Gratif.','Imponible','No impon.','AFP','Salud','AFC','Impuesto','Préstamo','Anticipo','Saldo final']
+            headers=['RUT','Trabajador','Sueldo','Gratif.','Asig. no impon.','Otros no impon.','Imponible','No impon.','AFP','Salud','AFC','Impuesto','Préstamo','Anticipo','Saldo final']
             filas=[]
             for r in vista.itertuples(index=False): filas.append([r[0],r[1]]+[money(x) for x in r[2:]])
             tot=['','TOTALES']+[money(vista[c].sum()) for c in cols[2:]]
@@ -4593,7 +4654,7 @@ elif menu == "👥 Nómina":
             st.download_button('🖨️ PDF resumen de nómina',pdf,f'resumen_nomina_{per}.pdf','application/pdf')
             st.markdown('#### Liquidación individual imprimible')
             lm={f"{r.rut} - {r.nombre}":r for r in df.itertuples()}; ls=st.selectbox('Trabajador para reporte',list(lm),key='rep_trab'); rr=lm[ls]
-            detalle=[['Sueldo período',money(rr.sueldo_periodo)],['Gratificación',money(rr.gratificacion)],['Horas extras',money(rr.horas_extras)],['Bonos imponibles',money(rr.bonos_imponibles)],['Total imponible',money(rr.total_imponible)],['Total no imponible',money(rr.total_no_imponible)],['AFP',money(rr.afp_descuento)],['Salud',money(rr.salud_descuento)],['Plan salud equivalente',money(getattr(rr,'salud_plan_pesos',0))],['UF utilizada',f"{float(getattr(rr,'uf_valor',0) or 0):,.2f}"],['AFC',money(rr.afc_descuento)],['Impuesto Único',money(rr.impuesto_unico)],['Préstamo',money(rr.prestamo_descuento)],['Otros descuentos',money(rr.otros_descuentos)],['Líquido período',money(rr.liquido_periodo)],['Anticipo quincenal',money(rr.anticipo)],['SALDO A PAGAR',money(rr.saldo_pagar)]]
+            detalle=[['Sueldo período',money(rr.sueldo_periodo)],['Gratificación',money(rr.gratificacion)],['Horas extras',money(rr.horas_extras)],['Bonos imponibles',money(rr.bonos_imponibles)],['Asignación no imponible',money(rr.asignacion_no_imponible)],['Otros no imponibles',money(rr.otros_no_imponibles)],['Total imponible',money(rr.total_imponible)],['Total no imponible',money(rr.total_no_imponible)],['AFP',money(rr.afp_descuento)],['Salud',money(rr.salud_descuento)],['Plan salud equivalente',money(getattr(rr,'salud_plan_pesos',0))],['UF utilizada',f"{float(getattr(rr,'uf_valor',0) or 0):,.2f}"],['AFC',money(rr.afc_descuento)],['Impuesto Único',money(rr.impuesto_unico)],['Préstamo',money(rr.prestamo_descuento)],['Otros descuentos',money(rr.otros_descuentos)],['Líquido período',money(rr.liquido_periodo)],['Anticipo quincenal',money(rr.anticipo)],['SALDO A PAGAR',money(rr.saldo_pagar)]]
             pdfi=nomina_pdf(f'Liquidación de Remuneraciones - {per}',f'{rr.nombre} · RUT {rr.rut} · {rr.cargo}', ['Concepto','Monto'],detalle)
             st.download_button('🖨️ PDF liquidación individual',pdfi,f'liquidacion_{rr.rut}_{per}.pdf','application/pdf')
             st.markdown('#### Historial del trabajador')
@@ -5409,6 +5470,20 @@ elif menu == "✍️ Asientos y Saldos":
     )
 
     st.divider()
+    st.subheader("Reporte de asientos manuales y saldos iniciales")
+    df_rep_asientos = pd.read_sql_query("""
+        SELECT fecha AS Fecha, asiento_id AS Asiento, codigo_cuenta AS Código,
+               cuenta AS Cuenta, debe AS Debe, haber AS Haber, glosa AS Glosa,
+               origen AS Origen
+        FROM libro_diario
+        WHERE origen IN ('Saldo inicial','Asiento manual')
+        ORDER BY fecha DESC, asiento_id DESC, id DESC
+    """, conn)
+    if df_rep_asientos.empty:
+        st.caption("Aún no existen asientos manuales o saldos iniciales para imprimir.")
+    else:
+        pdf = pdf_desde_dataframe("Asientos Manuales y Saldos Iniciales","SGCI - Sistema de Gestión Contable Integral",df_rep_asientos,{"Debe","Haber"})
+        st.download_button("🖨️ Imprimir / PDF Asientos y Saldos",pdf,"asientos_y_saldos.pdf","application/pdf",key="pdf_asientos_saldos")
 
     tipo_carga = st.radio("Seleccione el origen del lote", ["Saldo inicial", "Asiento manual"])
     archivo_asiento = st.file_uploader("Adjuntar matriz rellenada", type=["csv"], key="subir_asientos")
@@ -5903,6 +5978,9 @@ elif menu == "📒 Libro Diario":
     )
 
     st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
+    if not df.empty:
+        pdf = pdf_desde_dataframe("Libro Diario","SGCI - Sistema de Gestión Contable Integral",df,{"Debe","Haber"})
+        st.download_button("🖨️ Imprimir / PDF Libro Diario",pdf,"libro_diario.pdf","application/pdf",key="pdf_libro_diario")
 
 
 # ============================================================
@@ -5927,6 +6005,8 @@ elif menu == "📚 Mayor":
         saldo = df.iloc[-1]["Saldo"]
         st.metric("Saldo", money(saldo))
         st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
+        pdf = pdf_desde_dataframe("Libro Mayor",seleccion,df,{"Debe","Haber","Saldo"})
+        st.download_button("🖨️ Imprimir / PDF Libro Mayor",pdf,f"libro_mayor_{codigo.replace('.','_')}.pdf","application/pdf",key="pdf_libro_mayor")
 
 
 # ============================================================
@@ -5966,6 +6046,13 @@ elif menu == "⚖️ Balance de Comprobación":
             st.error("🔴 Existe diferencia.")
 
         st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
+        pdf = pdf_desde_dataframe(
+            "Balance de Comprobación",
+            f"Desde {desde.strftime('%Y-%m-%d')} hasta {hasta.strftime('%Y-%m-%d')}",
+            df, {"Debe","Haber","Saldo"},
+            ["","TOTALES",money(debe),money(haber),money(df["Saldo"].sum())] if len(df.columns) >= 5 else None
+        )
+        st.download_button("🖨️ Imprimir / PDF Balance de Comprobación",pdf,f"balance_{hasta.strftime('%Y%m%d')}.pdf","application/pdf",key="pdf_balance_modulo")
 
 
 # ============================================================
@@ -6029,6 +6116,9 @@ elif menu == "📋 Plan de Cuentas":
             conn
         )
         st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
+        if not df.empty:
+            pdf = pdf_desde_dataframe("Plan de Cuentas","SGCI - Sistema de Gestión Contable Integral",df)
+            st.download_button("🖨️ Imprimir / PDF Plan de Cuentas",pdf,"plan_de_cuentas.pdf","application/pdf",key="pdf_plan_cuentas")
 
     with pestañas[1]:
         roles = cargar_roles(conn)
