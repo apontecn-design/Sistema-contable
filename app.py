@@ -3477,6 +3477,8 @@ def contabilizar_conciliacion_bancaria(conn, movimiento_id, candidato_tipo, cand
         raise ValueError("Movimiento bancario no encontrado.")
     if int(mov["conciliado"] or 0) == 1:
         raise ValueError("Este movimiento ya está conciliado.")
+    if periodo_cerrado(conn, mov["fecha"]):
+        raise ValueError("El período contable de este movimiento está cerrado.")
 
     banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
     if not banco or not banco["cuenta_contable"]:
@@ -3578,6 +3580,8 @@ def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, 
         raise ValueError("Movimiento bancario no encontrado.")
     if int(mov["conciliado"] or 0) == 1:
         raise ValueError("Este movimiento ya está conciliado.")
+    if periodo_cerrado(conn, mov["fecha"]):
+        raise ValueError("El período contable de este movimiento está cerrado.")
 
     banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
     if not banco or not banco["cuenta_contable"]:
@@ -3630,6 +3634,144 @@ def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, 
                         f"Movimiento {movimiento_id} -> cuenta {codigo_cuenta}, asiento {asiento_id}")
     return asiento_id
 
+
+
+def documentos_pendientes_proveedor(conn, proveedor_id):
+    """Devuelve documentos de compra con saldo pendiente para un proveedor."""
+    return pd.read_sql_query("""
+        SELECT c.id, c.fecha, c.folio, c.tipo_doc, ABS(COALESCE(c.monto_total,0)) AS total,
+               COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0) AS aplicado,
+               MAX(ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0),0) AS pendiente
+        FROM compras c
+        WHERE c.proveedor_id=?
+          AND ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0) > 0.01
+        ORDER BY c.fecha, c.id
+    """, conn, params=[int(proveedor_id)])
+
+
+def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id, compra_ids):
+    """Contabiliza un cargo de cartola como pago a proveedor y aplica el monto a uno o varios documentos.
+
+    Genera Debe Proveedores / Haber Banco y mantiene sincronizado el auxiliar del proveedor.
+    Si el movimiento es menor al saldo de los documentos seleccionados, aplica parcialmente en orden.
+    """
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+    if not mov:
+        raise ValueError("Movimiento bancario no encontrado.")
+    if int(mov["conciliado"] or 0) == 1:
+        raise ValueError("Este movimiento ya está conciliado.")
+    if float(mov["cargo"] or 0) <= 0:
+        raise ValueError("El pago a proveedor debe corresponder a un cargo/salida de la cuenta bancaria.")
+    if periodo_cerrado(conn, mov["fecha"]):
+        raise ValueError("El período contable de este movimiento está cerrado.")
+
+    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+    if not banco or not banco["cuenta_contable"]:
+        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+
+    roles = cargar_roles(conn)
+    rol_prov = roles.get("proveedores")
+    if not rol_prov:
+        raise ValueError("La cuenta de Proveedores no está configurada.")
+    cuenta_proveedores = rol_prov[0]
+    cuenta_banco = banco["cuenta_contable"]
+    if cuenta_banco == cuenta_proveedores:
+        raise ValueError("La cuenta bancaria y la cuenta de Proveedores no pueden ser la misma.")
+
+    proveedor = conn.execute("SELECT * FROM proveedores WHERE id=?", (int(proveedor_id),)).fetchone()
+    if not proveedor:
+        raise ValueError("Proveedor no encontrado.")
+    compra_ids = [int(x) for x in compra_ids]
+    if not compra_ids:
+        raise ValueError("Selecciona al menos un documento pendiente del proveedor.")
+
+    docs = documentos_pendientes_proveedor(conn, proveedor_id)
+    docs = docs[docs["id"].isin(compra_ids)].copy()
+    if docs.empty:
+        raise ValueError("Los documentos seleccionados ya no tienen saldo pendiente.")
+
+    monto = abs(float(mov["cargo"] or 0))
+    disponible = float(docs["pendiente"].sum())
+    if disponible + 0.01 < monto:
+        raise ValueError(f"Los documentos seleccionados solo tienen {money(disponible)} pendientes y el cargo bancario es {money(monto)}.")
+
+    nombre_prov = limpiar_texto(proveedor["razon_social"] or proveedor["nombre"] or "Proveedor")
+    folios = ", ".join(str(x) for x in docs["folio"].tolist())
+    glosa = f"Pago proveedor {nombre_prov} - Doc. {folios}"
+    asiento_id = siguiente_asiento(conn) + 1
+    lote = "CONC-PROV-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    plan = Plan(conn)
+
+    try:
+        for codigo, debe, haber in [(cuenta_proveedores, monto, 0.0), (cuenta_banco, 0.0, monto)]:
+            conn.execute("""INSERT INTO libro_diario
+                (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (mov["fecha"], plan.todos.get(codigo,codigo), debe, haber, glosa, codigo, asiento_id, lote, "CONCILIACION_PAGO_PROVEEDOR"))
+
+        cur = conn.execute("""INSERT INTO pagos_proveedores(fecha,proveedor_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
+                              VALUES(?,?,?,?,?,?,?)""",
+                           (mov["fecha"], int(proveedor_id), monto, "Banco", cuenta_banco, glosa, lote))
+        pago_id = cur.lastrowid
+
+        restante = monto
+        aplicaciones = []
+        for r in docs.itertuples(index=False):
+            if restante <= 0.01:
+                break
+            aplicar = min(restante, float(r.pendiente))
+            if aplicar > 0.01:
+                conn.execute("INSERT INTO aplicaciones_proveedores(pago_id,compra_id,monto) VALUES(?,?,?)",
+                             (pago_id, int(r.id), aplicar))
+                aplicaciones.append((int(r.id), aplicar))
+                restante -= aplicar
+        if restante > 0.01:
+            raise ValueError("No fue posible aplicar completamente el pago a los documentos seleccionados.")
+
+        conn.execute("""UPDATE cartola_bancaria
+                        SET conciliado=1,observacion=?,asiento_id=?,match_tipo='PROVEEDOR',match_id=?,match_confianza=100
+                        WHERE id=?""",
+                     (glosa, asiento_id, int(proveedor_id), int(movimiento_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    registrar_auditoria(conn, "PAGO PROVEEDOR DESDE CARTOLA",
+                        f"Movimiento {movimiento_id} -> proveedor {proveedor_id}, asiento {asiento_id}")
+    return asiento_id, aplicaciones
+
+
+def corregir_conciliacion_manual(conn, movimiento_id):
+    """Revierte contablemente una imputación manual bancaria y reabre el movimiento para corregirlo."""
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+    if not mov or int(mov["conciliado"] or 0) != 1:
+        raise ValueError("El movimiento no está conciliado.")
+    if mov["match_tipo"] != "IMPUTACION_MANUAL" or not mov["asiento_id"]:
+        raise ValueError("Solo se puede corregir desde aquí una imputación manual bancaria.")
+    lineas = conn.execute("SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id", (mov["asiento_id"],)).fetchall()
+    if not lineas:
+        raise ValueError("No encontré el asiento original de la imputación.")
+    if periodo_cerrado(conn, mov["fecha"]):
+        raise ValueError("El período contable está cerrado; no se puede reabrir este movimiento.")
+
+    nuevo_asiento = siguiente_asiento(conn) + 1
+    lote = "REV-CONC-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    try:
+        for l in lineas:
+            conn.execute("""INSERT INTO libro_diario
+                (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                (mov["fecha"], l["cuenta"], float(l["haber"] or 0), float(l["debe"] or 0),
+                 f"Reverso corrección conciliación - {l['glosa']}", l["centro_costo"], l["codigo_cuenta"],
+                 nuevo_asiento, lote, "REVERSO_CONCILIACION_BANCARIA"))
+        conn.execute("""UPDATE cartola_bancaria SET conciliado=0,observacion=NULL,asiento_id=NULL,
+                        match_tipo=NULL,match_id=NULL,match_confianza=NULL WHERE id=?""", (int(movimiento_id),))
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+    registrar_auditoria(conn, "CORRECCIÓN CONCILIACIÓN", f"Movimiento {movimiento_id}; reverso asiento {nuevo_asiento}")
+    return nuevo_asiento
 
 # ============================================================
 # INICIALIZACIÓN
@@ -3838,6 +3980,25 @@ elif menu == "🏦 Bancos y Cartolas":
                 conn.execute("INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)", (nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo))
                 conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); st.success("Cuenta bancaria creada.")
 
+        st.divider()
+        st.subheader("Vinculación contable de cuentas bancarias")
+        st.caption("Cada cuenta bancaria debe apuntar a su cuenta del plan contable. Los cargos de cartola acreditarán esta cuenta; no Caja.")
+        bancos_cfg = pd.read_sql_query("SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 ORDER BY nombre", conn)
+        if not bancos_cfg.empty and mapa:
+            banco_cfg_label = st.selectbox("Cuenta bancaria a configurar", [f"{r.id} - {r.nombre} - {r.numero_cuenta}" for r in bancos_cfg.itertuples()], key="cfg_banco_sel")
+            banco_cfg_id = int(banco_cfg_label.split(" - ")[0])
+            actual = bancos_cfg.loc[bancos_cfg["id"]==banco_cfg_id,"cuenta_contable"].iloc[0]
+            etiquetas = list(mapa.keys())
+            idx_actual = next((i for i,e in enumerate(etiquetas) if mapa[e] == actual), 0)
+            nueva_etiqueta = st.selectbox("Cuenta contable vinculada", etiquetas, index=idx_actual, key="cfg_banco_cuenta")
+            if actual:
+                st.info(f"Actualmente vinculada a: {actual} - {Plan(conn).todos.get(actual, actual)}")
+            if st.button("💾 Guardar vinculación bancaria", key="guardar_cfg_banco"):
+                conn.execute("UPDATE bancos SET cuenta_contable=? WHERE id=?", (mapa[nueva_etiqueta], banco_cfg_id))
+                conn.commit(); registrar_auditoria(conn,"VINCULACIÓN BANCO",f"Banco {banco_cfg_id} -> {mapa[nueva_etiqueta]}")
+                st.success("Vinculación actualizada. Los próximos asientos de esta cartola usarán esa cuenta bancaria.")
+                st.rerun()
+
     with tabs[1]:
         bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
         if bancos.empty:
@@ -3941,6 +4102,44 @@ elif menu == "🏦 Bancos y Cartolas":
                         except Exception as e:
                             st.error(f"No se pudo conciliar: {e}")
 
+                mov_sel = pendientes.loc[pendientes["id"] == movimiento_id].iloc[0]
+                if float(mov_sel["cargo"] or 0) > 0:
+                    st.divider()
+                    st.subheader("🏢 Pago a proveedor")
+                    st.caption("Úsalo cuando el cargo bancario paga una factura ya contabilizada en RCV. SGCI rebaja Proveedores, acredita Banco y actualiza el auxiliar del proveedor y sus documentos.")
+                    proveedores_pago = pd.read_sql_query("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM proveedores WHERE activo=1 ORDER BY nombre", conn)
+                    if proveedores_pago.empty:
+                        st.info("No hay proveedores registrados.")
+                    else:
+                        prov_labels = [f"{r.id} | {r.rut} | {r.nombre}" for r in proveedores_pago.itertuples()]
+                        prov_label = st.selectbox("Proveedor", prov_labels, key=f"pago_prov_{movimiento_id}")
+                        prov_id = int(prov_label.split(" | ",1)[0])
+                        docs_pend = documentos_pendientes_proveedor(conn, prov_id)
+                        if docs_pend.empty:
+                            st.info("Este proveedor no tiene documentos con saldo pendiente.")
+                        else:
+                            docs_show = docs_pend.copy()
+                            for col in ["total","aplicado","pendiente"]:
+                                docs_show[col] = docs_show[col].apply(money)
+                            st.dataframe(docs_show.rename(columns={"fecha":"Fecha","folio":"Folio","tipo_doc":"Tipo doc.","total":"Total","aplicado":"Pagado","pendiente":"Saldo pendiente"}), use_container_width=True, hide_index=True)
+                            doc_map = {f"{int(r.id)} | {r.fecha} | Folio {r.folio} | pendiente {money(r.pendiente)}": int(r.id) for r in docs_pend.itertuples()}
+                            docs_sel_labels = st.multiselect("Documento(s) que paga este movimiento", list(doc_map.keys()), key=f"docs_pago_{movimiento_id}")
+                            docs_ids = [doc_map[x] for x in docs_sel_labels]
+                            disponible = float(docs_pend[docs_pend["id"].isin(docs_ids)]["pendiente"].sum()) if docs_ids else 0.0
+                            monto_mov = float(mov_sel["cargo"] or 0)
+                            if docs_ids:
+                                st.info(f"Cargo bancario: {money(monto_mov)} | Saldo disponible en documentos seleccionados: {money(disponible)}")
+                                if disponible > monto_mov + 0.01:
+                                    st.caption("El pago se aplicará en el orden de los documentos seleccionados; el último puede quedar parcialmente pagado.")
+                            confirma_prov = st.checkbox("Confirmo que este movimiento corresponde al pago del proveedor y documentos seleccionados.", key=f"conf_pago_prov_{movimiento_id}")
+                            if st.button("💳 Contabilizar pago a proveedor", type="primary", disabled=(not confirma_prov or not docs_ids), key=f"btn_pago_prov_{movimiento_id}"):
+                                try:
+                                    asiento, aplicaciones = contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, prov_id, docs_ids)
+                                    st.success(f"Pago contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"No se pudo contabilizar el pago: {e}")
+
                 st.divider()
                 st.subheader("Imputación manual del movimiento")
                 st.caption("Úsala cuando no exista una coincidencia adecuada. Al confirmar, SGCI genera el asiento y marca el movimiento como conciliado. Si el gasto ya fue provisionado, selecciona la cuenta por pagar correspondiente; no vuelvas a seleccionar la cuenta de gasto.")
@@ -4001,6 +4200,29 @@ elif menu == "🏦 Bancos y Cartolas":
                                         origen,match_tipo,match_id,asiento_id,observacion
                                         FROM cartola_bancaria WHERE banco_id=? ORDER BY fecha,id DESC""", conn, params=[int(label.split(" - ")[0])])
             st.dataframe(dfm, use_container_width=True, hide_index=True)
+
+            corregibles = pd.read_sql_query("""SELECT id,fecha,descripcion,cargo,abono,asiento_id
+                                               FROM cartola_bancaria
+                                               WHERE banco_id=? AND conciliado=1 AND match_tipo='IMPUTACION_MANUAL'
+                                               ORDER BY fecha,id DESC""", conn, params=[int(label.split(" - ")[0])])
+            if not corregibles.empty:
+                st.divider()
+                st.subheader("Corregir imputación manual")
+                st.caption("Si una imputación fue enviada a una cuenta equivocada, SGCI genera un asiento reverso y deja el movimiento pendiente para volver a conciliarlo. No elimina el asiento histórico.")
+                corr_map = {}
+                for r in corregibles.itertuples():
+                    monto_corr = float(r.cargo or 0) if float(r.cargo or 0)>0 else float(r.abono or 0)
+                    lab = f"{r.id} | {r.fecha} | {money(monto_corr)} | asiento {r.asiento_id} | {r.descripcion}"
+                    corr_map[lab] = int(r.id)
+                corr_label = st.selectbox("Movimiento a corregir", list(corr_map.keys()), key="corr_mov_banco")
+                confirma_corr = st.checkbox("Confirmo que deseo revertir contablemente esta imputación y volver a dejar el movimiento pendiente.", key="corr_confirma")
+                if st.button("↩️ Revertir y reabrir movimiento", disabled=not confirma_corr, key="corr_btn"):
+                    try:
+                        rev = corregir_conciliacion_manual(conn, corr_map[corr_label])
+                        st.success(f"Imputación revertida mediante el asiento {rev}. El movimiento vuelve a estar pendiente de conciliación.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"No se pudo corregir la imputación: {e}")
 
 
 # ============================================================
