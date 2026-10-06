@@ -3658,10 +3658,12 @@ def numero_cartola_clp(valor):
 
 
 def leer_cartola_pdf(uploaded_file, password=""):
-    """Extrae cartolas PDF de texto. Soporta PDF protegido con contraseña.
+    """Extrae cartolas PDF BCI a: fecha, descripción, referencia, cargo, abono, saldo.
 
-    Incluye reconocimiento específico del formato BCI observado y deja una
-    estructura estándar: fecha, descripcion, referencia, cargo, abono, saldo.
+    BCI puede omitir el N° de documento en depósitos/abonos, por lo que no se
+    exige ese campo para reconocer una fila. El sentido del movimiento se
+    determina por la descripción y, como control adicional, por la variación
+    del saldo entre movimientos consecutivos.
     """
     datos = uploaded_file.getvalue()
     if not datos:
@@ -3696,40 +3698,76 @@ def leer_cartola_pdf(uploaded_file, password=""):
         raise ValueError("El PDF no contiene texto extraíble. Si es una cartola escaneada, deberá cargarse manualmente o en CSV/Excel.")
 
     movimientos = []
-    # BCI: fecha + sucursal + descripción + documento + cargo/abono + saldo.
-    # En el formato observado, cada movimiento aparece en una sola línea.
-    patron = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(\d+)\s+([\d\.]+)\s+([\d\.]+)\s*$")
+    # La extracción de pypdf conserva cada movimiento BCI en una línea, pero
+    # depósitos/abonos pueden venir SIN número de documento:
+    # 06-01-2026 OF VIRT U PAGO RECIBIDO EDJ ... 185.440.196 293.098.855
+    # Cargos suelen venir CON documento:
+    # 07-01-2026 ROSARIO N CHEQUE COBRADO POR CAJA 318411 24.990 293.073.865
+    patron = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+([\d\.]+)\s+([\d\.]+)\s*$")
+
+    palabras_abono = (
+        "ABONO", "DEPOSITO", "DEPÓSITO", "TRANSFERENCIA RECIBIDA",
+        "PAGO RECIBIDO", "TRANSFERENCIA DE", "DEPOSITO EN", "DEPÓSITO EN"
+    )
 
     for linea in texto.splitlines():
         linea = re.sub(r"\s+", " ", linea.strip())
         m = patron.match(linea)
         if not m:
             continue
-        fecha_txt, cuerpo, referencia, monto_txt, saldo_txt = m.groups()
-        cuerpo_upper = cuerpo.upper()
+
+        fecha_txt, cuerpo_con_ref, monto_txt, saldo_txt = m.groups()
+        cuerpo_con_ref = cuerpo_con_ref.strip()
+        cuerpo_upper = cuerpo_con_ref.upper()
+        es_abono_desc = any(x in cuerpo_upper for x in palabras_abono)
+
+        # En cargos BCI suele existir N° documento al final del cuerpo.
+        # En abonos puede estar vacío: no debemos confundir el monto con documento.
+        referencia = ""
+        cuerpo = cuerpo_con_ref
+        if not es_abono_desc:
+            mr = re.match(r"^(.*\D)\s+(\d{3,})$", cuerpo_con_ref)
+            if mr:
+                cuerpo = mr.group(1).strip()
+                referencia = mr.group(2)
+
         monto = numero_cartola_clp(monto_txt)
         saldo = numero_cartola_clp(saldo_txt)
-
-        # Determinación por descripción para el formato BCI. Si el banco usa
-        # términos de abono, se clasifica como abono; en caso contrario cargo.
-        palabras_abono = ("ABONO", "DEPOSITO", "DEPÓSITO", "TRANSFERENCIA RECIBIDA", "PAGO RECIBIDO")
-        es_abono = any(x in cuerpo_upper for x in palabras_abono)
-        cargo = 0.0 if es_abono else abs(monto)
-        abono = abs(monto) if es_abono else 0.0
 
         movimientos.append({
             "fecha": fecha_iso(fecha_txt),
             "descripcion": cuerpo,
             "referencia": referencia,
-            "cargo": cargo,
-            "abono": abono,
+            "monto_detectado": abs(monto),
+            "es_abono_desc": es_abono_desc,
             "saldo": saldo,
         })
 
     if not movimientos:
         raise ValueError("Pude abrir el PDF, pero no reconocí movimientos bancarios. Puedes usar la carga manual o CSV/Excel.")
 
-    return pd.DataFrame(movimientos)
+    # Clasificación final. Primero manda la descripción. Como control para
+    # descripciones no conocidas, la variación del saldo confirma cargo/abono.
+    salida = []
+    saldo_anterior = None
+    for mov in movimientos:
+        monto = mov["monto_detectado"]
+        es_abono = mov["es_abono_desc"]
+        if saldo_anterior is not None:
+            delta = clp_round(mov["saldo"] - saldo_anterior)
+            if abs(abs(delta) - monto) <= 1:
+                es_abono = delta > 0
+        salida.append({
+            "fecha": mov["fecha"],
+            "descripcion": mov["descripcion"],
+            "referencia": mov["referencia"],
+            "cargo": 0.0 if es_abono else monto,
+            "abono": monto if es_abono else 0.0,
+            "saldo": mov["saldo"],
+        })
+        saldo_anterior = mov["saldo"]
+
+    return pd.DataFrame(salida)
 
 
 def registrar_movimiento_manual(conn, banco_id, fecha, descripcion, referencia, cargo, abono, saldo=None):
