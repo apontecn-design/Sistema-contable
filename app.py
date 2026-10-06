@@ -3592,6 +3592,51 @@ def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
     return nuevos, repetidos, lote
 
 
+def historial_importaciones_cartola(conn, banco_id):
+    """Resume cada lote de cartola para permitir su administración segura."""
+    return pd.read_sql_query("""
+        SELECT
+            lote_id AS lote,
+            MIN(fecha) AS desde,
+            MAX(fecha) AS hasta,
+            COALESCE(MAX(origen),'') AS origen,
+            COUNT(*) AS movimientos,
+            COALESCE(SUM(cargo),0) AS cargos,
+            COALESCE(SUM(abono),0) AS abonos,
+            COALESCE(SUM(CASE WHEN conciliado=1 THEN 1 ELSE 0 END),0) AS conciliados
+        FROM cartola_bancaria
+        WHERE banco_id=? AND lote_id IS NOT NULL AND TRIM(lote_id)<>''
+        GROUP BY lote_id
+        ORDER BY lote_id DESC
+    """, conn, params=(banco_id,))
+
+
+def eliminar_importacion_cartola(conn, banco_id, lote_id):
+    """Elimina un lote solo si ninguno de sus movimientos fue conciliado."""
+    info=conn.execute("""
+        SELECT COUNT(*) total,
+               COALESCE(SUM(CASE WHEN conciliado=1 THEN 1 ELSE 0 END),0) conciliados
+        FROM cartola_bancaria
+        WHERE banco_id=? AND lote_id=?
+    """,(banco_id,lote_id)).fetchone()
+    if not info or int(info[0] or 0)==0:
+        raise ValueError("La importación seleccionada ya no contiene movimientos.")
+    if int(info[1] or 0)>0:
+        raise ValueError(
+            f"No se puede eliminar esta importación porque contiene {int(info[1])} movimiento(s) conciliado(s). "
+            "Primero deben reversarse desde Movimientos/Conciliación."
+        )
+    total=int(info[0])
+    try:
+        conn.execute("DELETE FROM cartola_bancaria WHERE banco_id=? AND lote_id=?",(banco_id,lote_id))
+        conn.commit()
+        registrar_auditoria(conn,"ELIMINAR IMPORTACIÓN CARTOLA",f"Banco {banco_id} · lote {lote_id} · {total} movimientos")
+        return total
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def numero_cartola_clp(valor):
     """Interpreta montos enteros CLP de cartolas chilenas.
     Ej.: 25.000 -> 25000; 2.028.758 -> 2028758; 754 -> 754.
@@ -4840,6 +4885,41 @@ elif menu == "🏦 Bancos y Cartolas":
 
             plantilla = pd.DataFrame([{"fecha":"2026-09-30","descripcion":"TRANSFERENCIA EJEMPLO","referencia":"12345","cargo":0,"abono":100000,"saldo":100000}])
             st.download_button("📥 Descargar plantilla de cartola", plantilla.to_csv(index=False,sep=";").encode("utf-8-sig"), "plantilla_cartola_bancaria.csv", "text/csv")
+
+            st.divider()
+            st.subheader("Historial de cartolas importadas")
+            st.caption("Puedes eliminar una carga equivocada completa siempre que ninguno de sus movimientos haya sido conciliado.")
+            hist_cart = historial_importaciones_cartola(conn, banco_id)
+            if hist_cart.empty:
+                st.info("Esta cuenta todavía no tiene importaciones de cartola registradas.")
+            else:
+                vista_hist = hist_cart.rename(columns={
+                    "lote":"Lote","desde":"Desde","hasta":"Hasta","origen":"Origen",
+                    "movimientos":"Movimientos","cargos":"Cargos","abonos":"Abonos","conciliados":"Conciliados"
+                })
+                st.dataframe(formatear_montos_df(vista_hist),use_container_width=True,hide_index=True)
+                etiquetas_lotes = []
+                mapa_lotes = {}
+                for r in hist_cart.itertuples(index=False):
+                    etiqueta=f"{r.lote} | {r.desde} a {r.hasta} | {int(r.movimientos)} mov. | {int(r.conciliados)} conciliados"
+                    etiquetas_lotes.append(etiqueta); mapa_lotes[etiqueta]=r.lote
+                lote_sel_label=st.selectbox("Importación a administrar",etiquetas_lotes,key="cartola_lote_admin")
+                lote_sel=mapa_lotes[lote_sel_label]
+                fila_sel=hist_cart.loc[hist_cart["lote"]==lote_sel].iloc[0]
+                if int(fila_sel["conciliados"])>0:
+                    st.warning("Esta importación contiene movimientos conciliados y está protegida contra eliminación.")
+                else:
+                    confirmar_borrado=st.checkbox(
+                        "Confirmo que deseo eliminar todos los movimientos de esta importación",
+                        key="confirmar_borrar_cartola"
+                    )
+                    if st.button("🗑️ Eliminar importación seleccionada",disabled=not confirmar_borrado,key="borrar_lote_cartola"):
+                        try:
+                            n=eliminar_importacion_cartola(conn,banco_id,lote_sel)
+                            st.success(f"Importación eliminada correctamente: {n} movimiento(s).")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
     with tabs[2]:
         bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
