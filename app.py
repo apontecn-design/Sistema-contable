@@ -15,6 +15,7 @@ import re
 import sqlite3
 from datetime import datetime, date, timedelta
 from hashlib import sha256
+from decimal import Decimal, ROUND_HALF_UP
 
 import pandas as pd
 import streamlit as st
@@ -88,11 +89,38 @@ def conectar():
 # FUNCIONES GENERALES
 # ============================================================
 
+def clp_round(valor):
+    """Redondeo comercial al peso: 0,5 o más sube; menos de 0,5 baja."""
+    try:
+        return int(Decimal(str(valor or 0)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except Exception:
+        return 0
+
+
 def money(valor):
     try:
-        return f"${float(valor):,.0f}".replace(",", ".")
+        return f"${clp_round(valor):,}".replace(",", ".")
     except Exception:
         return "$0"
+
+
+def numero_clp(valor):
+    try:
+        return f"{clp_round(valor):,}".replace(",", ".")
+    except Exception:
+        return "0"
+
+
+def formatear_montos_df(df):
+    if df is None or getattr(df, "empty", True):
+        return df
+    out=df.copy()
+    claves=("monto","total","saldo","debe","haber","cargo","abono","neto","iva","pagado","pendiente","precio","costo","sueldo","gratificacion","gratificación","imponible","haberes","descuentos","liquido","líquido","anticipo","cuota","prestamo","préstamo","impuesto","afp_descuento","salud_descuento","afc_descuento")
+    for c in out.columns:
+        nombre=str(c).lower()
+        if any(k in nombre for k in claves) and pd.api.types.is_numeric_dtype(out[c]):
+            out[c]=out[c].map(numero_clp)
+    return out
 
 
 def limpiar_texto(valor):
@@ -756,6 +784,32 @@ def crear_esquema(conn):
         conn.execute("INSERT OR IGNORE INTO nomina_parametros_afp(afp,comision,vigente_desde) VALUES(?,?,?)", (_afp,_comision,'2025-10-01'))
 
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS nomina_historial_condiciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trabajador_id INTEGER NOT NULL,
+            vigente_desde TEXT NOT NULL,
+            sueldo_base REAL DEFAULT 0,
+            gratificacion_tipo TEXT,
+            gratificacion_valor REAL DEFAULT 0,
+            afp TEXT,
+            salud_tipo TEXT,
+            isapre TEXT,
+            salud_modalidad TEXT,
+            salud_valor REAL DEFAULT 0,
+            observacion TEXT,
+            fecha_registro TEXT,
+            UNIQUE(trabajador_id, vigente_desde)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS nomina_parametros_mensuales (
+            periodo TEXT PRIMARY KEY,
+            valor_uf REAL DEFAULT 0,
+            observacion TEXT
+        )
+    """)
+
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS nomina_periodos (
             periodo TEXT PRIMARY KEY,
             estado TEXT DEFAULT 'BORRADOR',
@@ -840,6 +894,9 @@ def crear_esquema(conn):
             UNIQUE(prestamo_id, periodo)
         )
     """)
+
+    for _col, _tipo in [("uf_valor","REAL DEFAULT 0"),("salud_plan_pesos","REAL DEFAULT 0")]:
+        agregar_columna(conn, "nomina_liquidaciones", _col, _tipo)
 
     migraciones = {
         "clientes": [
@@ -4147,19 +4204,22 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
         conn.rollback(); raise
 
 
-def nomina_calcular(total_imponible, total_no_imponible, afp_comision, salud_modalidad, salud_valor, afc_manual, impuesto, prestamo, otros_desc, anticipo, afp_manual=None, salud_manual=None):
+def nomina_calcular(total_imponible, total_no_imponible, afp_comision, salud_tipo, salud_modalidad, salud_valor, uf_valor, afc_manual, impuesto, prestamo, otros_desc, anticipo, afp_manual=None, salud_manual=None):
     impon=max(float(total_imponible or 0),0); noimp=max(float(total_no_imponible or 0),0)
     afp = float(afp_manual) if afp_manual is not None else impon*(10+float(afp_comision or 0))/100
-    if salud_manual is not None:
-        salud=float(salud_manual)
-    elif salud_modalidad == 'Monto manual':
-        salud=float(salud_valor or 0)
-    else:
-        salud=impon*float(salud_valor or 7)/100
+    legal_salud=impon*0.07
+    if str(salud_tipo or 'Fonasa') == 'Fonasa': plan_pesos=legal_salud
+    elif salud_modalidad == 'Plan en UF': plan_pesos=float(salud_valor or 0)*float(uf_valor or 0)
+    elif salud_modalidad == 'Monto pactado en pesos': plan_pesos=float(salud_valor or 0)
+    elif salud_modalidad == 'Porcentaje pactado': plan_pesos=impon*float(salud_valor or 7)/100
+    else: plan_pesos=legal_salud
+    salud_base=max(legal_salud,plan_pesos) if str(salud_tipo or '') == 'Isapre' else legal_salud
+    salud=float(salud_manual) if salud_manual is not None else salud_base
     afc=float(afc_manual or 0); impuesto=float(impuesto or 0); prestamo=float(prestamo or 0); otros=float(otros_desc or 0); antic=float(anticipo or 0)
+    afp=clp_round(afp); salud=clp_round(salud); afc=clp_round(afc); impuesto=clp_round(impuesto); prestamo=clp_round(prestamo); otros=clp_round(otros); antic=clp_round(antic)
     total_desc=afp+salud+afc+impuesto+prestamo+otros
-    liquido=impon+noimp-total_desc
-    return dict(afp=round(afp),salud=round(salud),total_desc=round(total_desc),liquido=round(liquido),saldo=round(liquido-antic))
+    liquido=clp_round(impon+noimp-total_desc)
+    return dict(afp=afp,salud=salud,salud_plan_pesos=clp_round(plan_pesos),total_desc=clp_round(total_desc),liquido=liquido,saldo=clp_round(liquido-antic))
 
 
 def nomina_contabilizar_periodo(conn, periodo):
@@ -4390,14 +4450,15 @@ elif menu == "👥 Nómina":
             cargo=c.text_input('Cargo',value=getattr(edit_row,'cargo','') if edit_row else '')
             ingreso=a.date_input('Fecha de ingreso',value=pd.to_datetime(getattr(edit_row,'fecha_ingreso',date.today()) or date.today()).date())
             contrato=b.selectbox('Tipo de contrato',['Indefinido','Plazo fijo','Obra o faena','Otro'],index=['Indefinido','Plazo fijo','Obra o faena','Otro'].index(getattr(edit_row,'tipo_contrato','Indefinido') or 'Indefinido') if edit_row and (getattr(edit_row,'tipo_contrato','Indefinido') or 'Indefinido') in ['Indefinido','Plazo fijo','Obra o faena','Otro'] else 0)
-            sueldo=c.number_input('Sueldo base mensual',min_value=0.0,value=float(getattr(edit_row,'sueldo_base',0) or 0),step=10000.0)
+            sueldo=c.number_input('Sueldo base mensual',min_value=0.0,value=float(getattr(edit_row,'sueldo_base',0) or 0),step=10000.0,format='%.0f')
+            vigencia_cond=a.date_input('Condiciones vigentes desde',value=date.today(),help='Fecha desde la cual rigen sueldo, AFP y plan de salud. Los cambios quedan en historial.')
             grat_tipo=a.selectbox('Gratificación',['Monto mensual','Sin gratificación / manual'],index=0 if not edit_row or getattr(edit_row,'gratificacion_tipo','Monto mensual')=='Monto mensual' else 1)
-            grat=b.number_input('Gratificación habitual',min_value=0.0,value=float(getattr(edit_row,'gratificacion_valor',0) or 0),step=1000.0)
+            grat=b.number_input('Gratificación habitual',min_value=0.0,value=float(getattr(edit_row,'gratificacion_valor',0) or 0),step=1000.0,format='%.0f')
             afps=pd.read_sql_query("SELECT afp FROM nomina_parametros_afp WHERE activo=1 ORDER BY afp",conn)['afp'].tolist(); afp_actual=getattr(edit_row,'afp','Uno') if edit_row else 'Uno'; afp=c.selectbox('AFP',afps,index=afps.index(afp_actual) if afp_actual in afps else 0)
             salud_tipo=a.selectbox('Sistema de salud',['Fonasa','Isapre'],index=1 if edit_row and getattr(edit_row,'salud_tipo','Fonasa')=='Isapre' else 0)
             isapre=b.text_input('Isapre (si corresponde)',value=getattr(edit_row,'isapre','') or '' if edit_row else '')
-            modalidades=['7% legal','Porcentaje pactado','Monto manual']; mod_actual=getattr(edit_row,'salud_modalidad','7% legal') if edit_row else '7% legal'; salud_modalidad=c.selectbox('Modalidad salud',modalidades,index=modalidades.index(mod_actual) if mod_actual in modalidades else 0)
-            valor_def=float(getattr(edit_row,'salud_valor',7) or 7) if edit_row else 7.0; salud_valor=a.number_input('Porcentaje o monto pactado',min_value=0.0,value=valor_def,step=.01,help='Para 7%/porcentaje ingresa el porcentaje. Para Monto manual ingresa pesos.')
+            modalidades=['7% legal','Porcentaje pactado','Plan en UF','Monto pactado en pesos']; mod_actual=getattr(edit_row,'salud_modalidad','7% legal') if edit_row else '7% legal'; salud_modalidad=c.selectbox('Modalidad salud',modalidades,index=modalidades.index(mod_actual) if mod_actual in modalidades else 0)
+            valor_def=float(getattr(edit_row,'salud_valor',7) or 7) if edit_row else 7.0; salud_valor=a.number_input('Porcentaje o monto pactado',min_value=0.0,value=valor_def,step=.01,help='7% legal: 7. Porcentaje: ej. 8,5. Plan en UF: ej. 4,25. Monto pactado: pesos.')
             afc=b.checkbox('Afecto a AFC',value=bool(getattr(edit_row,'afc',1)) if edit_row else True)
             anticipo=c.checkbox('Anticipo quincenal',value=bool(getattr(edit_row,'anticipo_quincenal',1)) if edit_row else True)
             ant_pct=a.number_input('% anticipo habitual',min_value=0.0,max_value=100.0,value=float(getattr(edit_row,'anticipo_porcentaje',50) or 50) if edit_row else 50.0)
@@ -4409,12 +4470,23 @@ elif menu == "👥 Nómina":
             if guardar:
                 if not rut.strip() or not nombre.strip(): st.error('RUT y nombre son obligatorios.')
                 else:
-                    vals=(rut.strip(),nombre.strip(),ingreso.isoformat(),cargo.strip(),contrato,sueldo,grat_tipo,grat,afp,salud_tipo,isapre.strip(),salud_modalidad,salud_valor,int(afc),int(anticipo),ant_pct,banco.strip(),tipo_cta,nro.strip(),int(activo),datetime.now().isoformat(timespec='seconds'))
+                    vals=(rut.strip(),nombre.strip(),ingreso.isoformat(),cargo.strip(),contrato,clp_round(sueldo),grat_tipo,clp_round(grat),afp,salud_tipo,isapre.strip(),salud_modalidad,salud_valor,int(afc),int(anticipo),ant_pct,banco.strip(),tipo_cta,nro.strip(),int(activo),datetime.now().isoformat(timespec='seconds'))
                     if edit_row:
                         conn.execute("UPDATE nomina_trabajadores SET rut=?,nombre=?,fecha_ingreso=?,cargo=?,tipo_contrato=?,sueldo_base=?,gratificacion_tipo=?,gratificacion_valor=?,afp=?,salud_tipo=?,isapre=?,salud_modalidad=?,salud_valor=?,afc=?,anticipo_quincenal=?,anticipo_porcentaje=?,banco=?,tipo_cuenta=?,numero_cuenta=?,activo=?,fecha_creacion=? WHERE id=?",vals+(edit_row.id,))
                     else:
                         conn.execute("INSERT INTO nomina_trabajadores(rut,nombre,fecha_ingreso,cargo,tipo_contrato,sueldo_base,gratificacion_tipo,gratificacion_valor,afp,salud_tipo,isapre,salud_modalidad,salud_valor,afc,anticipo_quincenal,anticipo_porcentaje,banco,tipo_cuenta,numero_cuenta,activo,fecha_creacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",vals)
-                    conn.commit(); st.success('Ficha guardada.'); st.rerun()
+                    trabajador_id = edit_row.id if edit_row else conn.execute("SELECT id FROM nomina_trabajadores WHERE rut=?",(rut.strip(),)).fetchone()[0]
+                    conn.execute("INSERT INTO nomina_historial_condiciones(trabajador_id,vigente_desde,sueldo_base,gratificacion_tipo,gratificacion_valor,afp,salud_tipo,isapre,salud_modalidad,salud_valor,observacion,fecha_registro) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(trabajador_id,vigente_desde) DO UPDATE SET sueldo_base=excluded.sueldo_base,gratificacion_tipo=excluded.gratificacion_tipo,gratificacion_valor=excluded.gratificacion_valor,afp=excluded.afp,salud_tipo=excluded.salud_tipo,isapre=excluded.isapre,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,fecha_registro=excluded.fecha_registro",(trabajador_id,vigencia_cond.isoformat(),clp_round(sueldo),grat_tipo,clp_round(grat),afp,salud_tipo,isapre.strip(),salud_modalidad,salud_valor,'Cambio desde ficha',datetime.now().isoformat(timespec='seconds')))
+                    conn.commit(); st.success('Ficha y vigencia histórica guardadas.'); st.rerun()
+
+        if edit_row:
+            st.markdown('#### Historial de sueldo y condiciones previsionales')
+            hc=pd.read_sql_query("SELECT vigente_desde,sueldo_base,afp,salud_tipo,isapre,salud_modalidad,salud_valor FROM nomina_historial_condiciones WHERE trabajador_id=? ORDER BY vigente_desde DESC",conn,params=(edit_row.id,))
+            if not hc.empty:
+                hc_show=hc.copy(); hc_show['sueldo_base']=hc_show['sueldo_base'].map(money)
+                st.dataframe(hc_show,use_container_width=True,hide_index=True)
+                pdf_ficha=nomina_pdf('Ficha e historial del trabajador',f'{edit_row.nombre} · RUT {edit_row.rut}',['Vigente desde','Sueldo','AFP','Salud','Isapre','Modalidad','Valor'],[[r.vigente_desde,money(r.sueldo_base),r.afp,r.salud_tipo,r.isapre or '',r.salud_modalidad,r.salud_valor] for r in hc.itertuples()])
+                st.download_button('🖨️ PDF ficha / historial',pdf_ficha,f'ficha_{edit_row.rut}.pdf','application/pdf',key='pdf_ficha_nom')
 
     with tabs[1]:
         trab=pd.read_sql_query("SELECT id,rut,nombre,sueldo_base,anticipo_porcentaje FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",conn)
@@ -4427,21 +4499,25 @@ elif menu == "👥 Nómina":
                 quien=st.selectbox('Trabajador',list(mapa),key='ant_trab'); tr=mapa[quien]
                 periodo=st.text_input('Período (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='ant_per')
                 sugerido=round(float(tr.sueldo_base or 0)*float(tr.anticipo_porcentaje or 50)/100)
-                fecha_ant=st.date_input('Fecha del anticipo',date.today(),key='ant_fecha'); monto_ant=st.number_input('Monto',min_value=0.0,value=float(sugerido),step=10000.0,key='ant_monto')
+                fecha_ant=st.date_input('Fecha del anticipo',date.today(),key='ant_fecha'); monto_ant=st.number_input('Monto',min_value=0.0,value=float(sugerido),step=10000.0,format='%.0f',key='ant_monto')
                 obs_ant=st.text_input('Observación',key='ant_obs')
                 if st.button('Registrar anticipo',key='ant_save'):
                     conn.execute("INSERT INTO nomina_anticipos(trabajador_id,periodo,fecha,monto,observacion) VALUES(?,?,?,?,?)",(tr.id,periodo,fecha_ant.isoformat(),monto_ant,obs_ant)); conn.commit(); st.success('Anticipo registrado.'); st.rerun()
             with c2:
                 st.markdown('#### Préstamo al trabajador')
                 quienp=st.selectbox('Trabajador',list(mapa),key='pre_trab'); tp=mapa[quienp]
-                fecha_p=st.date_input('Fecha préstamo',date.today(),key='pre_fecha'); monto_p=st.number_input('Monto original',min_value=0.0,value=0.0,step=10000.0,key='pre_monto'); cuotas=st.number_input('N° cuotas',min_value=1,max_value=120,value=1,key='pre_cuotas'); cuota=st.number_input('Cuota mensual',min_value=0.0,value=0.0,step=1000.0,key='pre_cuota'); primera=st.text_input('Primera cuota (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='pre_primera'); obs_p=st.text_input('Observación',key='pre_obs')
+                fecha_p=st.date_input('Fecha préstamo',date.today(),key='pre_fecha'); monto_p=st.number_input('Monto original',min_value=0.0,value=0.0,step=10000.0,format='%.0f',key='pre_monto'); cuotas=st.number_input('N° cuotas',min_value=1,max_value=120,value=1,key='pre_cuotas'); cuota=st.number_input('Cuota mensual',min_value=0.0,value=0.0,step=1000.0,format='%.0f',key='pre_cuota'); primera=st.text_input('Primera cuota (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='pre_primera'); obs_p=st.text_input('Observación',key='pre_obs')
                 if st.button('Registrar préstamo',key='pre_save'):
                     cuota_final=cuota or (monto_p/cuotas if cuotas else monto_p)
                     conn.execute("INSERT INTO nomina_prestamos(trabajador_id,fecha,monto_original,numero_cuotas,cuota,primera_cuota,saldo,observacion) VALUES(?,?,?,?,?,?,?,?)",(tp.id,fecha_p.isoformat(),monto_p,int(cuotas),cuota_final,primera,monto_p,obs_p)); conn.commit(); st.success('Préstamo registrado.'); st.rerun()
             st.divider(); st.markdown('#### Movimientos registrados')
             ants=pd.read_sql_query("SELECT a.id,t.nombre,a.periodo,a.fecha,a.monto,a.contabilizado,a.asiento_id FROM nomina_anticipos a JOIN nomina_trabajadores t ON t.id=a.trabajador_id ORDER BY a.id DESC",conn)
             pres=pd.read_sql_query("SELECT p.id,t.nombre,p.fecha,p.monto_original,p.numero_cuotas,p.cuota,p.saldo,p.estado,p.contabilizado,p.asiento_id FROM nomina_prestamos p JOIN nomina_trabajadores t ON t.id=p.trabajador_id ORDER BY p.id DESC",conn)
-            st.dataframe(ants,use_container_width=True,hide_index=True); st.dataframe(pres,use_container_width=True,hide_index=True)
+            st.dataframe(formatear_montos_df(ants),use_container_width=True,hide_index=True); st.dataframe(formatear_montos_df(pres),use_container_width=True,hide_index=True)
+            if not ants.empty:
+                pdf_ant=nomina_pdf('Anticipos de remuneraciones','SGCI',['ID','Trabajador','Período','Fecha','Monto','Contabilizado','Asiento'],[[r.id,r.nombre,r.periodo,r.fecha,money(r.monto),'Sí' if r.contabilizado else 'No',r.asiento_id or ''] for r in ants.itertuples()]); st.download_button('🖨️ PDF anticipos',pdf_ant,'anticipos_remuneraciones.pdf','application/pdf',key='pdf_anticipos')
+            if not pres.empty:
+                pdf_pre=nomina_pdf('Préstamos a trabajadores','SGCI',['ID','Trabajador','Fecha','Monto','Cuotas','Cuota','Saldo','Estado'],[[r.id,r.nombre,r.fecha,money(r.monto_original),r.numero_cuotas,money(r.cuota),money(r.saldo),r.estado] for r in pres.itertuples()]); st.download_button('🖨️ PDF préstamos',pdf_pre,'prestamos_trabajadores.pdf','application/pdf',key='pdf_prestamos')
             st.markdown('#### Contabilizar entrega de anticipo/préstamo')
             bancos=pd.read_sql_query("SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 AND cuenta_contable IS NOT NULL",conn)
             pendientes=[]
@@ -4462,37 +4538,41 @@ elif menu == "👥 Nómina":
         else:
             labels={f"{r.rut} - {r.nombre}":r for r in trab.itertuples()}; lab=st.selectbox('Trabajador',list(labels),key='liq_trab'); tr=labels[lab]
             existente=conn.execute("SELECT * FROM nomina_liquidaciones WHERE periodo=? AND trabajador_id=?",(periodo,tr.id)).fetchone(); ex=dict(existente) if existente else {}
-            st.caption('Los valores se proponen desde la ficha, pero quedan guardados históricamente en esta liquidación y pueden ajustarse manualmente.')
+            fecha_periodo=f'{periodo}-01'
+            hist_cond=conn.execute("SELECT * FROM nomina_historial_condiciones WHERE trabajador_id=? AND vigente_desde<=? ORDER BY vigente_desde DESC LIMIT 1",(tr.id,fecha_periodo)).fetchone()
+            cond=dict(hist_cond) if hist_cond else dict(tr._asdict())
+            st.caption('La liquidación toma automáticamente la última condición vigente al inicio del período y la congela históricamente.')
             c1,c2,c3=st.columns(3)
             dias=c1.number_input('Días trabajados',min_value=0.0,max_value=30.0,value=float(ex.get('dias_trabajados',30)),step=1.0)
-            sueldo_base=c2.number_input('Sueldo base',min_value=0.0,value=float(ex.get('sueldo_base',tr.sueldo_base or 0)),step=10000.0)
-            sueldo_periodo=c3.number_input('Sueldo del período',min_value=0.0,value=float(ex.get('sueldo_periodo',round((tr.sueldo_base or 0)*dias/30))),step=1000.0)
-            grat=c1.number_input('Gratificación',min_value=0.0,value=float(ex.get('gratificacion',tr.gratificacion_valor or 0)),step=1000.0)
-            horas=c2.number_input('Horas extras ($)',min_value=0.0,value=float(ex.get('horas_extras',0)),step=1000.0)
-            bonos=c3.number_input('Bonos imponibles',min_value=0.0,value=float(ex.get('bonos_imponibles',0)),step=1000.0)
-            otros_imp=c1.number_input('Otros imponibles',min_value=0.0,value=float(ex.get('otros_imponibles',0)),step=1000.0)
-            noimp=c2.number_input('Asignación no imponible',min_value=0.0,value=float(ex.get('asignacion_no_imponible',0)),step=1000.0)
-            otros_noimp=c3.number_input('Otros no imponibles',min_value=0.0,value=float(ex.get('otros_no_imponibles',0)),step=1000.0)
+            sueldo_base=c2.number_input('Sueldo base',min_value=0.0,value=float(ex.get('sueldo_base',cond.get('sueldo_base',tr.sueldo_base) or 0)),step=10000.0,format='%.0f')
+            sueldo_periodo=c3.number_input('Sueldo del período',min_value=0.0,value=float(ex.get('sueldo_periodo',clp_round((cond.get('sueldo_base',tr.sueldo_base) or 0)*dias/30))),step=1000.0,format='%.0f')
+            grat=c1.number_input('Gratificación',min_value=0.0,value=float(ex.get('gratificacion',cond.get('gratificacion_valor',tr.gratificacion_valor) or 0)),step=1000.0,format='%.0f')
+            horas=c2.number_input('Horas extras ($)',min_value=0.0,value=float(ex.get('horas_extras',0)),step=1000.0,format='%.0f')
+            bonos=c3.number_input('Bonos imponibles',min_value=0.0,value=float(ex.get('bonos_imponibles',0)),step=1000.0,format='%.0f')
+            otros_imp=c1.number_input('Otros imponibles',min_value=0.0,value=float(ex.get('otros_imponibles',0)),step=1000.0,format='%.0f')
+            noimp=c2.number_input('Asignación no imponible',min_value=0.0,value=float(ex.get('asignacion_no_imponible',0)),step=1000.0,format='%.0f')
+            otros_noimp=c3.number_input('Otros no imponibles',min_value=0.0,value=float(ex.get('otros_no_imponibles',0)),step=1000.0,format='%.0f')
             total_imp=sueldo_periodo+grat+horas+bonos+otros_imp; total_noimp=noimp+otros_noimp
-            com=conn.execute("SELECT comision FROM nomina_parametros_afp WHERE afp=?",(tr.afp,)).fetchone(); comision=float(com[0] if com else 0)
+            afp_vig=cond.get('afp',tr.afp); com=conn.execute("SELECT comision FROM nomina_parametros_afp WHERE afp=?",(afp_vig,)).fetchone(); comision=float(com[0] if com else 0)
             st.markdown('##### Descuentos')
             d1,d2,d3=st.columns(3)
-            afp_auto=round(total_imp*(10+comision)/100); usar_afp_manual=d1.checkbox(f'AFP manual (auto {money(afp_auto)})',value=False); afp_manual=d1.number_input('AFP a descontar',min_value=0.0,value=float(ex.get('afp_descuento',afp_auto)),step=1000.0,disabled=not usar_afp_manual)
-            mod=tr.salud_modalidad or '7% legal'; sval=float(tr.salud_valor or 7); salud_auto=round(sval if mod=='Monto manual' else total_imp*sval/100)
-            usar_salud_manual=d2.checkbox(f'Salud manual (auto {money(salud_auto)})',value=False); salud_manual=d2.number_input('Salud a descontar',min_value=0.0,value=float(ex.get('salud_descuento',salud_auto)),step=1000.0,disabled=not usar_salud_manual)
-            afc=d3.number_input('AFC trabajador',min_value=0.0,value=float(ex.get('afc_descuento',0)),step=1000.0,help='Editable para cuadrar con Previred.')
-            impuesto=d1.number_input('Impuesto Único',min_value=0.0,value=float(ex.get('impuesto_unico',0)),step=1000.0)
+            afp_auto=clp_round(total_imp*(10+comision)/100); usar_afp_manual=d1.checkbox(f'AFP manual (auto {money(afp_auto)})',value=False); afp_manual=d1.number_input('AFP a descontar',min_value=0.0,value=float(ex.get('afp_descuento',afp_auto)),step=1000.0,format='%.0f',disabled=not usar_afp_manual)
+            salud_tipo_vig=cond.get('salud_tipo',tr.salud_tipo) or 'Fonasa'; mod=cond.get('salud_modalidad',tr.salud_modalidad) or '7% legal'; sval=float(cond.get('salud_valor',tr.salud_valor) or 7); uf_row=conn.execute("SELECT valor_uf FROM nomina_parametros_mensuales WHERE periodo=?",(periodo,)).fetchone(); uf_valor=float(uf_row[0] if uf_row else ex.get('uf_valor',0) or 0); legal_salud=total_imp*0.07; plan_salud=(sval*uf_valor if mod=='Plan en UF' else (sval if mod=='Monto pactado en pesos' else total_imp*sval/100)); salud_auto=clp_round(legal_salud if salud_tipo_vig=='Fonasa' else max(legal_salud,plan_salud))
+            usar_salud_manual=d2.checkbox(f'Salud manual (auto {money(salud_auto)})',value=False); salud_manual=d2.number_input('Salud a descontar',min_value=0.0,value=float(ex.get('salud_descuento',salud_auto)),step=1000.0,format='%.0f',disabled=not usar_salud_manual)
+            if salud_tipo_vig=='Isapre' and mod=='Plan en UF': d2.caption(f'Plan: {sval:.2f} UF · equivalente {money(plan_salud)} · UF usada {uf_valor:,.2f}')
+            afc=d3.number_input('AFC trabajador',min_value=0.0,value=float(ex.get('afc_descuento',0)),step=1000.0,format='%.0f',help='Editable para cuadrar con Previred.')
+            impuesto=d1.number_input('Impuesto Único',min_value=0.0,value=float(ex.get('impuesto_unico',0)),step=1000.0,format='%.0f')
             prestamos=pd.read_sql_query("SELECT * FROM nomina_prestamos WHERE trabajador_id=? AND estado='VIGENTE' AND saldo>0 AND primera_cuota<=?",conn,params=(tr.id,periodo)); pre_sug=float(prestamos['cuota'].sum()) if not prestamos.empty else 0
-            pre_desc=d2.number_input('Descuento préstamos',min_value=0.0,value=float(ex.get('prestamo_descuento',pre_sug)),step=1000.0)
-            otros_desc=d3.number_input('Otros descuentos',min_value=0.0,value=float(ex.get('otros_descuentos',0)),step=1000.0)
+            pre_desc=d2.number_input('Descuento préstamos',min_value=0.0,value=float(ex.get('prestamo_descuento',pre_sug)),step=1000.0,format='%.0f')
+            otros_desc=d3.number_input('Otros descuentos',min_value=0.0,value=float(ex.get('otros_descuentos',0)),step=1000.0,format='%.0f')
             ant=conn.execute("SELECT COALESCE(SUM(monto),0) FROM nomina_anticipos WHERE trabajador_id=? AND periodo=?",(tr.id,periodo)).fetchone()[0] or 0
-            calc=nomina_calcular(total_imp,total_noimp,comision,mod,sval,afc,impuesto,pre_desc,otros_desc,ant,afp_manual if usar_afp_manual else None,salud_manual if usar_salud_manual else None)
+            calc=nomina_calcular(total_imp,total_noimp,comision,salud_tipo_vig,mod,sval,uf_valor,afc,impuesto,pre_desc,otros_desc,ant,afp_manual if usar_afp_manual else None,salud_manual if usar_salud_manual else None)
             a,b,c,d=st.columns(4); a.metric('Total imponible',money(total_imp)); b.metric('Total no imponible',money(total_noimp)); c.metric('Líquido período',money(calc['liquido'])); d.metric('Saldo fin de mes',money(calc['saldo']))
-            st.info(f"AFP {tr.afp}: 10% + comisión {comision:.2f}% | Salud: {tr.salud_tipo} · {mod} | Anticipo registrado: {money(ant)}")
+            st.info(f"AFP {afp_vig}: 10% + comisión {comision:.2f}% | Salud: {salud_tipo_vig} · {mod} | Anticipo registrado: {money(ant)}")
             obs=st.text_area('Observaciones',value=ex.get('observacion','') or '')
             if st.button('💾 Guardar / recalcular liquidación',type='primary'):
-                vals=(periodo,tr.id,dias,sueldo_base,sueldo_periodo,grat,horas,bonos,otros_imp,noimp,otros_noimp,total_imp,total_noimp,total_imp+total_noimp,tr.afp,comision,calc['afp'],tr.salud_tipo,mod,sval,calc['salud'],afc,impuesto,pre_desc,otros_desc,calc['total_desc'],calc['liquido'],ant,calc['saldo'],'CALCULADO',obs)
-                conn.execute("""INSERT INTO nomina_liquidaciones(periodo,trabajador_id,dias_trabajados,sueldo_base,sueldo_periodo,gratificacion,horas_extras,bonos_imponibles,otros_imponibles,asignacion_no_imponible,otros_no_imponibles,total_imponible,total_no_imponible,total_haberes,afp_nombre,afp_comision,afp_descuento,salud_tipo,salud_modalidad,salud_valor,salud_descuento,afc_descuento,impuesto_unico,prestamo_descuento,otros_descuentos,total_descuentos,liquido_periodo,anticipo,saldo_pagar,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(periodo,trabajador_id) DO UPDATE SET dias_trabajados=excluded.dias_trabajados,sueldo_base=excluded.sueldo_base,sueldo_periodo=excluded.sueldo_periodo,gratificacion=excluded.gratificacion,horas_extras=excluded.horas_extras,bonos_imponibles=excluded.bonos_imponibles,otros_imponibles=excluded.otros_imponibles,asignacion_no_imponible=excluded.asignacion_no_imponible,otros_no_imponibles=excluded.otros_no_imponibles,total_imponible=excluded.total_imponible,total_no_imponible=excluded.total_no_imponible,total_haberes=excluded.total_haberes,afp_nombre=excluded.afp_nombre,afp_comision=excluded.afp_comision,afp_descuento=excluded.afp_descuento,salud_tipo=excluded.salud_tipo,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,salud_descuento=excluded.salud_descuento,afc_descuento=excluded.afc_descuento,impuesto_unico=excluded.impuesto_unico,prestamo_descuento=excluded.prestamo_descuento,otros_descuentos=excluded.otros_descuentos,total_descuentos=excluded.total_descuentos,liquido_periodo=excluded.liquido_periodo,anticipo=excluded.anticipo,saldo_pagar=excluded.saldo_pagar,estado=CASE WHEN nomina_liquidaciones.estado='CONTABILIZADO' THEN nomina_liquidaciones.estado ELSE 'CALCULADO' END,observacion=excluded.observacion""",vals)
+                vals=(periodo,tr.id,dias,sueldo_base,sueldo_periodo,grat,horas,bonos,otros_imp,noimp,otros_noimp,total_imp,total_noimp,total_imp+total_noimp,afp_vig,comision,calc['afp'],salud_tipo_vig,mod,sval,calc['salud'],afc,impuesto,pre_desc,otros_desc,calc['total_desc'],calc['liquido'],ant,calc['saldo'],uf_valor,calc['salud_plan_pesos'],'CALCULADO',obs)
+                conn.execute("""INSERT INTO nomina_liquidaciones(periodo,trabajador_id,dias_trabajados,sueldo_base,sueldo_periodo,gratificacion,horas_extras,bonos_imponibles,otros_imponibles,asignacion_no_imponible,otros_no_imponibles,total_imponible,total_no_imponible,total_haberes,afp_nombre,afp_comision,afp_descuento,salud_tipo,salud_modalidad,salud_valor,salud_descuento,afc_descuento,impuesto_unico,prestamo_descuento,otros_descuentos,total_descuentos,liquido_periodo,anticipo,saldo_pagar,uf_valor,salud_plan_pesos,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(periodo,trabajador_id) DO UPDATE SET dias_trabajados=excluded.dias_trabajados,sueldo_base=excluded.sueldo_base,sueldo_periodo=excluded.sueldo_periodo,gratificacion=excluded.gratificacion,horas_extras=excluded.horas_extras,bonos_imponibles=excluded.bonos_imponibles,otros_imponibles=excluded.otros_imponibles,asignacion_no_imponible=excluded.asignacion_no_imponible,otros_no_imponibles=excluded.otros_no_imponibles,total_imponible=excluded.total_imponible,total_no_imponible=excluded.total_no_imponible,total_haberes=excluded.total_haberes,afp_nombre=excluded.afp_nombre,afp_comision=excluded.afp_comision,afp_descuento=excluded.afp_descuento,salud_tipo=excluded.salud_tipo,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,salud_descuento=excluded.salud_descuento,afc_descuento=excluded.afc_descuento,impuesto_unico=excluded.impuesto_unico,prestamo_descuento=excluded.prestamo_descuento,otros_descuentos=excluded.otros_descuentos,total_descuentos=excluded.total_descuentos,liquido_periodo=excluded.liquido_periodo,anticipo=excluded.anticipo,saldo_pagar=excluded.saldo_pagar,uf_valor=excluded.uf_valor,salud_plan_pesos=excluded.salud_plan_pesos,estado=CASE WHEN nomina_liquidaciones.estado='CONTABILIZADO' THEN nomina_liquidaciones.estado ELSE 'CALCULADO' END,observacion=excluded.observacion""",vals)
                 conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)",(periodo,)); conn.commit(); st.success('Liquidación guardada.'); st.rerun()
 
     with tabs[3]:
@@ -4503,7 +4583,7 @@ elif menu == "👥 Nómina":
             per=st.selectbox('Período',periodos,key='rep_per')
             df=pd.read_sql_query("""SELECT l.*,t.rut,t.nombre,t.cargo FROM nomina_liquidaciones l JOIN nomina_trabajadores t ON t.id=l.trabajador_id WHERE l.periodo=? ORDER BY t.nombre""",conn,params=(per,))
             cols=['rut','nombre','sueldo_periodo','gratificacion','total_imponible','total_no_imponible','afp_descuento','salud_descuento','afc_descuento','impuesto_unico','prestamo_descuento','anticipo','saldo_pagar']
-            vista=df[cols].copy(); st.dataframe(vista,use_container_width=True,hide_index=True)
+            vista=df[cols].copy(); st.dataframe(formatear_montos_df(vista),use_container_width=True,hide_index=True)
             st.download_button('📥 Exportar resumen CSV',vista.to_csv(index=False,sep=';').encode('utf-8-sig'),f'nomina_{per}.csv','text/csv')
             headers=['RUT','Trabajador','Sueldo','Gratif.','Imponible','No impon.','AFP','Salud','AFC','Impuesto','Préstamo','Anticipo','Saldo final']
             filas=[]
@@ -4513,11 +4593,11 @@ elif menu == "👥 Nómina":
             st.download_button('🖨️ PDF resumen de nómina',pdf,f'resumen_nomina_{per}.pdf','application/pdf')
             st.markdown('#### Liquidación individual imprimible')
             lm={f"{r.rut} - {r.nombre}":r for r in df.itertuples()}; ls=st.selectbox('Trabajador para reporte',list(lm),key='rep_trab'); rr=lm[ls]
-            detalle=[['Sueldo período',money(rr.sueldo_periodo)],['Gratificación',money(rr.gratificacion)],['Horas extras',money(rr.horas_extras)],['Bonos imponibles',money(rr.bonos_imponibles)],['Total imponible',money(rr.total_imponible)],['Total no imponible',money(rr.total_no_imponible)],['AFP',money(rr.afp_descuento)],['Salud',money(rr.salud_descuento)],['AFC',money(rr.afc_descuento)],['Impuesto Único',money(rr.impuesto_unico)],['Préstamo',money(rr.prestamo_descuento)],['Otros descuentos',money(rr.otros_descuentos)],['Líquido período',money(rr.liquido_periodo)],['Anticipo quincenal',money(rr.anticipo)],['SALDO A PAGAR',money(rr.saldo_pagar)]]
+            detalle=[['Sueldo período',money(rr.sueldo_periodo)],['Gratificación',money(rr.gratificacion)],['Horas extras',money(rr.horas_extras)],['Bonos imponibles',money(rr.bonos_imponibles)],['Total imponible',money(rr.total_imponible)],['Total no imponible',money(rr.total_no_imponible)],['AFP',money(rr.afp_descuento)],['Salud',money(rr.salud_descuento)],['Plan salud equivalente',money(getattr(rr,'salud_plan_pesos',0))],['UF utilizada',f"{float(getattr(rr,'uf_valor',0) or 0):,.2f}"],['AFC',money(rr.afc_descuento)],['Impuesto Único',money(rr.impuesto_unico)],['Préstamo',money(rr.prestamo_descuento)],['Otros descuentos',money(rr.otros_descuentos)],['Líquido período',money(rr.liquido_periodo)],['Anticipo quincenal',money(rr.anticipo)],['SALDO A PAGAR',money(rr.saldo_pagar)]]
             pdfi=nomina_pdf(f'Liquidación de Remuneraciones - {per}',f'{rr.nombre} · RUT {rr.rut} · {rr.cargo}', ['Concepto','Monto'],detalle)
             st.download_button('🖨️ PDF liquidación individual',pdfi,f'liquidacion_{rr.rut}_{per}.pdf','application/pdf')
             st.markdown('#### Historial del trabajador')
-            hist=pd.read_sql_query("SELECT periodo,total_haberes,total_descuentos,liquido_periodo,anticipo,saldo_pagar,estado FROM nomina_liquidaciones WHERE trabajador_id=? ORDER BY periodo DESC",conn,params=(rr.trabajador_id,)); st.dataframe(hist,use_container_width=True,hide_index=True)
+            hist=pd.read_sql_query("SELECT periodo,total_haberes,total_descuentos,liquido_periodo,anticipo,saldo_pagar,estado FROM nomina_liquidaciones WHERE trabajador_id=? ORDER BY periodo DESC",conn,params=(rr.trabajador_id,)); st.dataframe(formatear_montos_df(hist),use_container_width=True,hide_index=True)
             pdfh=nomina_pdf('Historial de Remuneraciones',f'{rr.nombre} · RUT {rr.rut}',['Período','Haberes','Descuentos','Líquido','Anticipo','Saldo final','Estado'],[[x.periodo,money(x.total_haberes),money(x.total_descuentos),money(x.liquido_periodo),money(x.anticipo),money(x.saldo_pagar),x.estado] for x in hist.itertuples()])
             st.download_button('🖨️ PDF historial trabajador',pdfh,f'historial_nomina_{rr.rut}.pdf','application/pdf')
 
@@ -4528,7 +4608,13 @@ elif menu == "👥 Nómina":
         amap={r.afp:r for r in afpdf.itertuples()}; aa=st.selectbox('AFP a modificar',list(amap)); ar=amap[aa]; nueva=st.number_input('Comisión %',min_value=0.0,max_value=10.0,value=float(ar.comision),step=.01); vig=st.text_input('Vigente desde',value=ar.vigente_desde or '')
         if st.button('Guardar parámetro AFP'):
             conn.execute("UPDATE nomina_parametros_afp SET comision=?,vigente_desde=? WHERE afp=?",(nueva,vig,aa)); conn.commit(); st.success('Parámetro actualizado.'); st.rerun()
-        st.info('Salud: la ficha admite Fonasa o Isapre y tres modalidades: 7% legal, porcentaje pactado superior o monto manual. Además, cada liquidación permite sobrescribir el cálculo para cuadrar con Previred.')
+        st.info('Salud: Fonasa usa 7% legal. Isapre admite 7%, porcentaje pactado, plan en UF o monto pactado en pesos; la liquidación conserva el valor UF utilizado y permite ajuste manual.')
+        st.markdown('#### Valor UF por período')
+        pu=st.text_input('Período UF (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='uf_per'); vu=st.number_input('Valor UF del período',min_value=0.0,value=0.0,step=1.0,key='uf_val')
+        if st.button('Guardar valor UF',key='uf_save'):
+            conn.execute("INSERT INTO nomina_parametros_mensuales(periodo,valor_uf) VALUES(?,?) ON CONFLICT(periodo) DO UPDATE SET valor_uf=excluded.valor_uf",(pu,vu)); conn.commit(); st.success('UF guardada para el período.'); st.rerun()
+        ufdf=pd.read_sql_query("SELECT periodo,valor_uf FROM nomina_parametros_mensuales ORDER BY periodo DESC",conn)
+        if not ufdf.empty: st.dataframe(ufdf,use_container_width=True,hide_index=True)
 
     with tabs[5]:
         st.subheader('Contabilización de nómina')
@@ -4603,7 +4689,7 @@ elif menu == "🏦 Bancos y Cartolas":
     with tabs[0]:
         df = pd.read_sql_query("SELECT b.id AS ID,b.nombre AS Banco,b.numero_cuenta AS Cuenta,b.tipo AS Tipo,b.moneda AS Moneda,b.cuenta_contable AS Cuenta_Contable,b.saldo_inicial AS Saldo_Inicial FROM bancos b WHERE activo=1 ORDER BY nombre", conn)
         if not df.empty:
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
         with st.form("nuevo_banco"):
             a,b,c = st.columns(3)
             nombre = a.text_input("Banco")
@@ -4612,7 +4698,7 @@ elif menu == "🏦 Bancos y Cartolas":
             cuentas = cuentas_imputables(conn)
             mapa = dict(zip(cuentas.etiqueta, cuentas.codigo))
             cuenta = c.selectbox("Cuenta contable bancaria", list(mapa.keys())) if mapa else ""
-            saldo = st.number_input("Saldo inicial", value=0.0, step=1000.0)
+            saldo = st.number_input("Saldo inicial", value=0.0, step=1000.0,format='%.0f')
             if st.form_submit_button("Guardar cuenta bancaria"):
                 conn.execute("INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)", (nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo))
                 conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); st.success("Cuenta bancaria creada.")
@@ -4678,8 +4764,8 @@ elif menu == "🏦 Bancos y Cartolas":
                 naturaleza = c2.selectbox("Movimiento", ["Cargo / salida de dinero", "Abono / entrada de dinero"])
                 descripcion = st.text_input("Descripción")
                 referencia = st.text_input("Referencia / N° documento")
-                monto = st.number_input("Monto", min_value=0.0, step=1000.0)
-                saldo = st.number_input("Saldo después del movimiento (opcional)", value=0.0, step=1000.0)
+                monto = st.number_input("Monto", min_value=0.0, step=1000.0,format='%.0f')
+                saldo = st.number_input("Saldo después del movimiento (opcional)", value=0.0, step=1000.0,format='%.0f')
                 if st.form_submit_button("Guardar movimiento manual", type="primary"):
                     if not descripcion or monto <= 0:
                         st.error("Indica descripción y un monto mayor que cero.")
@@ -4832,7 +4918,7 @@ elif menu == "🏦 Bancos y Cartolas":
             tipo_op = c2.selectbox("Tipo", ["PAGO","ABONO"])
             descripcion_op = st.text_input("Descripción (ej.: Nómina septiembre, Internet, Arriendo)")
             referencia_op = st.text_input("Referencia (opcional)")
-            monto_op = st.number_input("Monto de la operación", min_value=0.0, step=1000.0)
+            monto_op = st.number_input("Monto de la operación", min_value=0.0, step=1000.0,format='%.0f')
             cuenta_op = st.selectbox("Cuenta contable de contrapartida", list(mapa.keys())) if mapa else ""
             if st.form_submit_button("Guardar operación"):
                 if not descripcion_op or monto_op <= 0 or not cuenta_op:
@@ -5458,7 +5544,7 @@ elif menu == "👥 Clientes":
             """,
             conn
         )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
 
     with pestañas[1]:
         clientes = conn.execute(
@@ -5590,7 +5676,7 @@ elif menu == "🏢 Proveedores":
             """,
             conn
         )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
 
     with pestañas[1]:
         proveedores = conn.execute(
@@ -5708,7 +5794,7 @@ elif menu == "💵 Pagos":
             with st.form("pago_cliente"):
                 seleccionado = st.selectbox("Cliente", list(opciones.keys()))
                 fecha_pago = st.date_input("Fecha", date.today())
-                monto_pago = st.number_input("Monto", min_value=0.0, step=1000.0)
+                monto_pago = st.number_input("Monto", min_value=0.0, step=1000.0,format='%.0f')
                 medio = st.selectbox("Medio de pago", ["Transferencia", "Cheque", "Efectivo", "Tarjeta", "Otro"])
 
                 if cuentas_banco.empty:
@@ -5816,7 +5902,7 @@ elif menu == "📒 Libro Diario":
         conn
     )
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -5840,7 +5926,7 @@ elif menu == "📚 Mayor":
     else:
         saldo = df.iloc[-1]["Saldo"]
         st.metric("Saldo", money(saldo))
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -5879,7 +5965,7 @@ elif menu == "⚖️ Balance de Comprobación":
         else:
             st.error("🔴 Existe diferencia.")
 
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
 
 
 # ============================================================
@@ -5897,7 +5983,7 @@ elif menu == "📊 Conciliación":
         if df.empty:
             st.warning("No se pudo determinar la cuenta de clientes.")
         else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
             diferencia = df.iloc[0]["Diferencia"]
             if abs(diferencia) < 0.01:
                 st.success("🟢 Auxiliar de clientes conciliado.")
@@ -5909,7 +5995,7 @@ elif menu == "📊 Conciliación":
         if df.empty:
             st.warning("No se pudo determinar la cuenta de proveedores.")
         else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
             diferencia = df.iloc[0]["Diferencia"]
             if abs(diferencia) < 0.01:
                 st.success("🟢 Auxiliar de proveedores conciliado.")
@@ -5942,7 +6028,7 @@ elif menu == "📋 Plan de Cuentas":
             """,
             conn
         )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
 
     with pestañas[1]:
         roles = cargar_roles(conn)
@@ -6210,7 +6296,7 @@ elif menu == "📦 Lotes":
     if df.empty:
         st.info("No existen lotes.")
     else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
         st.divider()
 
         lote = st.selectbox("Seleccionar lote", df["Lote"].tolist())
