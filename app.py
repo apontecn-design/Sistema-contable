@@ -4078,6 +4078,72 @@ def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, 
 
 
 
+
+def contabilizar_imputacion_multiple_bancaria(conn, movimiento_id, distribuciones, descripcion=None):
+    """Distribuye un único movimiento bancario entre varias cuentas y lo concilia en un solo asiento."""
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+    if not mov:
+        raise ValueError("Movimiento bancario no encontrado.")
+    if int(mov["conciliado"] or 0) == 1:
+        raise ValueError("Este movimiento ya está conciliado.")
+    if periodo_cerrado(conn, mov["fecha"]):
+        raise ValueError("El período contable de este movimiento está cerrado.")
+    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+    if not banco or not banco["cuenta_contable"]:
+        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+
+    monto = clp_round(abs(float(mov["cargo"] or mov["abono"] or 0)))
+    es_cargo = float(mov["cargo"] or 0) > 0
+    if monto <= 0:
+        raise ValueError("El movimiento no tiene monto para contabilizar.")
+
+    plan = Plan(conn)
+    cuenta_banco = banco["cuenta_contable"]
+    limpias = []
+    for codigo, importe in distribuciones:
+        importe = clp_round(float(importe or 0))
+        if importe <= 0:
+            continue
+        if codigo not in plan.todos:
+            raise ValueError(f"La cuenta {codigo} no existe en el plan de cuentas.")
+        if codigo == cuenta_banco:
+            raise ValueError("La cuenta bancaria no puede usarse como contrapartida.")
+        limpias.append((codigo, importe))
+    if len(limpias) < 2:
+        raise ValueError("Ingresa al menos dos distribuciones con monto mayor que cero.")
+    total = clp_round(sum(x[1] for x in limpias))
+    if total != monto:
+        raise ValueError(f"La distribución suma {money(total)} y debe sumar exactamente {money(monto)}.")
+
+    glosa = limpiar_texto(descripcion) or limpiar_texto(mov["descripcion"]) or "Imputación bancaria distribuida"
+    asiento_id = siguiente_asiento(conn) + 1
+    lote = "CONC-MULTI-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    fecha = mov["fecha"]
+    try:
+        # Cargo/salida: varias cuentas al Debe y Banco al Haber.
+        # Abono/entrada: Banco al Debe y varias cuentas al Haber.
+        if es_cargo:
+            lineas = [(c, imp, 0.0) for c, imp in limpias] + [(cuenta_banco, 0.0, monto)]
+        else:
+            lineas = [(cuenta_banco, monto, 0.0)] + [(c, 0.0, imp) for c, imp in limpias]
+        for codigo, debe, haber in lineas:
+            conn.execute("""INSERT INTO libro_diario
+                (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (fecha, plan.todos.get(codigo, codigo), debe, haber, glosa, codigo, asiento_id, lote, "CONCILIACION_BANCARIA_MULTIPLE"))
+        detalle = "; ".join(f"{c}: {money(imp)}" for c, imp in limpias)
+        conn.execute("""UPDATE cartola_bancaria
+                        SET conciliado=1,observacion=?,asiento_id=?,match_tipo='IMPUTACION_MULTIPLE',
+                            match_id=NULL,match_confianza=100 WHERE id=?""",
+                     (f"{glosa} | {detalle}", asiento_id, int(movimiento_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    registrar_auditoria(conn, "IMPUTACIÓN BANCARIA MÚLTIPLE",
+                        f"Movimiento {movimiento_id} distribuido en {len(limpias)} cuentas, asiento {asiento_id}")
+    return asiento_id
+
 def documentos_pendientes_cliente(conn, cliente_id):
     return pd.read_sql_query("""
         SELECT v.id,v.fecha,v.folio,v.tipo_doc,v.monto_total total,
@@ -5846,6 +5912,38 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.rerun()
                         except Exception as e:
                             st.error(f"No se pudo imputar el movimiento: {e}")
+
+
+                    st.divider()
+                    st.subheader("🧩 Distribuir movimiento entre varias cuentas")
+                    st.caption("Úsala cuando un solo cargo o abono bancario corresponde a conceptos distintos. SGCI generará un único asiento y exigirá que la suma distribuida sea exactamente igual al movimiento bancario.")
+                    n_dist = st.number_input("Cantidad de cuentas a distribuir", min_value=2, max_value=10, value=2, step=1, key=f"multi_n_{movimiento_id}")
+                    distribuciones_ui = []
+                    for j in range(int(n_dist)):
+                        cta_col, monto_col = st.columns([3,1])
+                        etiqueta = cta_col.selectbox(f"Cuenta {j+1}", list(mapa_manual.keys()), key=f"multi_cta_{movimiento_id}_{j}")
+                        importe = monto_col.number_input(f"Monto {j+1}", min_value=0, step=1000, format="%d", key=f"multi_monto_{movimiento_id}_{j}")
+                        distribuciones_ui.append((mapa_manual[etiqueta], int(importe)))
+                    total_dist = sum(x[1] for x in distribuciones_ui)
+                    diferencia_dist = clp_round(monto_sel - total_dist)
+                    m1,m2,m3 = st.columns(3)
+                    m1.metric("Movimiento bancario", money(monto_sel))
+                    m2.metric("Total distribuido", money(total_dist))
+                    m3.metric("Diferencia", money(diferencia_dist))
+                    glosa_multi = st.text_input("Glosa del asiento distribuido", value=glosa_base, key=f"multi_glosa_{movimiento_id}")
+                    cuadra_multi = (clp_round(total_dist) == clp_round(monto_sel)) and sum(1 for _,v in distribuciones_ui if v>0) >= 2
+                    if cuadra_multi:
+                        st.success("La distribución cuadra exactamente con el movimiento bancario.")
+                    else:
+                        st.warning("La distribución debe sumar exactamente el monto bancario y contener al menos dos montos mayores que cero.")
+                    confirma_multi = st.checkbox("Confirmo la distribución y deseo contabilizar y conciliar este movimiento.", key=f"multi_conf_{movimiento_id}")
+                    if st.button("🧩 Contabilizar distribución", type="primary", disabled=not (confirma_multi and cuadra_multi), key=f"multi_btn_{movimiento_id}"):
+                        try:
+                            asiento = contabilizar_imputacion_multiple_bancaria(conn, movimiento_id, distribuciones_ui, glosa_multi)
+                            st.success(f"Movimiento distribuido, conciliado y contabilizado en el asiento {asiento}.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"No se pudo contabilizar la distribución: {e}")
 
     with tabs[4]:
         st.subheader("Servicios, nómina y otros pagos/abonos")
