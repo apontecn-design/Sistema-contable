@@ -386,6 +386,10 @@ ROLES = {
         "IVA Débito Fiscal",
         "2.1.01.02"
     ),
+    "iva_por_pagar": (
+        "IVA por pagar",
+        "2.1.01.03"
+    ),
     "gasto_defecto": (
         "Gastos generales por defecto",
         "5.2.01"
@@ -1056,6 +1060,7 @@ PLAN_BASE = [
     ("2.1.01", "Cuentas por pagar", "Pasivo", "Pasivo", "2.1", 3),
     ("2.1.01.01", "Proveedores", "Pasivo", "Pasivo", "2.1.01", 4),
     ("2.1.01.02", "IVA Débito Fiscal", "Pasivo", "Pasivo", "2.1.01", 4),
+    ("2.1.01.03", "IVA por pagar", "Pasivo", "Pasivo", "2.1.01", 4),
     ("3", "PATRIMONIO", "Patrimonio", "Patrimonio", None, 1),
     ("3.1", "Capital", "Patrimonio", "Patrimonio", "3", 2),
     ("3.1.01", "Capital", "Patrimonio", "Patrimonio", "3.1", 3),
@@ -6993,6 +6998,116 @@ elif menu == "📤 RCV Ventas":
 elif menu == "✍️ Asientos y Saldos":
 
     st.title("✍️ Asientos Manuales y Saldos Iniciales")
+
+    # ------------------------------------------------------------
+    # COMPENSACIÓN MENSUAL IVA / F29
+    # ------------------------------------------------------------
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS compensaciones_iva_f29 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            periodo TEXT NOT NULL UNIQUE,
+            fecha_contable TEXT NOT NULL,
+            iva_debito REAL NOT NULL DEFAULT 0,
+            iva_credito REAL NOT NULL DEFAULT 0,
+            iva_por_pagar REAL NOT NULL DEFAULT 0,
+            asiento_id INTEGER,
+            creado_en TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+
+    with st.expander("🧾 Compensación mensual IVA / F29", expanded=False):
+        st.caption(
+            "Úsalo mes por mes para cerrar el IVA del período. SGCI debita IVA Débito Fiscal, "
+            "abona IVA Crédito Fiscal utilizado y lleva la diferencia a IVA por pagar. "
+            "No mueve Banco ni registra el pago del F29."
+        )
+
+        periodo_f29 = st.text_input("Período tributario (AAAA-MM)", value="2026-01", key="f29_periodo")
+        fecha_f29 = st.date_input("Fecha contable del cierre", key="f29_fecha")
+        c1,c2,c3 = st.columns(3)
+        with c1:
+            debito_f29 = st.number_input("IVA Débito Fiscal del período", min_value=0, step=1, value=0, key="f29_debito")
+        with c2:
+            credito_f29 = st.number_input("IVA Crédito Fiscal utilizado", min_value=0, step=1, value=0, key="f29_credito")
+        iva_pagar_f29 = max(clp_round(debito_f29 - credito_f29),0)
+        with c3:
+            st.metric("IVA por pagar determinado", moneda(iva_pagar_f29))
+
+        existe_f29 = conn.execute(
+            "SELECT id, asiento_id FROM compensaciones_iva_f29 WHERE periodo=?",
+            (periodo_f29.strip(),)
+        ).fetchone() if periodo_f29.strip() else None
+
+        if credito_f29 > debito_f29:
+            st.warning("El crédito fiscal supera al débito. Este formulario está diseñado para períodos con IVA por pagar; no contabilices hasta revisar el remanente.")
+        elif existe_f29:
+            st.warning(f"El período {periodo_f29} ya fue compensado en el asiento {existe_f29[1]}. SGCI bloquea una segunda contabilización.")
+        elif debito_f29 > 0:
+            st.info(
+                f"Asiento que se generará: Debe IVA Débito Fiscal {moneda(debito_f29)} · "
+                f"Haber IVA Crédito Fiscal {moneda(credito_f29)} · Haber IVA por pagar {moneda(iva_pagar_f29)}."
+            )
+
+        confirma_f29 = st.checkbox(
+            "Confirmo que estos valores corresponden al F29 del período indicado.",
+            key="f29_confirma"
+        )
+        if st.button("🧾 Registrar compensación IVA / F29", type="primary", key="f29_registrar"):
+            if not periodo_f29.strip() or len(periodo_f29.strip()) != 7:
+                st.error("Indica el período en formato AAAA-MM.")
+            elif existe_f29:
+                st.error("Ese período ya fue compensado. No se generó ningún asiento.")
+            elif debito_f29 <= 0:
+                st.error("El IVA Débito Fiscal debe ser mayor que cero.")
+            elif credito_f29 > debito_f29:
+                st.error("El crédito fiscal supera al débito. Este caso requiere tratamiento de remanente y no se registró automáticamente.")
+            elif not confirma_f29:
+                st.error("Debes confirmar los valores antes de contabilizar.")
+            else:
+                asiento = siguiente_asiento(conn) + 1
+                fecha_iso_f29 = fecha_f29.strftime("%Y-%m-%d")
+                glosa_f29 = f"Compensación IVA F29 período {periodo_f29.strip()}"
+                try:
+                    cur=conn.cursor()
+                    cur.execute("BEGIN")
+                    lineas=[
+                        ("2.1.01.02","IVA Débito Fiscal",float(debito_f29),0.0),
+                    ]
+                    if credito_f29 > 0:
+                        lineas.append(("1.1.03.02","IVA Crédito Fiscal",0.0,float(credito_f29)))
+                    if iva_pagar_f29 > 0:
+                        lineas.append(("2.1.01.03","IVA por pagar",0.0,float(iva_pagar_f29)))
+                    for codigo,cuenta,debe,haber in lineas:
+                        cur.execute("""
+                            INSERT INTO libro_diario
+                            (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)
+                        """,(fecha_iso_f29,cuenta,debe,haber,glosa_f29,"General / Ninguno",codigo,asiento,
+                             f"F29-{periodo_f29.strip()}","Compensación IVA F29"))
+                    cur.execute("""
+                        INSERT INTO compensaciones_iva_f29
+                        (periodo,fecha_contable,iva_debito,iva_credito,iva_por_pagar,asiento_id)
+                        VALUES (?,?,?,?,?,?)
+                    """,(periodo_f29.strip(),fecha_iso_f29,float(debito_f29),float(credito_f29),float(iva_pagar_f29),asiento))
+                    conn.commit()
+                    st.success(f"Compensación registrada. Asiento {asiento}. IVA por pagar: {moneda(iva_pagar_f29)}")
+                    st.rerun()
+                except Exception as e:
+                    conn.rollback()
+                    st.error(f"No se pudo registrar la compensación: {e}")
+
+        hist_f29=pd.read_sql_query("""
+            SELECT periodo AS Período, fecha_contable AS Fecha,
+                   iva_debito AS `IVA Débito`, iva_credito AS `IVA Crédito utilizado`,
+                   iva_por_pagar AS `IVA por pagar`, asiento_id AS Asiento
+            FROM compensaciones_iva_f29 ORDER BY periodo DESC
+        """,conn)
+        if not hist_f29.empty:
+            st.markdown("#### Historial de compensaciones")
+            st.dataframe(hist_f29,use_container_width=True,hide_index=True)
+
+    st.divider()
     st.info(
         """
         Sube una matriz en Excel (CSV) para registrar asientos manuales o cargar los saldos iniciales de tu plan de cuentas.
