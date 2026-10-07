@@ -2568,29 +2568,33 @@ def regularizar_iva_historico_compras(conn):
             if monto <= 0.01:
                 continue
 
-            # cuenta_gasto en compras guarda el nombre. Recuperamos el código
-            # desde las líneas del asiento original, excluyendo Proveedores/IVA.
-            fila_cta = conn.execute("""
-                SELECT ld.codigo_cuenta
-                FROM libro_diario ld
-                WHERE ld.lote_id=?
-                  AND ld.glosa=?
-                  AND ld.codigo_cuenta NOT IN (?,?)
-                  AND (ABS(COALESCE(ld.debe,0)) > 0.01 OR ABS(COALESCE(ld.haber,0)) > 0.01)
-                ORDER BY CASE WHEN ABS(COALESCE(ld.debe,0))+ABS(COALESCE(ld.haber,0)) >= ? THEN 0 ELSE 1 END,
-                         ABS(COALESCE(ld.debe,0))+ABS(COALESCE(ld.haber,0)) DESC
-                LIMIT 1
-            """, (r.lote_id, r.glosa, ROLES["proveedores"][1], codigo_iva, monto)).fetchone()
+            # IMPORTANTE: compras.cuenta_gasto contiene la cuenta ACTUAL del documento,
+            # incluso si posteriormente fue reclasificado. Para corregir históricos
+            # cargados por el bruto, el IVA debe salir de esa cuenta actual.
+            codigo_contra = codigo_cuenta_por_nombre(conn, r.cuenta_gasto)
 
-            if not fila_cta:
+            # Respaldo: si un registro antiguo no conserva el nombre actual,
+            # buscamos la última cuenta destino usada en una reclasificación.
+            if not codigo_contra:
+                fila_cta = conn.execute("""
+                    SELECT ld.codigo_cuenta
+                    FROM libro_diario ld
+                    WHERE ld.glosa LIKE ?
+                      AND ld.debe > 0.01
+                      AND ld.codigo_cuenta NOT IN (?,?)
+                    ORDER BY ld.asiento_id DESC, ld.rowid DESC
+                    LIMIT 1
+                """, (
+                    f"Reclasificación compra%N° {r.folio} - {r.proveedor}%",
+                    ROLES["proveedores"][1], codigo_iva
+                )).fetchone()
+                codigo_contra = str(fila_cta[0]) if fila_cta else None
+
+            if not codigo_contra or codigo_contra not in plan.todos:
                 raise ValueError(
-                    f"No pude identificar la cuenta contrapartida de la compra "
+                    f"No pude identificar la cuenta de gasto/activo actual de la compra "
                     f"{r.folio} ({r.proveedor})."
                 )
-
-            codigo_contra = str(fila_cta[0])
-            if codigo_contra not in plan.todos:
-                raise ValueError(f"La cuenta {codigo_contra} no existe en el plan.")
 
             asiento += 1
             es_nc = int(r.tipo_doc or 0) in DOC_NOTA_CREDITO
@@ -3525,11 +3529,13 @@ def reclasificar_compras(conn, compra_ids, nueva_cuenta, recordar_proveedor=Fals
                 omitidas += 1
                 continue
 
-            # La base reclasificable debe salir del asiento REAL que generó el RCV,
-            # no solamente de compras.monto_neto. Algunos RCV (por ejemplo ciertos
-            # servicios) pueden venir con neto/exento en cero y armar_asiento()
-            # reconstruye correctamente la base por diferencia contra el total.
-            # En esos casos el Libro Diario sí contiene el monto contable correcto.
+            # Para compras con IVA, reclasificamos la BASE y nunca el bruto.
+            # compras.monto_neto queda alimentado por el RCV y evita trasladar el IVA
+            # Crédito Fiscal a una cuenta de gasto.
+            monto_guardado = round(float(c["monto_neto"] or 0), 2)
+
+            # Respaldo para documentos exentos/legados sin base utilizable:
+            # consultamos el asiento real.
             fila_base = conn.execute(
                 """
                 SELECT
@@ -3547,12 +3553,14 @@ def reclasificar_compras(conn, compra_ids, nueva_cuenta, recordar_proveedor=Fals
 
             debe_base = round(float(fila_base["debe"] or 0), 2) if fila_base else 0.0
             haber_base = round(float(fila_base["haber"] or 0), 2) if fila_base else 0.0
-            monto = round(debe_base - haber_base, 2)
+            monto_diario = round(debe_base - haber_base, 2)
 
-            # Respaldo para registros antiguos en los que la trazabilidad del lote
-            # o la glosa no estuviera disponible. Solo se usa si el Diario no dio base.
-            if abs(monto) <= 0.001:
-                monto = round(float(c["monto_neto"] or 0), 2)
+            # Si el RCV guardó una base neta, esa es la cantidad reclasificable.
+            # Conservamos el signo de NC según el asiento original.
+            if abs(monto_guardado) > 0.001:
+                monto = monto_guardado
+            else:
+                monto = monto_diario
 
             if abs(monto) <= 0.001:
                 raise ValueError(
