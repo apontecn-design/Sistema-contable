@@ -5921,6 +5921,10 @@ elif menu == "🏦 Bancos y Cartolas":
 
 
                 if metodo_conc == "🧩 Varias cuentas":
+                    # Este formulario es autosuficiente: no depende de variables
+                    # creadas por "Una cuenta" u otros métodos de conciliación.
+                    monto_multi = clp_round(float(mov_sel["cargo"] or mov_sel["abono"] or 0))
+                    glosa_multi_base = str(mov_sel["descripcion"] or "Movimiento bancario")
                     st.divider()
                     st.subheader("🧩 Distribuir movimiento entre varias cuentas")
                     st.caption("Úsala cuando un solo cargo o abono bancario corresponde a conceptos distintos. SGCI generará un único asiento y exigirá que la suma distribuida sea exactamente igual al movimiento bancario.")
@@ -5938,13 +5942,13 @@ elif menu == "🏦 Bancos y Cartolas":
                         importe = monto_col.number_input(f"Monto {j+1}", min_value=0, step=1000, format="%d", key=f"multi_monto_{movimiento_id}_{j}")
                         distribuciones_ui.append((mapa_multi[etiqueta], int(importe)))
                     total_dist = sum(x[1] for x in distribuciones_ui)
-                    diferencia_dist = clp_round(monto_sel - total_dist)
+                    diferencia_dist = clp_round(monto_multi - total_dist)
                     m1,m2,m3 = st.columns(3)
-                    m1.metric("Movimiento bancario", money(monto_sel))
+                    m1.metric("Movimiento bancario", money(monto_multi))
                     m2.metric("Total distribuido", money(total_dist))
                     m3.metric("Diferencia", money(diferencia_dist))
-                    glosa_multi = st.text_input("Glosa del asiento distribuido", value=glosa_base, key=f"multi_glosa_{movimiento_id}")
-                    cuadra_multi = (clp_round(total_dist) == clp_round(monto_sel)) and sum(1 for _,v in distribuciones_ui if v>0) >= 2
+                    glosa_multi = st.text_input("Glosa del asiento distribuido", value=glosa_multi_base, key=f"multi_glosa_{movimiento_id}")
+                    cuadra_multi = (clp_round(total_dist) == clp_round(monto_multi)) and sum(1 for _,v in distribuciones_ui if v>0) >= 2
                     if cuadra_multi:
                         st.success("La distribución cuadra exactamente con el movimiento bancario.")
                     else:
