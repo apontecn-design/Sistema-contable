@@ -2475,6 +2475,170 @@ def contabilizar_rcv(
     }
 
 
+
+# ============================================================
+# REGULARIZACIÓN HISTÓRICA IVA CRÉDITO - RCV COMPRAS
+# ============================================================
+
+def asegurar_control_regularizacion_iva_compras(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS regularizacion_iva_compras (
+            compra_id INTEGER PRIMARY KEY,
+            asiento_regularizacion INTEGER NOT NULL,
+            fecha_regularizacion TEXT NOT NULL,
+            monto_iva REAL NOT NULL
+        )
+    """)
+    conn.commit()
+
+
+def compras_pendientes_regularizar_iva(conn):
+    """
+    Detecta compras RCV ya contabilizadas cuyo asiento original no contiene
+    movimiento en IVA Crédito Fiscal. No modifica asientos originales.
+    """
+    asegurar_control_regularizacion_iva_compras(conn)
+    codigo_iva = ROLES["iva_credito"][1]
+
+    return pd.read_sql_query("""
+        SELECT
+            c.id,
+            c.fecha,
+            c.tipo_doc,
+            c.folio,
+            c.glosa,
+            c.lote_id,
+            c.cuenta_gasto,
+            c.iva,
+            c.monto_total,
+            p.rut,
+            COALESCE(NULLIF(p.razon_social,''),p.nombre) AS proveedor
+        FROM compras c
+        LEFT JOIN proveedores p ON p.id=c.proveedor_id
+        WHERE ABS(COALESCE(c.iva,0)) > 0.01
+          AND NOT EXISTS (
+              SELECT 1
+              FROM regularizacion_iva_compras r
+              WHERE r.compra_id=c.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM libro_diario ld
+              WHERE ld.lote_id=c.lote_id
+                AND ld.glosa=c.glosa
+                AND ld.codigo_cuenta=?
+                AND (ABS(COALESCE(ld.debe,0)) > 0.01 OR ABS(COALESCE(ld.haber,0)) > 0.01)
+          )
+        ORDER BY c.fecha,c.id
+    """, conn, params=[codigo_iva])
+
+
+def regularizar_iva_historico_compras(conn):
+    """
+    Crea asientos de reclasificación auditables para compras históricas que
+    quedaron sin IVA Crédito Fiscal.
+
+    Factura/ND:
+        Debe  IVA Crédito Fiscal
+        Haber cuenta de gasto/activo original
+    Nota de crédito:
+        Debe  cuenta de gasto/activo original
+        Haber IVA Crédito Fiscal
+
+    No toca Proveedores, Banco ni el asiento RCV original.
+    Es idempotente mediante regularizacion_iva_compras.
+    """
+    pendientes = compras_pendientes_regularizar_iva(conn)
+    if pendientes.empty:
+        return {"documentos": 0, "iva": 0.0, "lote": None}
+
+    plan = Plan(conn)
+    codigo_iva = ROLES["iva_credito"][1]
+    if codigo_iva not in plan.todos:
+        raise ValueError(f"No existe la cuenta {codigo_iva} - IVA Crédito Fiscal.")
+
+    asiento = siguiente_asiento(conn)
+    lote = "REG-IVA-RCV-C-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    total_iva = 0.0
+    documentos = 0
+
+    try:
+        for r in pendientes.itertuples():
+            monto = abs(float(r.iva or 0))
+            if monto <= 0.01:
+                continue
+
+            # cuenta_gasto en compras guarda el nombre. Recuperamos el código
+            # desde las líneas del asiento original, excluyendo Proveedores/IVA.
+            fila_cta = conn.execute("""
+                SELECT ld.codigo_cuenta
+                FROM libro_diario ld
+                WHERE ld.lote_id=?
+                  AND ld.glosa=?
+                  AND ld.codigo_cuenta NOT IN (?,?)
+                  AND (ABS(COALESCE(ld.debe,0)) > 0.01 OR ABS(COALESCE(ld.haber,0)) > 0.01)
+                ORDER BY CASE WHEN ABS(COALESCE(ld.debe,0))+ABS(COALESCE(ld.haber,0)) >= ? THEN 0 ELSE 1 END,
+                         ABS(COALESCE(ld.debe,0))+ABS(COALESCE(ld.haber,0)) DESC
+                LIMIT 1
+            """, (r.lote_id, r.glosa, ROLES["proveedores"][1], codigo_iva, monto)).fetchone()
+
+            if not fila_cta:
+                raise ValueError(
+                    f"No pude identificar la cuenta contrapartida de la compra "
+                    f"{r.folio} ({r.proveedor})."
+                )
+
+            codigo_contra = str(fila_cta[0])
+            if codigo_contra not in plan.todos:
+                raise ValueError(f"La cuenta {codigo_contra} no existe en el plan.")
+
+            asiento += 1
+            es_nc = int(r.tipo_doc or 0) in DOC_NOTA_CREDITO
+            glosa_reg = f"Regularización IVA Crédito Fiscal RCV compra N° {r.folio} - {r.proveedor}"
+
+            if es_nc:
+                lineas = [
+                    (codigo_contra, monto, 0.0),
+                    (codigo_iva, 0.0, monto),
+                ]
+            else:
+                lineas = [
+                    (codigo_iva, monto, 0.0),
+                    (codigo_contra, 0.0, monto),
+                ]
+
+            for codigo,debe,haber in lineas:
+                conn.execute("""
+                    INSERT INTO libro_diario
+                    (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,
+                     asiento_id,lote_id,origen)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    r.fecha, plan.todos[codigo], debe, haber, glosa_reg,
+                    "General / Ninguno", codigo, asiento, lote,
+                    "Regularización IVA RCV Compras"
+                ))
+
+            conn.execute("""
+                INSERT INTO regularizacion_iva_compras
+                (compra_id,asiento_regularizacion,fecha_regularizacion,monto_iva)
+                VALUES (?,?,?,?)
+            """, (
+                int(r.id), asiento,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), monto
+            ))
+
+            total_iva += (-monto if es_nc else monto)
+            documentos += 1
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {"documentos": documentos, "iva": total_iva, "lote": lote}
+
+
 # ============================================================
 # PAGOS
 # ============================================================
@@ -6088,7 +6252,7 @@ elif menu == "📥 RCV Compras":
 
     st.title("📥 Registro de Compras - SII")
 
-    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📥 Plantilla Descargable y Carga de Excel", "🔄 Reclasificar contabilizadas"])
+    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📥 Plantilla Descargable y Carga de Excel", "🔄 Reclasificar contabilizadas", "🧾 Regularizar IVA histórico"])
 
     with pestañas_compras[0]:
         archivo = st.file_uploader(
@@ -6333,6 +6497,48 @@ elif menu == "📥 RCV Compras":
                     st.session_state.pop("rcv_compras",None); st.session_state.pop("rcv_compras_archivo",None)
                 except Exception as e:
                     st.error(f"No se contabilizó el lote: {e}")
+
+
+    with pestañas_compras[3]:
+        st.subheader("🧾 Regularizar IVA Crédito Fiscal de compras ya contabilizadas")
+        st.caption(
+            "Detecta compras RCV históricas que fueron contabilizadas sin movimiento "
+            "en 1.1.03.02 IVA Crédito Fiscal. La corrección se hace mediante asientos "
+            "de reclasificación auditables; no modifica Proveedores, Banco ni los asientos originales."
+        )
+
+        pendientes_iva = compras_pendientes_regularizar_iva(conn)
+        if pendientes_iva.empty:
+            st.success("No hay compras históricas pendientes de regularizar en IVA Crédito Fiscal.")
+        else:
+            total_iva_pend = float(pendientes_iva["iva"].abs().sum())
+            civa1,civa2 = st.columns(2)
+            civa1.metric("Documentos a regularizar", f"{len(pendientes_iva):,}".replace(",","."))
+            civa2.metric("IVA identificado", money(total_iva_pend))
+            st.dataframe(
+                pendientes_iva[["fecha","tipo_doc","folio","rut","proveedor","iva","monto_total"]],
+                use_container_width=True,
+                hide_index=True
+            )
+            confirma_iva_hist = st.checkbox(
+                "Confirmo que deseo generar la regularización histórica del IVA Crédito Fiscal.",
+                key="conf_regularizar_iva_hist"
+            )
+            if st.button(
+                "🧾 Regularizar IVA Crédito Fiscal",
+                type="primary",
+                disabled=not confirma_iva_hist,
+                key="btn_regularizar_iva_hist"
+            ):
+                try:
+                    res_iva = regularizar_iva_historico_compras(conn)
+                    st.success(
+                        f"Regularización completada: {res_iva['documentos']} documento(s) · "
+                        f"IVA neto {money(res_iva['iva'])} · Lote {res_iva['lote']}."
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"No se pudo regularizar el IVA histórico: {e}")
 
     st.divider()
     st.subheader("Historial de archivos RCV Compras")
