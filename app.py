@@ -2536,12 +2536,14 @@ def cruzar_rcv_historico_compras(conn, df_rcv):
 
 def recuperar_datos_tributarios_rcv(conn, cruces):
     """
-    Actualiza únicamente la metadata tributaria de compras existentes.
-    No inserta compras, no genera asientos y no toca proveedores/pagos/banco.
+    Actualiza SOLO metadata tributaria de compras existentes y verifica
+    inmediatamente en SQLite que cada cambio quedó persistido.
+    No crea compras/asientos y no toca proveedores, pagos ni banco.
     """
     if cruces is None or cruces.empty:
-        return 0
+        return {"actualizados":0, "verificados":0, "iva":0.0, "errores":[]}
 
+    # Esquema primero, fuera de la transacción de datos.
     agregar_columna(conn,"compras","monto_exento","REAL DEFAULT 0")
     agregar_columna(conn,"compras","iva_no_rec","REAL DEFAULT 0")
     agregar_columna(conn,"compras","neto_af","REAL DEFAULT 0")
@@ -2549,33 +2551,82 @@ def recuperar_datos_tributarios_rcv(conn, cruces):
     agregar_columna(conn,"compras","iva_uso_comun","REAL DEFAULT 0")
     agregar_columna(conn,"compras","datos_tributarios_recuperados","INTEGER DEFAULT 0")
 
-    actualizados=0
+    preparados=[]
+    for r in cruces.itertuples():
+        tipo=int(r.tipo_doc or 0)
+        signo=-1.0 if tipo in DOC_NOTA_CREDITO else 1.0
+
+        neto=abs(float(r.neto_rcv or 0))*signo
+        exento=abs(float(r.exento_rcv or 0))*signo
+        neto_af=abs(float(r.neto_af_rcv or 0))*signo
+        iva_normal=abs(float(r.iva_rcv or 0))*signo
+        iva_af=abs(float(r.iva_af_rcv or 0))*signo
+        iva_rec=iva_normal + iva_af
+        iva_no_rec=abs(float(r.iva_no_rec_rcv or 0))*signo
+        iva_uso=abs(float(r.iva_uso_comun_rcv or 0))*signo
+        total=abs(float(r.total_rcv or 0))*signo
+
+        # monto_neto conserva exclusivamente la base neta afecta normal.
+        # Los demás componentes quedan en columnas separadas para auditoría.
+        preparados.append((
+            int(r.compra_id), neto, exento, iva_rec, iva_no_rec,
+            neto_af, iva_af, iva_uso, total
+        ))
+
     try:
-        for r in cruces.itertuples():
-            signo=-1.0 if int(r.tipo_doc) in DOC_NOTA_CREDITO else 1.0
-            base=(abs(float(r.neto_rcv))+abs(float(r.exento_rcv))+abs(float(r.neto_af_rcv)))*signo
-            iva_rec=(abs(float(r.iva_rcv))+abs(float(r.iva_af_rcv)))*signo
-            conn.execute("""
+        conn.execute("BEGIN")
+        for compra_id,neto,exento,iva_rec,iva_no_rec,neto_af,iva_af,iva_uso,total in preparados:
+            cur=conn.execute("""
                 UPDATE compras
-                SET monto_neto=?, iva=?, monto_total=?,
-                    monto_exento=?, iva_no_rec=?, neto_af=?, iva_af=?,
-                    iva_uso_comun=?, datos_tributarios_recuperados=1
-                WHERE id=?
-            """,(
-                base, iva_rec, abs(float(r.total_rcv))*signo,
-                abs(float(r.exento_rcv))*signo,
-                abs(float(r.iva_no_rec_rcv))*signo,
-                abs(float(r.neto_af_rcv))*signo,
-                abs(float(r.iva_af_rcv))*signo,
-                abs(float(r.iva_uso_comun_rcv))*signo,
-                int(r.compra_id)
-            ))
-            actualizados+=1
+                   SET monto_neto=?,
+                       iva=?,
+                       monto_total=?,
+                       monto_exento=?,
+                       iva_no_rec=?,
+                       neto_af=?,
+                       iva_af=?,
+                       iva_uso_comun=?,
+                       datos_tributarios_recuperados=1
+                 WHERE id=?
+            """,(neto,iva_rec,total,exento,iva_no_rec,neto_af,iva_af,iva_uso,compra_id))
+            if cur.rowcount != 1:
+                raise ValueError(f"No se actualizó la compra id {compra_id}.")
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return actualizados
+
+    # Verificación POST-COMMIT directamente contra SQLite.
+    verificados=0
+    errores=[]
+    iva_verificado=0.0
+    for compra_id,neto,exento,iva_rec,iva_no_rec,neto_af,iva_af,iva_uso,total in preparados:
+        fila=conn.execute("""
+            SELECT monto_neto,iva,monto_total,monto_exento,iva_no_rec,
+                   neto_af,iva_af,iva_uso_comun,datos_tributarios_recuperados
+              FROM compras WHERE id=?
+        """,(compra_id,)).fetchone()
+        if not fila:
+            errores.append(f"Compra id {compra_id}: no encontrada después del guardado.")
+            continue
+        ok=(
+            abs(float(fila[0] or 0)-neto)<0.01 and
+            abs(float(fila[1] or 0)-iva_rec)<0.01 and
+            abs(float(fila[2] or 0)-total)<0.01 and
+            int(fila[8] or 0)==1
+        )
+        if ok:
+            verificados+=1
+            iva_verificado+=abs(float(fila[1] or 0))
+        else:
+            errores.append(f"Compra id {compra_id}: los valores guardados no coinciden con el RCV.")
+
+    return {
+        "actualizados":len(preparados),
+        "verificados":verificados,
+        "iva":iva_verificado,
+        "errores":errores
+    }
 
 
 # ============================================================
@@ -2615,6 +2666,7 @@ def compras_pendientes_regularizar_iva(conn):
             c.cuenta_gasto, COALESCE(c.monto_neto,0) AS monto_neto,
             COALESCE(c.iva,0) AS iva_registrado,
             COALESCE(c.monto_total,0) AS monto_total,
+            COALESCE(c.datos_tributarios_recuperados,0) AS datos_tributarios_recuperados,
             p.rut,
             COALESCE(NULLIF(p.razon_social,''),p.nombre) AS proveedor
         FROM compras c
@@ -2654,7 +2706,10 @@ def compras_pendientes_regularizar_iva(conn):
 
         iva_calc = 0.0
         fuente = ""
-        if iva_guardado > 0.01:
+        if int(r.get("datos_tributarios_recuperados") or 0) == 1:
+            iva_calc = iva_guardado
+            fuente = "RCV original SII"
+        elif iva_guardado > 0.01:
             iva_calc = iva_guardado
             fuente = "RCV registrado"
         elif total > 0.01 and base > 0.01 and (total - base) > 0.01:
@@ -6680,9 +6735,27 @@ elif menu == "📥 RCV Compras":
                         key="conf_recuperar_rcv_hist"
                     )
                     if st.button("📚 Recuperar datos tributarios",type="primary",disabled=not conf_rec,key="btn_recuperar_rcv_hist"):
-                        n=recuperar_datos_tributarios_rcv(conn,cruces_hist)
-                        st.success(f"Datos tributarios recuperados para {n} documento(s). No se generaron asientos contables.")
-                        st.rerun()
+                        try:
+                            res=recuperar_datos_tributarios_rcv(conn,cruces_hist)
+                            if res["actualizados"] == res["verificados"] and not res["errores"]:
+                                st.success(
+                                    f"✅ {res['verificados']} documento(s) actualizados y verificados en SQLite. "
+                                    f"IVA recuperable guardado: {money(res['iva'])}. "
+                                    "No se generaron asientos contables."
+                                )
+                                st.info(
+                                    "Ahora puedes abrir «Regularizar IVA histórico». "
+                                    "Estos documentos deben aparecer con fuente «RCV original SII»."
+                                )
+                            else:
+                                st.error(
+                                    f"Se intentaron actualizar {res['actualizados']} documentos, pero solo "
+                                    f"{res['verificados']} pudieron verificarse. No continúes con la regularización."
+                                )
+                                if res["errores"]:
+                                    st.write(res["errores"][:20])
+                        except Exception as e:
+                            st.error(f"No se pudieron guardar/verificar los datos tributarios: {e}")
             except Exception as e:
                 st.error(f"No se pudo procesar el RCV histórico: {e}")
 
