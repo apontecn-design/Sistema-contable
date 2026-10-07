@@ -7017,6 +7017,9 @@ elif menu == "✍️ Asientos y Saldos":
     conn.commit()
 
     with st.expander("🧾 Compensación mensual IVA / F29", expanded=False):
+        def _f29_clp(valor):
+            return "$" + f"{clp_round(valor):,.0f}".replace(",", ".")
+
         st.caption(
             "Úsalo mes por mes para cerrar el IVA del período. SGCI debita IVA Débito Fiscal, "
             "abona IVA Crédito Fiscal utilizado y lleva la diferencia a IVA por pagar. "
@@ -7032,7 +7035,7 @@ elif menu == "✍️ Asientos y Saldos":
             credito_f29 = st.number_input("IVA Crédito Fiscal utilizado", min_value=0, step=1, value=0, key="f29_credito")
         iva_pagar_f29 = max(clp_round(debito_f29 - credito_f29),0)
         with c3:
-            st.metric("IVA por pagar determinado", moneda(iva_pagar_f29))
+            st.metric("IVA por pagar determinado", _f29_clp(iva_pagar_f29))
 
         existe_f29 = conn.execute(
             "SELECT id, asiento_id FROM compensaciones_iva_f29 WHERE periodo=?",
@@ -7045,8 +7048,8 @@ elif menu == "✍️ Asientos y Saldos":
             st.warning(f"El período {periodo_f29} ya fue compensado en el asiento {existe_f29[1]}. SGCI bloquea una segunda contabilización.")
         elif debito_f29 > 0:
             st.info(
-                f"Asiento que se generará: Debe IVA Débito Fiscal {moneda(debito_f29)} · "
-                f"Haber IVA Crédito Fiscal {moneda(credito_f29)} · Haber IVA por pagar {moneda(iva_pagar_f29)}."
+                f"Asiento que se generará: Debe IVA Débito Fiscal {_f29_clp(debito_f29)} · "
+                f"Haber IVA Crédito Fiscal {_f29_clp(credito_f29)} · Haber IVA por pagar {_f29_clp(iva_pagar_f29)}."
             )
 
         confirma_f29 = st.checkbox(
@@ -7091,7 +7094,7 @@ elif menu == "✍️ Asientos y Saldos":
                         VALUES (?,?,?,?,?,?)
                     """,(periodo_f29.strip(),fecha_iso_f29,float(debito_f29),float(credito_f29),float(iva_pagar_f29),asiento))
                     conn.commit()
-                    st.success(f"Compensación registrada. Asiento {asiento}. IVA por pagar: {moneda(iva_pagar_f29)}")
+                    st.success(f"Compensación registrada. Asiento {asiento}. IVA por pagar: {_f29_clp(iva_pagar_f29)}")
                     st.rerun()
                 except Exception as e:
                     conn.rollback()
