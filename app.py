@@ -954,6 +954,22 @@ def crear_esquema(conn):
                 tipo
             )
 
+    # Trazabilidad y protección contra archivos duplicados.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS importaciones_archivos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            modulo TEXT NOT NULL,
+            nombre_archivo TEXT NOT NULL,
+            archivo_hash TEXT NOT NULL,
+            lote_id TEXT,
+            fecha_hora TEXT NOT NULL,
+            registros_leidos INTEGER DEFAULT 0,
+            registros_nuevos INTEGER DEFAULT 0,
+            registros_duplicados INTEGER DEFAULT 0,
+            UNIQUE(modulo, archivo_hash)
+        )
+    """)
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_compras_proveedor
         ON compras(proveedor_id)
@@ -995,12 +1011,12 @@ def crear_esquema(conn):
     """)
 
     try:
+        conn.execute("DROP INDEX IF EXISTS ux_ventas_doc")
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS
             ux_ventas_doc
-            ON ventas(tipo_doc, folio)
-            WHERE tipo_doc IS NOT NULL
-            AND folio IS NOT NULL
+            ON ventas(cliente_id, tipo_doc, folio)
+            WHERE cliente_id IS NOT NULL AND tipo_doc IS NOT NULL AND folio IS NOT NULL
         """)
     except Exception:
         pass
@@ -1570,9 +1586,9 @@ def preparar_documentos(conn, docs, tipo):
 
         filas = conn.execute(
             """
-            SELECT tipo_doc, folio
-            FROM ventas
-            WHERE tipo_doc IS NOT NULL AND folio IS NOT NULL
+            SELECT cl.rut, v.tipo_doc, v.folio
+            FROM ventas v JOIN clientes cl ON cl.id=v.cliente_id
+            WHERE v.tipo_doc IS NOT NULL AND v.folio IS NOT NULL AND cl.rut IS NOT NULL
             """
         ).fetchall()
 
@@ -1580,6 +1596,7 @@ def preparar_documentos(conn, docs, tipo):
             try:
                 existentes.add(
                     (
+                        normalizar_rut(fila["rut"]),
                         int(fila["tipo_doc"]),
                         str(fila["folio"]).strip()
                     )
@@ -1603,12 +1620,8 @@ def preparar_documentos(conn, docs, tipo):
         tipo_doc = int(d.tipo_doc)
         folio = str(d.folio).strip()
 
-        clave = (
-            (rut, tipo_doc, folio)
-            if compras
-            else
-            (tipo_doc, folio)
-        )
+        # Clave lógica anti-duplicado: RUT + tipo de documento + folio.
+        clave = (rut, tipo_doc, folio)
 
         obs = []
 
@@ -3547,6 +3560,26 @@ def antiguedad_documentos(conn, tipo):
     return df[df["saldo"]>0.01]
 
 
+def hash_archivo(uploaded_file):
+    """Huella SHA-256 del archivo subido."""
+    return sha256(uploaded_file.getvalue()).hexdigest()
+
+def importacion_archivo_existente(conn, modulo, archivo_hash):
+    return conn.execute("SELECT * FROM importaciones_archivos WHERE modulo=? AND archivo_hash=? ORDER BY id DESC LIMIT 1", (modulo, archivo_hash)).fetchone()
+
+def registrar_importacion_archivo(conn, modulo, nombre_archivo, archivo_hash, lote_id=None, leidos=0, nuevos=0, duplicados=0):
+    conn.execute("""INSERT OR IGNORE INTO importaciones_archivos
+        (modulo,nombre_archivo,archivo_hash,lote_id,fecha_hora,registros_leidos,registros_nuevos,registros_duplicados)
+        VALUES(?,?,?,?,?,?,?,?)""",
+        (modulo,nombre_archivo,archivo_hash,lote_id,datetime.now().strftime("%Y-%m-%d %H:%M:%S"),int(leidos or 0),int(nuevos or 0),int(duplicados or 0)))
+    conn.commit()
+
+def historial_archivos(conn, modulo, limite=50):
+    return pd.read_sql_query("""SELECT nombre_archivo AS archivo, fecha_hora AS fecha_importacion, lote_id AS lote,
+        registros_leidos AS leidos, registros_nuevos AS nuevos, registros_duplicados AS duplicados
+        FROM importaciones_archivos WHERE modulo=? ORDER BY id DESC LIMIT ?""", conn, params=(modulo,int(limite)))
+
+
 def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
     """Importa movimientos tabulares evitando duplicados."""
     df = normalizar_columnas(df)
@@ -3606,6 +3639,7 @@ def historial_importaciones_cartola(conn, banco_id):
             MIN(fecha) AS desde,
             MAX(fecha) AS hasta,
             COALESCE(MAX(origen),'') AS origen,
+            COALESCE((SELECT ia.nombre_archivo FROM importaciones_archivos ia WHERE ia.modulo='CARTOLA' AND ia.lote_id=cartola_bancaria.lote_id ORDER BY ia.id DESC LIMIT 1),'') AS archivo,
             COUNT(*) AS movimientos,
             COALESCE(SUM(cargo),0) AS cargos,
             COALESCE(SUM(abono),0) AS abonos,
@@ -5474,16 +5508,22 @@ elif menu == "🏦 Bancos y Cartolas":
 
             if archivo:
                 try:
-                    if archivo.name.lower().endswith(".pdf"):
-                        dfc = leer_cartola_pdf(archivo, password_pdf)
+                    archivo_hash = hash_archivo(archivo)
+                    previa = importacion_archivo_existente(conn, "CARTOLA", archivo_hash)
+                    if previa:
+                        st.error(f"⚠️ Este mismo archivo ya fue importado el {previa['fecha_hora']}. Archivo: {previa['nombre_archivo']} · Lote: {previa['lote_id'] or 'sin lote'}. SGCI bloqueó la recarga.")
                     else:
-                        dfc = leer_archivo_tabular(archivo)
-                    st.write("Vista previa")
-                    st.dataframe(dfc.head(50), use_container_width=True, hide_index=True)
-                    if st.button("Importar cartola", type="primary"):
-                        nuevos,repetidos,lote = importar_cartola(conn, dfc, banco_id, origen="PDF" if archivo.name.lower().endswith(".pdf") else "ARCHIVO")
-                        st.success(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
-                        st.rerun()
+                        if archivo.name.lower().endswith(".pdf"):
+                            dfc = leer_cartola_pdf(archivo, password_pdf)
+                        else:
+                            dfc = leer_archivo_tabular(archivo)
+                        st.write("Vista previa")
+                        st.dataframe(dfc.head(50), use_container_width=True, hide_index=True)
+                        if st.button("Importar cartola", type="primary"):
+                            nuevos,repetidos,lote = importar_cartola(conn, dfc, banco_id, origen="PDF" if archivo.name.lower().endswith(".pdf") else "ARCHIVO")
+                            registrar_importacion_archivo(conn,"CARTOLA",archivo.name,archivo_hash,lote,len(dfc),nuevos,repetidos)
+                            st.success(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
+                            st.rerun()
                 except Exception as e:
                     st.error(str(e))
 
@@ -5498,7 +5538,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 st.info("Esta cuenta todavía no tiene importaciones de cartola registradas.")
             else:
                 vista_hist = hist_cart.rename(columns={
-                    "lote":"Lote","desde":"Desde","hasta":"Hasta","origen":"Origen",
+                    "lote":"Lote","desde":"Desde","hasta":"Hasta","origen":"Origen","archivo":"Archivo",
                     "movimientos":"Movimientos","cargos":"Cargos","abonos":"Abonos","conciliados":"Conciliados"
                 })
                 st.dataframe(formatear_montos_df(vista_hist),use_container_width=True,hide_index=True)
@@ -5944,13 +5984,18 @@ elif menu == "📥 RCV Compras":
 
         if archivo:
             try:
-                df_original = leer_archivo_tabular(archivo)
-                st.success(f"Archivo leído: {len(df_original):,} filas")
-
-                df = normalizar_rcv(df_original, "compras")
-                df = preparar_documentos(conn, df, "compras")
-
-                st.session_state["rcv_compras"] = df
+                archivo_hash = hash_archivo(archivo)
+                previa = importacion_archivo_existente(conn,"RCV_COMPRAS",archivo_hash)
+                if previa:
+                    st.error(f"⚠️ Este mismo RCV de Compras ya fue procesado el {previa['fecha_hora']} ({previa['nombre_archivo']}). SGCI bloqueó la recarga.")
+                    st.session_state.pop("rcv_compras",None); st.session_state.pop("rcv_compras_archivo",None)
+                else:
+                    df_original = leer_archivo_tabular(archivo)
+                    st.success(f"Archivo leído: {len(df_original):,} filas")
+                    df = normalizar_rcv(df_original,"compras")
+                    df = preparar_documentos(conn,df,"compras")
+                    st.session_state["rcv_compras"] = df
+                    st.session_state["rcv_compras_archivo"]={"nombre":archivo.name,"hash":archivo_hash,"leidos":len(df_original)}
             except Exception as e:
                 st.error(f"Error: {e}")
 
@@ -6006,9 +6051,16 @@ elif menu == "📥 RCV Compras":
                 df_prep["ref_type"] = None
                 df_prep["ref_folio"] = ""
 
-                df_procesado = preparar_documentos(conn, df_prep, "compras")
-                st.session_state["rcv_compras"] = df_procesado
-                st.success("¡Plantilla adjuntada y procesada con éxito! Revisa la bandeja de revisión abajo.")
+                archivo_hash = hash_archivo(archivo_subido)
+                previa = importacion_archivo_existente(conn,"RCV_COMPRAS",archivo_hash)
+                if previa:
+                    st.error(f"⚠️ Esta misma plantilla ya fue procesada el {previa['fecha_hora']}. SGCI bloqueó la recarga.")
+                    st.session_state.pop("rcv_compras",None); st.session_state.pop("rcv_compras_archivo",None)
+                else:
+                    df_procesado = preparar_documentos(conn,df_prep,"compras")
+                    st.session_state["rcv_compras"] = df_procesado
+                    st.session_state["rcv_compras_archivo"]={"nombre":archivo_subido.name,"hash":archivo_hash,"leidos":len(df_subido)}
+                    st.success("¡Plantilla adjuntada y procesada con éxito! Revisa la bandeja de revisión abajo.")
             except Exception as e:
                 st.error(f"Error procesando la plantilla adjunta: {e}")
 
@@ -6157,11 +6209,23 @@ elif menu == "📥 RCV Compras":
 
             if st.button("✅ CONTABILIZAR COMPRAS", type="primary"):
                 try:
-                    resultado = contabilizar_rcv(conn, "compras", validos)
-                    st.success(f"Se contabilizaron {resultado['documentos']} documentos.")
-                    del st.session_state["rcv_compras"]
+                    resultado = contabilizar_rcv(conn,"compras",validos)
+                    meta=st.session_state.get("rcv_compras_archivo")
+                    if meta:
+                        duplicados=int(df["estado"].astype(str).str.startswith("🔁").sum())
+                        registrar_importacion_archivo(conn,"RCV_COMPRAS",meta["nombre"],meta["hash"],resultado.get("lote"),meta["leidos"],resultado["documentos"],duplicados)
+                    st.success(f"Se contabilizaron {resultado['documentos']} documentos. Los documentos ya existentes fueron omitidos.")
+                    st.session_state.pop("rcv_compras",None); st.session_state.pop("rcv_compras_archivo",None)
                 except Exception as e:
                     st.error(f"No se contabilizó el lote: {e}")
+
+    st.divider()
+    st.subheader("Historial de archivos RCV Compras")
+    hist_rcv_c=historial_archivos(conn,"RCV_COMPRAS")
+    if hist_rcv_c.empty:
+        st.caption("Aún no hay archivos registrados con el nuevo control de duplicados.")
+    else:
+        st.dataframe(hist_rcv_c.rename(columns={"archivo":"Archivo","fecha_importacion":"Fecha importación","lote":"Lote","leidos":"Leídos","nuevos":"Nuevos","duplicados":"Duplicados"}),use_container_width=True,hide_index=True)
 
 
 # ============================================================
@@ -6180,12 +6244,18 @@ elif menu == "📤 RCV Ventas":
 
     if archivo:
         try:
-            df_original = leer_archivo_tabular(archivo)
-            df = normalizar_rcv(df_original, "ventas")
-            df = preparar_documentos(conn, df, "ventas")
-
-            st.session_state["rcv_ventas"] = df
-            st.success(f"{len(df):,} documentos encontrados.")
+            archivo_hash=hash_archivo(archivo)
+            previa=importacion_archivo_existente(conn,"RCV_VENTAS",archivo_hash)
+            if previa:
+                st.error(f"⚠️ Este mismo RCV de Ventas ya fue procesado el {previa['fecha_hora']} ({previa['nombre_archivo']}). SGCI bloqueó la recarga.")
+                st.session_state.pop("rcv_ventas",None); st.session_state.pop("rcv_ventas_archivo",None)
+            else:
+                df_original=leer_archivo_tabular(archivo)
+                df=normalizar_rcv(df_original,"ventas")
+                df=preparar_documentos(conn,df,"ventas")
+                st.session_state["rcv_ventas"]=df
+                st.session_state["rcv_ventas_archivo"]={"nombre":archivo.name,"hash":archivo_hash,"leidos":len(df_original)}
+                st.success(f"{len(df):,} documentos encontrados.")
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -6273,11 +6343,23 @@ elif menu == "📤 RCV Ventas":
         if not validos.empty:
             if st.button("✅ CONTABILIZAR VENTAS", type="primary"):
                 try:
-                    resultado = contabilizar_rcv(conn, "ventas", validos)
-                    st.success(f"Se contabilizaron {resultado['documentos']} documentos.")
-                    del st.session_state["rcv_ventas"]
+                    resultado=contabilizar_rcv(conn,"ventas",validos)
+                    meta=st.session_state.get("rcv_ventas_archivo")
+                    if meta:
+                        duplicados=int(df["estado"].astype(str).str.startswith("🔁").sum())
+                        registrar_importacion_archivo(conn,"RCV_VENTAS",meta["nombre"],meta["hash"],resultado.get("lote"),meta["leidos"],resultado["documentos"],duplicados)
+                    st.success(f"Se contabilizaron {resultado['documentos']} documentos. Los documentos ya existentes fueron omitidos.")
+                    st.session_state.pop("rcv_ventas",None); st.session_state.pop("rcv_ventas_archivo",None)
                 except Exception as e:
                     st.error(f"No se contabilizó el lote: {e}")
+
+    st.divider()
+    st.subheader("Historial de archivos RCV Ventas")
+    hist_rcv_v=historial_archivos(conn,"RCV_VENTAS")
+    if hist_rcv_v.empty:
+        st.caption("Aún no hay archivos registrados con el nuevo control de duplicados.")
+    else:
+        st.dataframe(hist_rcv_v.rename(columns={"archivo":"Archivo","fecha_importacion":"Fecha importación","lote":"Lote","leidos":"Leídos","nuevos":"Nuevos","duplicados":"Duplicados"}),use_container_width=True,hide_index=True)
 
 
 # ============================================================
