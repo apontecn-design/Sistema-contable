@@ -5924,13 +5924,19 @@ elif menu == "🏦 Bancos y Cartolas":
                     st.divider()
                     st.subheader("🧩 Distribuir movimiento entre varias cuentas")
                     st.caption("Úsala cuando un solo cargo o abono bancario corresponde a conceptos distintos. SGCI generará un único asiento y exigirá que la suma distribuida sea exactamente igual al movimiento bancario.")
+                    # La lista de cuentas debe existir también cuando "Una cuenta" no está seleccionada.
+                    cuentas_multi = cuentas_imputables(conn)
+                    mapa_multi = dict(zip(cuentas_multi["etiqueta"], cuentas_multi["codigo"])) if not cuentas_multi.empty else {}
+                    if not mapa_multi:
+                        st.info("No hay cuentas imputables disponibles en el plan de cuentas.")
+                        st.stop()
                     n_dist = st.number_input("Cantidad de cuentas a distribuir", min_value=2, max_value=10, value=2, step=1, key=f"multi_n_{movimiento_id}")
                     distribuciones_ui = []
                     for j in range(int(n_dist)):
                         cta_col, monto_col = st.columns([3,1])
-                        etiqueta = cta_col.selectbox(f"Cuenta {j+1}", list(mapa_manual.keys()), key=f"multi_cta_{movimiento_id}_{j}")
+                        etiqueta = cta_col.selectbox(f"Cuenta {j+1}", list(mapa_multi.keys()), key=f"multi_cta_{movimiento_id}_{j}")
                         importe = monto_col.number_input(f"Monto {j+1}", min_value=0, step=1000, format="%d", key=f"multi_monto_{movimiento_id}_{j}")
-                        distribuciones_ui.append((mapa_manual[etiqueta], int(importe)))
+                        distribuciones_ui.append((mapa_multi[etiqueta], int(importe)))
                     total_dist = sum(x[1] for x in distribuciones_ui)
                     diferencia_dist = clp_round(monto_sel - total_dist)
                     m1,m2,m3 = st.columns(3)
