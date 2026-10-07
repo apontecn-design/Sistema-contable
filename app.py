@@ -5706,7 +5706,11 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.error(f"No se pudo conciliar: {e}")
 
                 mov_sel = pendientes.loc[pendientes["id"] == movimiento_id].iloc[0]
-                if float(mov_sel["cargo"] or 0) > 0:
+                es_cargo = float(mov_sel["cargo"] or 0) > 0
+                es_abono = float(mov_sel["abono"] or 0) > 0
+                metodos = (["👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente"] if es_abono else []) + ["✏️ Una cuenta", "🧩 Varias cuentas"]
+                metodo_conc = st.radio("¿Cómo quieres conciliar este movimiento?", metodos, horizontal=True, key=f"metodo_conc_{movimiento_id}")
+                if es_cargo and metodo_conc == "👤 Nómina":
                     st.divider()
                     st.subheader("👤 Nómina / trabajador")
                     st.caption("Úsalo para conciliar anticipos quincenales pagados por cheque o transferencia. SGCI carga Anticipos de remuneraciones, acredita Banco y vincula el pago al trabajador y período.")
@@ -5744,6 +5748,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             except Exception as e:
                                 st.error(f"No se pudo registrar el anticipo: {e}")
 
+                if es_cargo and metodo_conc == "🏢 Proveedor":
                     st.divider()
                     st.subheader("🏢 Pago a proveedor")
                     st.caption("Úsalo cuando el cargo bancario paga una factura ya contabilizada en RCV. SGCI rebaja Proveedores, acredita Banco y actualiza el auxiliar del proveedor y sus documentos.")
@@ -5824,7 +5829,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                 except Exception as e:
                                     st.error(f"No se pudo contabilizar el pago: {e}")
 
-                if float(mov_sel["abono"] or 0) > 0:
+                if es_abono and metodo_conc == "👥 Cliente":
                     st.divider()
                     st.subheader("👥 Cobro / anticipo de cliente")
                     st.caption("Aplica el abono a facturas pendientes o regístralo como anticipo/saldo a favor del cliente. Si el abono supera las facturas elegidas, puedes enviar el sobrante a Anticipos de clientes u otra cuenta.")
@@ -5889,31 +5894,33 @@ elif menu == "🏦 Bancos y Cartolas":
                                     st.rerun()
                                 except Exception as e: st.error(f"No se pudo registrar el anticipo: {e}")
 
-                st.divider()
-                st.subheader("Imputación manual del movimiento")
-                st.caption("Úsala cuando no exista una coincidencia adecuada. Al confirmar, SGCI genera el asiento y marca el movimiento como conciliado. Si el gasto ya fue provisionado, selecciona la cuenta por pagar correspondiente; no vuelvas a seleccionar la cuenta de gasto.")
-                cuentas_manual = cuentas_imputables(conn)
-                if cuentas_manual.empty:
-                    st.info("No hay cuentas imputables disponibles en el plan de cuentas.")
-                else:
-                    mapa_manual = dict(zip(cuentas_manual.etiqueta, cuentas_manual.codigo))
-                    cuenta_manual = st.selectbox("Cuenta contable de contrapartida", list(mapa_manual.keys()), key=f"imputacion_cuenta_{movimiento_id}")
-                    mov_sel = pendientes.loc[pendientes["id"] == movimiento_id].iloc[0]
-                    glosa_base = limpiar_texto(mov_sel["descripcion"])
-                    glosa_manual = st.text_input("Glosa del asiento", value=glosa_base, key=f"imputacion_glosa_{movimiento_id}")
-                    monto_sel = float(mov_sel["cargo"] or 0) if float(mov_sel["cargo"] or 0) > 0 else float(mov_sel["abono"] or 0)
-                    naturaleza_sel = "Cargo / salida" if float(mov_sel["cargo"] or 0) > 0 else "Abono / entrada"
-                    st.info(f"Movimiento: {naturaleza_sel} por {money(monto_sel)}. SGCI usará automáticamente la cuenta bancaria como la otra línea del asiento.")
-                    confirmar_manual = st.checkbox("Confirmo que revisé la cuenta contable y deseo contabilizar y conciliar este movimiento.", key=f"imputacion_confirma_{movimiento_id}")
-                    if st.button("🧾 Contabilizar e imputar manualmente", type="primary", disabled=not confirmar_manual, key=f"imputacion_btn_{movimiento_id}"):
-                        try:
-                            asiento = contabilizar_imputacion_manual_bancaria(conn,movimiento_id,mapa_manual[cuenta_manual],glosa_manual)
-                            st.success(f"Movimiento imputado, conciliado y contabilizado en el asiento {asiento}.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"No se pudo imputar el movimiento: {e}")
+                if metodo_conc == "✏️ Una cuenta":
+                    st.divider()
+                    st.subheader("Imputación manual del movimiento")
+                    st.caption("Úsala cuando no exista una coincidencia adecuada. Al confirmar, SGCI genera el asiento y marca el movimiento como conciliado. Si el gasto ya fue provisionado, selecciona la cuenta por pagar correspondiente; no vuelvas a seleccionar la cuenta de gasto.")
+                    cuentas_manual = cuentas_imputables(conn)
+                    if cuentas_manual.empty:
+                        st.info("No hay cuentas imputables disponibles en el plan de cuentas.")
+                    else:
+                        mapa_manual = dict(zip(cuentas_manual.etiqueta, cuentas_manual.codigo))
+                        cuenta_manual = st.selectbox("Cuenta contable de contrapartida", list(mapa_manual.keys()), key=f"imputacion_cuenta_{movimiento_id}")
+                        mov_sel = pendientes.loc[pendientes["id"] == movimiento_id].iloc[0]
+                        glosa_base = limpiar_texto(mov_sel["descripcion"])
+                        glosa_manual = st.text_input("Glosa del asiento", value=glosa_base, key=f"imputacion_glosa_{movimiento_id}")
+                        monto_sel = float(mov_sel["cargo"] or 0) if float(mov_sel["cargo"] or 0) > 0 else float(mov_sel["abono"] or 0)
+                        naturaleza_sel = "Cargo / salida" if float(mov_sel["cargo"] or 0) > 0 else "Abono / entrada"
+                        st.info(f"Movimiento: {naturaleza_sel} por {money(monto_sel)}. SGCI usará automáticamente la cuenta bancaria como la otra línea del asiento.")
+                        confirmar_manual = st.checkbox("Confirmo que revisé la cuenta contable y deseo contabilizar y conciliar este movimiento.", key=f"imputacion_confirma_{movimiento_id}")
+                        if st.button("🧾 Contabilizar e imputar manualmente", type="primary", disabled=not confirmar_manual, key=f"imputacion_btn_{movimiento_id}"):
+                            try:
+                                asiento = contabilizar_imputacion_manual_bancaria(conn,movimiento_id,mapa_manual[cuenta_manual],glosa_manual)
+                                st.success(f"Movimiento imputado, conciliado y contabilizado en el asiento {asiento}.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"No se pudo imputar el movimiento: {e}")
 
 
+                if metodo_conc == "🧩 Varias cuentas":
                     st.divider()
                     st.subheader("🧩 Distribuir movimiento entre varias cuentas")
                     st.caption("Úsala cuando un solo cargo o abono bancario corresponde a conceptos distintos. SGCI generará un único asiento y exigirá que la suma distribuida sea exactamente igual al movimiento bancario.")
