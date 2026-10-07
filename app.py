@@ -1078,6 +1078,27 @@ PLAN_BASE = [
     ("5.2.02", "IVA No Recuperable", "Nominal", "Gastos", "5.2", 3),
     ("5.2.03", "IVA Uso Común", "Nominal", "Gastos", "5.2", 3),
     ("6", "RESULTADOS", "Nominal", "Gastos", None, 1),
+    ("1.1.09", "Cuentas por cobrar relacionadas", "Activo", "Activo", "1.1", 3),
+    ("1.1.09.01", "Cuentas por cobrar partes relacionadas nacionales", "Activo", "Activo", "1.1.09", 4),
+    ("1.1.09.02", "Cuentas por cobrar partes relacionadas extranjeras", "Activo", "Activo", "1.1.09", 4),
+    ("1.2.01.02", "Terrenos", "Activo", "Activo", "1.2.01", 4),
+    ("1.2.01.03", "Construcciones y bodegas", "Activo", "Activo", "1.2.01", 4),
+    ("1.2.01.04", "Vehículos", "Activo", "Activo", "1.2.01", 4),
+    ("1.2.01.05", "Equipos y otros activos fijos", "Activo", "Activo", "1.2.01", 4),
+    ("1.2.02", "Depreciación acumulada", "Activo", "Activo", "1.2", 3),
+    ("1.2.02.01", "Depreciación acumulada construcciones", "Activo", "Activo", "1.2.02", 4),
+    ("1.2.02.02", "Depreciación acumulada vehículos", "Activo", "Activo", "1.2.02", 4),
+    ("1.2.02.03", "Depreciación acumulada equipos", "Activo", "Activo", "1.2.02", 4),
+    ("2.1.04", "Cuentas por pagar relacionadas", "Pasivo", "Pasivo", "2.1", 3),
+    ("2.1.04.01", "Cuentas por pagar partes relacionadas nacionales", "Pasivo", "Pasivo", "2.1.04", 4),
+    ("2.1.04.02", "Cuentas por pagar partes relacionadas extranjeras", "Pasivo", "Pasivo", "2.1.04", 4),
+    ("3.2", "Resultados acumulados", "Patrimonio", "Patrimonio", "3", 2),
+    ("3.2.01", "Resultados acumulados", "Patrimonio", "Patrimonio", "3.2", 3),
+    ("3.3", "Resultado del ejercicio", "Patrimonio", "Patrimonio", "3", 2),
+    ("3.3.01", "Resultado del ejercicio", "Patrimonio", "Patrimonio", "3.3", 3),
+    ("5.2.01.14", "Comisiones y gastos bancarios", "Nominal", "Gastos", "5.2.01", 4),
+    ("5.2.01.15", "Patentes y permisos", "Nominal", "Gastos", "5.2.01", 4),
+    ("5.2.01.16", "Depreciaciones", "Nominal", "Gastos", "5.2.01", 4),
     ("6.1", "Gastos Administrativos", "Nominal", "Gastos", "6", 2),
 ]
 
@@ -1090,6 +1111,24 @@ def instalar_plan_base(conn):
             VALUES (?, ?, ?, ?, ?, ?)
         """, fila)
 
+    conn.commit()
+
+
+def reorganizar_plan_2026_seguro(conn):
+    """Amplía/ordena el plan sin borrar ni renumerar cuentas con historia."""
+    # Asegura todas las cuentas nuevas del PLAN_BASE.
+    instalar_plan_base(conn)
+    # Correcciones descriptivas seguras: conservan código y, por tanto, todos los saldos/movimientos.
+    cambios = [
+        ("1.2.01.01", "Activo fijo - cuenta histórica"),
+        ("5.2.03", "Gastos de personal"),
+        ("5.2.03.01", "Sueldos y remuneraciones"),
+        ("5.2.03.02", "Gratificaciones"),
+        ("5.2.03.03", "Asignaciones no imponibles"),
+        ("5.2.03.04", "Otros gastos de personal"),
+    ]
+    for codigo, nombre in cambios:
+        conn.execute("UPDATE plan_cuentas SET nombre=? WHERE codigo=?", (nombre, codigo))
     conn.commit()
 
 
@@ -5476,7 +5515,7 @@ def nomina_contabilizar_periodo(conn, periodo):
 conn = conectar()
 
 crear_esquema(conn)
-instalar_plan_base(conn)
+reorganizar_plan_2026_seguro(conn)
 instalar_cuentas_nomina(conn)
 
 roles_actuales = cargar_roles(conn)
