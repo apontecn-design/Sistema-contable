@@ -2480,13 +2480,16 @@ def contabilizar_rcv(
 # RECUPERACIÓN DE DATOS TRIBUTARIOS DESDE RCV HISTÓRICO
 # ============================================================
 
-def cruzar_rcv_historico_compras(conn, df_rcv):
+def cruzar_rcv_historico_compras(conn, df_rcv, devolver_no_encontrados=False):
     """
     Cruza un RCV original del SII contra compras existentes por
     RUT proveedor + tipo documento + folio. No crea documentos ni asientos.
+    Si devolver_no_encontrados=True, devuelve también los documentos del RCV
+    que no existen en SGCI.
     """
     if df_rcv is None or df_rcv.empty:
-        return pd.DataFrame()
+        vacio=pd.DataFrame()
+        return (vacio,vacio) if devolver_no_encontrados else vacio
 
     existentes = pd.read_sql_query("""
         SELECT c.id AS compra_id, c.tipo_doc, CAST(c.folio AS TEXT) AS folio,
@@ -2509,10 +2512,22 @@ def cruzar_rcv_historico_compras(conn, df_rcv):
         mapa[llave(r["rut"],r["tipo_doc"],r["folio"])]=r
 
     filas=[]
+    faltantes=[]
     for r in df_rcv.to_dict("records"):
         k=llave(r.get("rut"),r.get("tipo_doc"),r.get("folio"))
         e=mapa.get(k)
         if not e:
+            faltantes.append({
+                "rut":k[0],
+                "tipo_doc":k[1],
+                "folio":k[2],
+                "proveedor":r.get("proveedor") or r.get("razon_social") or "",
+                "neto_rcv":float(r.get("neto") or 0),
+                "exento_rcv":float(r.get("exento") or 0),
+                "iva_rcv":float(r.get("iva") or 0),
+                "iva_no_rec_rcv":float(r.get("iva_no_rec") or 0),
+                "total_rcv":float(r.get("total") or 0),
+            })
             continue
         filas.append({
             "compra_id":int(e["compra_id"]),
@@ -2531,7 +2546,10 @@ def cruzar_rcv_historico_compras(conn, df_rcv):
             "iva_actual":float(e["iva_actual"] or 0),
             "total_actual":float(e["total_actual"] or 0),
         })
-    return pd.DataFrame(filas)
+
+    encontrados=pd.DataFrame(filas)
+    no_encontrados=pd.DataFrame(faltantes)
+    return (encontrados,no_encontrados) if devolver_no_encontrados else encontrados
 
 
 def recuperar_datos_tributarios_rcv(conn, cruces):
@@ -6712,13 +6730,25 @@ elif menu == "📥 RCV Compras":
             try:
                 df_hist_original = leer_archivo_tabular(archivo_hist)
                 df_hist_norm = normalizar_rcv(df_hist_original,"compras")
-                cruces_hist = cruzar_rcv_historico_compras(conn,df_hist_norm)
+                cruces_hist, faltantes_hist = cruzar_rcv_historico_compras(conn,df_hist_norm,devolver_no_encontrados=True)
                 total_archivo=len(df_hist_norm)
                 encontrados=len(cruces_hist)
                 c1,c2,c3=st.columns(3)
                 c1.metric("Documentos en RCV",f"{total_archivo:,}".replace(",","."))
                 c2.metric("Coincidencias SGCI",f"{encontrados:,}".replace(",","."))
-                c3.metric("Sin coincidencia",f"{max(total_archivo-encontrados,0):,}".replace(",","."))
+                c3.metric("Sin coincidencia",f"{len(faltantes_hist):,}".replace(",","."))
+                if not faltantes_hist.empty:
+                    st.warning(
+                        f"⚠️ {len(faltantes_hist)} documento(s) del RCV no fueron encontrados en SGCI. "
+                        "Estos documentos NO serán modificados ni recuperados automáticamente."
+                    )
+                    st.markdown("#### ⚠️ Documentos del RCV no encontrados en SGCI")
+                    columnas_faltantes=["rut","tipo_doc","folio","proveedor","neto_rcv","exento_rcv","iva_rcv","iva_no_rec_rcv","total_rcv"]
+                    st.dataframe(
+                        faltantes_hist[[c for c in columnas_faltantes if c in faltantes_hist.columns]],
+                        use_container_width=True,
+                        hide_index=True
+                    )
                 if cruces_hist.empty:
                     st.warning("No encontré documentos coincidentes. Revisa que sea el RCV de la misma empresa/período.")
                 else:
