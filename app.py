@@ -2477,6 +2477,108 @@ def contabilizar_rcv(
 
 
 # ============================================================
+# RECUPERACIÓN DE DATOS TRIBUTARIOS DESDE RCV HISTÓRICO
+# ============================================================
+
+def cruzar_rcv_historico_compras(conn, df_rcv):
+    """
+    Cruza un RCV original del SII contra compras existentes por
+    RUT proveedor + tipo documento + folio. No crea documentos ni asientos.
+    """
+    if df_rcv is None or df_rcv.empty:
+        return pd.DataFrame()
+
+    existentes = pd.read_sql_query("""
+        SELECT c.id AS compra_id, c.tipo_doc, CAST(c.folio AS TEXT) AS folio,
+               c.monto_neto AS neto_actual, c.iva AS iva_actual,
+               c.monto_total AS total_actual,
+               p.rut, COALESCE(NULLIF(p.razon_social,''),p.nombre) AS proveedor
+        FROM compras c
+        JOIN proveedores p ON p.id=c.proveedor_id
+    """, conn)
+
+    def llave(rut,tipo,folio):
+        return (
+            normalizar_rut(rut),
+            int(float(tipo or 0)),
+            str(folio or "").strip().replace(".0","")
+        )
+
+    mapa={}
+    for r in existentes.to_dict("records"):
+        mapa[llave(r["rut"],r["tipo_doc"],r["folio"])]=r
+
+    filas=[]
+    for r in df_rcv.to_dict("records"):
+        k=llave(r.get("rut"),r.get("tipo_doc"),r.get("folio"))
+        e=mapa.get(k)
+        if not e:
+            continue
+        filas.append({
+            "compra_id":int(e["compra_id"]),
+            "rut":k[0],
+            "tipo_doc":k[1],
+            "folio":k[2],
+            "proveedor":e["proveedor"],
+            "neto_rcv":float(r.get("neto") or 0),
+            "exento_rcv":float(r.get("exento") or 0),
+            "iva_rcv":float(r.get("iva") or 0),
+            "iva_no_rec_rcv":float(r.get("iva_no_rec") or 0),
+            "neto_af_rcv":float(r.get("neto_af") or 0),
+            "iva_af_rcv":float(r.get("iva_af") or 0),
+            "iva_uso_comun_rcv":float(r.get("iva_uso_comun") or 0),
+            "total_rcv":float(r.get("total") or 0),
+            "iva_actual":float(e["iva_actual"] or 0),
+            "total_actual":float(e["total_actual"] or 0),
+        })
+    return pd.DataFrame(filas)
+
+
+def recuperar_datos_tributarios_rcv(conn, cruces):
+    """
+    Actualiza únicamente la metadata tributaria de compras existentes.
+    No inserta compras, no genera asientos y no toca proveedores/pagos/banco.
+    """
+    if cruces is None or cruces.empty:
+        return 0
+
+    agregar_columna(conn,"compras","monto_exento","REAL DEFAULT 0")
+    agregar_columna(conn,"compras","iva_no_rec","REAL DEFAULT 0")
+    agregar_columna(conn,"compras","neto_af","REAL DEFAULT 0")
+    agregar_columna(conn,"compras","iva_af","REAL DEFAULT 0")
+    agregar_columna(conn,"compras","iva_uso_comun","REAL DEFAULT 0")
+    agregar_columna(conn,"compras","datos_tributarios_recuperados","INTEGER DEFAULT 0")
+
+    actualizados=0
+    try:
+        for r in cruces.itertuples():
+            signo=-1.0 if int(r.tipo_doc) in DOC_NOTA_CREDITO else 1.0
+            base=(abs(float(r.neto_rcv))+abs(float(r.exento_rcv))+abs(float(r.neto_af_rcv)))*signo
+            iva_rec=(abs(float(r.iva_rcv))+abs(float(r.iva_af_rcv)))*signo
+            conn.execute("""
+                UPDATE compras
+                SET monto_neto=?, iva=?, monto_total=?,
+                    monto_exento=?, iva_no_rec=?, neto_af=?, iva_af=?,
+                    iva_uso_comun=?, datos_tributarios_recuperados=1
+                WHERE id=?
+            """,(
+                base, iva_rec, abs(float(r.total_rcv))*signo,
+                abs(float(r.exento_rcv))*signo,
+                abs(float(r.iva_no_rec_rcv))*signo,
+                abs(float(r.neto_af_rcv))*signo,
+                abs(float(r.iva_af_rcv))*signo,
+                abs(float(r.iva_uso_comun_rcv))*signo,
+                int(r.compra_id)
+            ))
+            actualizados+=1
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return actualizados
+
+
+# ============================================================
 # REGULARIZACIÓN HISTÓRICA IVA CRÉDITO - RCV COMPRAS
 # ============================================================
 
@@ -6295,7 +6397,7 @@ elif menu == "📥 RCV Compras":
 
     st.title("📥 Registro de Compras - SII")
 
-    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📥 Plantilla Descargable y Carga de Excel", "🔄 Reclasificar contabilizadas", "🧾 Regularizar IVA histórico"])
+    pestañas_compras = st.tabs(["📂 Cargar Archivo CSV", "📥 Plantilla Descargable y Carga de Excel", "🔄 Reclasificar contabilizadas", "📚 Recuperar RCV histórico", "🧾 Regularizar IVA histórico"])
 
     with pestañas_compras[0]:
         archivo = st.file_uploader(
@@ -6543,6 +6645,48 @@ elif menu == "📥 RCV Compras":
 
 
     with pestañas_compras[3]:
+        st.subheader("📚 Recuperar datos tributarios desde RCV histórico")
+        st.caption(
+            "Sube aquí un RCV Compras ORIGINAL del SII ya contabilizado. "
+            "SGCI lo cruza por RUT + tipo de documento + folio y recupera neto, "
+            "exento, IVA recuperable, IVA no recuperable y activo fijo. "
+            "Esta operación NO crea compras ni asientos y NO toca Proveedores, Banco o pagos."
+        )
+        archivo_hist = st.file_uploader(
+            "RCV Compras histórico original (CSV, XLSX o XLS)",
+            type=["csv","xlsx","xls"],
+            key="rcv_compras_historico_recuperar"
+        )
+        if archivo_hist:
+            try:
+                df_hist_original = leer_archivo_tabular(archivo_hist)
+                df_hist_norm = normalizar_rcv(df_hist_original,"compras")
+                cruces_hist = cruzar_rcv_historico_compras(conn,df_hist_norm)
+                total_archivo=len(df_hist_norm)
+                encontrados=len(cruces_hist)
+                c1,c2,c3=st.columns(3)
+                c1.metric("Documentos en RCV",f"{total_archivo:,}".replace(",","."))
+                c2.metric("Coincidencias SGCI",f"{encontrados:,}".replace(",","."))
+                c3.metric("Sin coincidencia",f"{max(total_archivo-encontrados,0):,}".replace(",","."))
+                if cruces_hist.empty:
+                    st.warning("No encontré documentos coincidentes. Revisa que sea el RCV de la misma empresa/período.")
+                else:
+                    vista=cruces_hist[["rut","tipo_doc","folio","proveedor","neto_rcv","exento_rcv","iva_rcv","iva_no_rec_rcv","total_rcv"]].copy()
+                    st.dataframe(vista,use_container_width=True,hide_index=True)
+                    total_iva_real=float(cruces_hist["iva_rcv"].abs().sum()+cruces_hist["iva_af_rcv"].abs().sum())
+                    st.info(f"IVA recuperable real identificado en este archivo: {money(total_iva_real)}")
+                    conf_rec=st.checkbox(
+                        "Confirmo que este es un RCV Compras original del SII y deseo recuperar únicamente sus datos tributarios.",
+                        key="conf_recuperar_rcv_hist"
+                    )
+                    if st.button("📚 Recuperar datos tributarios",type="primary",disabled=not conf_rec,key="btn_recuperar_rcv_hist"):
+                        n=recuperar_datos_tributarios_rcv(conn,cruces_hist)
+                        st.success(f"Datos tributarios recuperados para {n} documento(s). No se generaron asientos contables.")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo procesar el RCV histórico: {e}")
+
+    with pestañas_compras[4]:
         st.subheader("🧾 Regularizar IVA Crédito Fiscal de compras ya contabilizadas")
         st.caption(
             "Detecta compras RCV históricas que fueron contabilizadas sin movimiento "
