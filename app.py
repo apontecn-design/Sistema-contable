@@ -2536,90 +2536,83 @@ def cruzar_rcv_historico_compras(conn, df_rcv):
 
 def recuperar_datos_tributarios_rcv(conn, cruces):
     """
-    Actualiza SOLO metadata tributaria de compras existentes y verifica
-    inmediatamente en SQLite que cada cambio quedó persistido.
-    No crea compras/asientos y no toca proveedores, pagos ni banco.
+    Guarda en compras los datos tributarios EXACTOS del RCV original y los
+    verifica con una conexión nueva al archivo SQLite después del COMMIT.
+    No crea compras/asientos ni modifica proveedores, pagos o banco.
     """
     if cruces is None or cruces.empty:
-        return {"actualizados":0, "verificados":0, "iva":0.0, "errores":[]}
+        return {"actualizados":0,"verificados":0,"iva":0.0,"errores":[]}
 
-    # Esquema primero, fuera de la transacción de datos.
+    # Asegurar columnas de auditoría.
     agregar_columna(conn,"compras","monto_exento","REAL DEFAULT 0")
     agregar_columna(conn,"compras","iva_no_rec","REAL DEFAULT 0")
     agregar_columna(conn,"compras","neto_af","REAL DEFAULT 0")
     agregar_columna(conn,"compras","iva_af","REAL DEFAULT 0")
     agregar_columna(conn,"compras","iva_uso_comun","REAL DEFAULT 0")
     agregar_columna(conn,"compras","datos_tributarios_recuperados","INTEGER DEFAULT 0")
+    conn.commit()
 
     preparados=[]
     for r in cruces.itertuples():
-        tipo=int(r.tipo_doc or 0)
-        signo=-1.0 if tipo in DOC_NOTA_CREDITO else 1.0
-
-        neto=abs(float(r.neto_rcv or 0))*signo
-        exento=abs(float(r.exento_rcv or 0))*signo
-        neto_af=abs(float(r.neto_af_rcv or 0))*signo
-        iva_normal=abs(float(r.iva_rcv or 0))*signo
-        iva_af=abs(float(r.iva_af_rcv or 0))*signo
-        iva_rec=iva_normal + iva_af
-        iva_no_rec=abs(float(r.iva_no_rec_rcv or 0))*signo
-        iva_uso=abs(float(r.iva_uso_comun_rcv or 0))*signo
-        total=abs(float(r.total_rcv or 0))*signo
-
-        # monto_neto conserva exclusivamente la base neta afecta normal.
-        # Los demás componentes quedan en columnas separadas para auditoría.
-        preparados.append((
-            int(r.compra_id), neto, exento, iva_rec, iva_no_rec,
-            neto_af, iva_af, iva_uso, total
-        ))
+        compra_id=int(r.compra_id)
+        # Se guardan exactamente los importes que vienen del RCV.
+        neto=clp_round(r.neto_rcv)
+        exento=clp_round(r.exento_rcv)
+        iva=clp_round(r.iva_rcv)
+        iva_no_rec=clp_round(r.iva_no_rec_rcv)
+        neto_af=clp_round(r.neto_af_rcv)
+        iva_af=clp_round(r.iva_af_rcv)
+        iva_uso=clp_round(r.iva_uso_comun_rcv)
+        total=clp_round(r.total_rcv)
+        preparados.append((compra_id,neto,exento,iva,iva_no_rec,neto_af,iva_af,iva_uso,total))
 
     try:
-        conn.execute("BEGIN")
-        for compra_id,neto,exento,iva_rec,iva_no_rec,neto_af,iva_af,iva_uso,total in preparados:
+        for compra_id,neto,exento,iva,iva_no_rec,neto_af,iva_af,iva_uso,total in preparados:
             cur=conn.execute("""
                 UPDATE compras
-                   SET monto_neto=?,
-                       iva=?,
-                       monto_total=?,
-                       monto_exento=?,
-                       iva_no_rec=?,
-                       neto_af=?,
-                       iva_af=?,
-                       iva_uso_comun=?,
-                       datos_tributarios_recuperados=1
+                   SET monto_neto=?, iva=?, monto_total=?,
+                       monto_exento=?, iva_no_rec=?, neto_af=?, iva_af=?,
+                       iva_uso_comun=?, datos_tributarios_recuperados=1
                  WHERE id=?
-            """,(neto,iva_rec,total,exento,iva_no_rec,neto_af,iva_af,iva_uso,compra_id))
+            """,(neto,iva,total,exento,iva_no_rec,neto_af,iva_af,iva_uso,compra_id))
             if cur.rowcount != 1:
-                raise ValueError(f"No se actualizó la compra id {compra_id}.")
+                raise ValueError(f"No se encontró la compra id {compra_id}.")
         conn.commit()
     except Exception:
         conn.rollback()
         raise
 
-    # Verificación POST-COMMIT directamente contra SQLite.
-    verificados=0
-    errores=[]
-    iva_verificado=0.0
-    for compra_id,neto,exento,iva_rec,iva_no_rec,neto_af,iva_af,iva_uso,total in preparados:
-        fila=conn.execute("""
-            SELECT monto_neto,iva,monto_total,monto_exento,iva_no_rec,
-                   neto_af,iva_af,iva_uso_comun,datos_tributarios_recuperados
-              FROM compras WHERE id=?
-        """,(compra_id,)).fetchone()
-        if not fila:
-            errores.append(f"Compra id {compra_id}: no encontrada después del guardado.")
-            continue
-        ok=(
-            abs(float(fila[0] or 0)-neto)<0.01 and
-            abs(float(fila[1] or 0)-iva_rec)<0.01 and
-            abs(float(fila[2] or 0)-total)<0.01 and
-            int(fila[8] or 0)==1
-        )
-        if ok:
-            verificados+=1
-            iva_verificado+=abs(float(fila[1] or 0))
-        else:
-            errores.append(f"Compra id {compra_id}: los valores guardados no coinciden con el RCV.")
+    # Verificación independiente: cerramos cualquier duda sobre caché/estado de
+    # la conexión usada por Streamlit y leemos de nuevo el archivo persistente.
+    conn_check=sqlite3.connect(DB_FILE)
+    try:
+        verificados=0
+        iva_verificado=0
+        errores=[]
+        for compra_id,neto,exento,iva,iva_no_rec,neto_af,iva_af,iva_uso,total in preparados:
+            fila=conn_check.execute("""
+                SELECT monto_neto,iva,monto_total,datos_tributarios_recuperados
+                  FROM compras WHERE id=?
+            """,(compra_id,)).fetchone()
+            if fila is None:
+                errores.append(f"Compra id {compra_id}: no existe después del COMMIT.")
+                continue
+
+            real_neto=clp_round(fila[0])
+            real_iva=clp_round(fila[1])
+            real_total=clp_round(fila[2])
+            real_flag=int(fila[3] or 0)
+
+            if (real_neto,real_iva,real_total,real_flag)==(neto,iva,total,1):
+                verificados+=1
+                iva_verificado+=abs(real_iva)
+            else:
+                errores.append(
+                    f"Compra id {compra_id}: esperado neto {neto}, IVA {iva}, total {total}; "
+                    f"guardado neto {real_neto}, IVA {real_iva}, total {real_total}, marca {real_flag}."
+                )
+    finally:
+        conn_check.close()
 
     return {
         "actualizados":len(preparados),
@@ -2709,6 +2702,9 @@ def compras_pendientes_regularizar_iva(conn):
         if int(r.get("datos_tributarios_recuperados") or 0) == 1:
             iva_calc = iva_guardado
             fuente = "RCV original SII"
+            # Si el RCV original dice IVA recuperable cero, no inventamos 19/119.
+            if iva_calc <= 0.01:
+                continue
         elif iva_guardado > 0.01:
             iva_calc = iva_guardado
             fuente = "RCV registrado"
