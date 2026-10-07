@@ -2494,44 +2494,99 @@ def asegurar_control_regularizacion_iva_compras(conn):
 
 def compras_pendientes_regularizar_iva(conn):
     """
-    Detecta compras RCV ya contabilizadas cuyo asiento original no contiene
-    movimiento en IVA Crédito Fiscal. No modifica asientos originales.
+    Audita TODAS las compras históricas contabilizadas.
+
+    Prioridad para determinar IVA:
+    1) IVA guardado en compras.iva.
+    2) Diferencia total - base guardada, cuando existe.
+    3) Para documentos afectos antiguos cuya base quedó guardada por el bruto,
+       reconstrucción 19/119 del total, marcada expresamente como RECONSTRUIDO.
+
+    La detección NO depende de lote_id/glosa del asiento antiguo.
     """
     asegurar_control_regularizacion_iva_compras(conn)
     codigo_iva = ROLES["iva_credito"][1]
 
-    return pd.read_sql_query("""
+    df = pd.read_sql_query("""
         SELECT
-            c.id,
-            c.fecha,
-            c.tipo_doc,
-            c.folio,
-            c.glosa,
-            c.lote_id,
-            c.cuenta_gasto,
-            c.iva,
-            c.monto_total,
+            c.id, c.fecha, c.tipo_doc, c.folio, c.glosa, c.lote_id,
+            c.cuenta_gasto, COALESCE(c.monto_neto,0) AS monto_neto,
+            COALESCE(c.iva,0) AS iva_registrado,
+            COALESCE(c.monto_total,0) AS monto_total,
             p.rut,
             COALESCE(NULLIF(p.razon_social,''),p.nombre) AS proveedor
         FROM compras c
         LEFT JOIN proveedores p ON p.id=c.proveedor_id
-        WHERE ABS(COALESCE(c.iva,0)) > 0.01
-          AND NOT EXISTS (
-              SELECT 1
-              FROM regularizacion_iva_compras r
-              WHERE r.compra_id=c.id
-          )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM libro_diario ld
-              WHERE ld.lote_id=c.lote_id
-                AND ld.glosa=c.glosa
-                AND ld.codigo_cuenta=?
-                AND (ABS(COALESCE(ld.debe,0)) > 0.01 OR ABS(COALESCE(ld.haber,0)) > 0.01)
-          )
+        WHERE NOT EXISTS (
+            SELECT 1 FROM regularizacion_iva_compras r
+            WHERE r.compra_id=c.id
+        )
         ORDER BY c.fecha,c.id
-    """, conn, params=[codigo_iva])
+    """, conn)
 
+    if df.empty:
+        return df
+
+    # Si el Mayor de IVA ya contiene una regularización identificable por compra,
+    # no la volvemos a proponer aunque falte la tabla de control.
+    ya_reg = set()
+    filas = conn.execute("""
+        SELECT glosa FROM libro_diario
+        WHERE codigo_cuenta=?
+          AND glosa LIKE 'Regularización IVA Crédito Fiscal RCV compra N° %'
+    """, (codigo_iva,)).fetchall()
+    for f in filas:
+        ya_reg.add(str(f[0] or ""))
+
+    afectos_reconstruibles = {33, 34, 46, 56, 61}
+    candidatos = []
+    for r in df.to_dict("records"):
+        tipo = int(r.get("tipo_doc") or 0)
+        total = abs(float(r.get("monto_total") or 0))
+        base = abs(float(r.get("monto_neto") or 0))
+        iva_guardado = abs(float(r.get("iva_registrado") or 0))
+
+        glosa_control = f"Regularización IVA Crédito Fiscal RCV compra N° {r.get('folio')} - {r.get('proveedor')}"
+        if any(g.startswith(glosa_control) for g in ya_reg):
+            continue
+
+        iva_calc = 0.0
+        fuente = ""
+        if iva_guardado > 0.01:
+            iva_calc = iva_guardado
+            fuente = "RCV registrado"
+        elif total > 0.01 and base > 0.01 and (total - base) > 0.01:
+            iva_calc = round(total - base, 0)
+            fuente = "Total - base histórica"
+        elif tipo in afectos_reconstruibles and total > 0.01:
+            # Último recurso para históricos importados cuando el antiguo parser
+            # guardó el bruto como base y perdió la columna IVA.
+            iva_calc = round(total * 19 / 119, 0)
+            fuente = "Reconstruido 19/119"
+
+        if iva_calc <= 0.01:
+            continue
+
+        codigo_actual = codigo_cuenta_por_nombre(conn, r.get("cuenta_gasto"))
+        if not codigo_actual:
+            # Busca la última cuenta que recibió el débito en una reclasificación
+            folio = str(r.get("folio") or "")
+            fila = conn.execute("""
+                SELECT codigo_cuenta
+                FROM libro_diario
+                WHERE glosa LIKE ?
+                  AND debe > 0.01
+                  AND codigo_cuenta NOT IN (?,?)
+                ORDER BY asiento_id DESC,id DESC LIMIT 1
+            """, (f"%N° {folio}%", ROLES["proveedores"][1], codigo_iva)).fetchone()
+            codigo_actual = str(fila[0]) if fila else ""
+
+        r["iva"] = iva_calc
+        r["fuente_iva"] = fuente
+        r["codigo_cuenta_actual"] = codigo_actual or ""
+        candidatos.append(r)
+
+    return pd.DataFrame(candidatos)
 
 def regularizar_iva_historico_compras(conn):
     """
@@ -2568,27 +2623,7 @@ def regularizar_iva_historico_compras(conn):
             if monto <= 0.01:
                 continue
 
-            # IMPORTANTE: compras.cuenta_gasto contiene la cuenta ACTUAL del documento,
-            # incluso si posteriormente fue reclasificado. Para corregir históricos
-            # cargados por el bruto, el IVA debe salir de esa cuenta actual.
-            codigo_contra = codigo_cuenta_por_nombre(conn, r.cuenta_gasto)
-
-            # Respaldo: si un registro antiguo no conserva el nombre actual,
-            # buscamos la última cuenta destino usada en una reclasificación.
-            if not codigo_contra:
-                fila_cta = conn.execute("""
-                    SELECT ld.codigo_cuenta
-                    FROM libro_diario ld
-                    WHERE ld.glosa LIKE ?
-                      AND ld.debe > 0.01
-                      AND ld.codigo_cuenta NOT IN (?,?)
-                    ORDER BY ld.asiento_id DESC, ld.rowid DESC
-                    LIMIT 1
-                """, (
-                    f"Reclasificación compra%N° {r.folio} - {r.proveedor}%",
-                    ROLES["proveedores"][1], codigo_iva
-                )).fetchone()
-                codigo_contra = str(fila_cta[0]) if fila_cta else None
+            codigo_contra = str(getattr(r, "codigo_cuenta_actual", "") or "")
 
             if not codigo_contra or codigo_contra not in plan.todos:
                 raise ValueError(
@@ -6523,11 +6558,28 @@ elif menu == "📥 RCV Compras":
             civa1,civa2 = st.columns(2)
             civa1.metric("Documentos a regularizar", f"{len(pendientes_iva):,}".replace(",","."))
             civa2.metric("IVA identificado", money(total_iva_pend))
+            columnas_auditoria = [
+                "fecha","tipo_doc","folio","rut","proveedor",
+                "monto_neto","iva","monto_total","fuente_iva",
+                "codigo_cuenta_actual","cuenta_gasto"
+            ]
             st.dataframe(
-                pendientes_iva[["fecha","tipo_doc","folio","rut","proveedor","iva","monto_total"]],
+                pendientes_iva[[c for c in columnas_auditoria if c in pendientes_iva.columns]],
                 use_container_width=True,
                 hide_index=True
             )
+            reconstruidos = int((pendientes_iva.get("fuente_iva", pd.Series(dtype=str)) == "Reconstruido 19/119").sum())
+            if reconstruidos:
+                st.warning(
+                    f"{reconstruidos} documento(s) no conservan el IVA histórico en la base y "
+                    "SGCI lo reconstruyó como 19/119 del total. Revísalos especialmente antes de confirmar."
+                )
+            sin_cuenta = pendientes_iva[pendientes_iva.get("codigo_cuenta_actual","").astype(str).str.strip() == ""]
+            if not sin_cuenta.empty:
+                st.error(
+                    f"{len(sin_cuenta)} documento(s) no tienen cuenta actual identificable. "
+                    "No ejecutes la regularización hasta corregirlos."
+                )
             confirma_iva_hist = st.checkbox(
                 "Confirmo que deseo generar la regularización histórica del IVA Crédito Fiscal.",
                 key="conf_regularizar_iva_hist"
@@ -6535,7 +6587,7 @@ elif menu == "📥 RCV Compras":
             if st.button(
                 "🧾 Regularizar IVA Crédito Fiscal",
                 type="primary",
-                disabled=not confirma_iva_hist,
+                disabled=(not confirma_iva_hist) or (not sin_cuenta.empty),
                 key="btn_regularizar_iva_hist"
             ):
                 try:
