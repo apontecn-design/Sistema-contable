@@ -4212,6 +4212,7 @@ def leer_cartola_pdf(uploaded_file, password=""):
             "referencia": referencia,
             "monto_detectado": abs(monto),
             "es_abono_desc": es_abono_desc,
+            "tipo_incierto": not es_abono_desc and not any(x in cuerpo_upper for x in ("CHEQUE COBRADO", "TRASPASO FONDOS", "TRANSFERENCIA A", "PAGO REALIZADO", "GIRO", "COMISION", "COMISIÓN", "CARGO")),
             "saldo": saldo,
         })
 
@@ -4236,10 +4237,42 @@ def leer_cartola_pdf(uploaded_file, password=""):
             "cargo": 0.0 if es_abono else monto,
             "abono": monto if es_abono else 0.0,
             "saldo": mov["saldo"],
+            "revision": "REVISAR SIGNO" if saldo_anterior is None and mov["tipo_incierto"] else "",
         })
         saldo_anterior = mov["saldo"]
 
     return pd.DataFrame(salida)
+
+
+def sgci_corregir_signo_cartola_pendiente(conn, movimiento_id, tipo_correcto):
+    """Corrige únicamente un movimiento no conciliado, con auditoría y sin asientos."""
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+    if mov is None:
+        raise ValueError("El movimiento ya no existe.")
+    if int(mov["conciliado"] or 0) != 0 or mov["asiento_id"] is not None:
+        raise ValueError("No es posible cambiar un movimiento conciliado o contabilizado.")
+    cargo, abono = float(mov["cargo"] or 0), float(mov["abono"] or 0)
+    if (cargo > 0) == (abono > 0):
+        raise ValueError("El movimiento tiene un signo ambiguo y requiere revisión manual.")
+    monto = cargo or abono
+    if tipo_correcto not in ("Cargo", "Abono"):
+        raise ValueError("Selecciona Cargo o Abono.")
+    nuevo_cargo = monto if tipo_correcto == "Cargo" else 0.0
+    nuevo_abono = monto if tipo_correcto == "Abono" else 0.0
+    if cargo == nuevo_cargo and abono == nuevo_abono:
+        raise ValueError("El movimiento ya tiene el signo seleccionado.")
+    try:
+        conn.execute("UPDATE cartola_bancaria SET cargo=?,abono=? WHERE id=? AND conciliado=0 AND asiento_id IS NULL",
+                     (nuevo_cargo, nuevo_abono, int(movimiento_id)))
+        if conn.total_changes < 1:
+            raise ValueError("No se pudo modificar el movimiento.")
+        conn.commit()
+        registrar_auditoria(conn, "CORREGIR SIGNO CARTOLA",
+                            f"Movimiento {movimiento_id} banco {mov['banco_id']} fecha {mov['fecha']}: "
+                            f"cargo {cargo} abono {abono} -> cargo {nuevo_cargo} abono {nuevo_abono}")
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def registrar_movimiento_manual(conn, banco_id, fecha, descripcion, referencia, cargo, abono, saldo=None):
@@ -6116,9 +6149,27 @@ elif menu == "🏦 Bancos y Cartolas":
                             dfc = leer_cartola_pdf(archivo, password_pdf)
                         else:
                             dfc = leer_archivo_tabular(archivo)
-                        st.write("Vista previa")
-                        st.dataframe(dfc.head(50), use_container_width=True, hide_index=True)
-                        if st.button("Importar cartola", type="primary"):
+                        st.write("Vista previa — verifica cargos y abonos antes de importar")
+                        if archivo.name.lower().endswith(".pdf"):
+                            st.info("Puedes corregir Cargo y Abono directamente en la vista previa. En particular, revisa las transferencias entrantes que no dicen expresamente 'abono'.")
+                            dfc = st.data_editor(dfc, use_container_width=True, hide_index=True,
+                                disabled=[c for c in dfc.columns if c not in ("cargo", "abono")],
+                                key="sgci_previa_pdf_editable")
+                        else:
+                            st.dataframe(dfc.head(50), use_container_width=True, hide_index=True)
+                        errores_signo = []
+                        if "cargo" in dfc.columns and "abono" in dfc.columns:
+                            for idx, rr in dfc.iterrows():
+                                ca = numero_cartola_clp(rr["cargo"])
+                                ab = numero_cartola_clp(rr["abono"])
+                                if ca < 0 or ab < 0 or (ca > 0) == (ab > 0):
+                                    errores_signo.append(idx + 1)
+                        if "revision" in dfc.columns and (dfc["revision"] == "REVISAR SIGNO").any():
+                            st.warning("Hay un primer movimiento con signo no verificable por la descripción. Comprueba su naturaleza contra la cartola original.")
+                        confirmar_signos = st.checkbox("He comprobado los cargos y abonos contra la cartola original", key="sgci_confirma_signos_pdf") if archivo.name.lower().endswith(".pdf") else True
+                        if errores_signo:
+                            st.error(f"Movimientos con cargo/abono inválidos en filas: {errores_signo[:12]}")
+                        if st.button("Importar cartola", type="primary", disabled=bool(errores_signo) or not confirmar_signos):
                             nuevos,repetidos,lote = importar_cartola(conn, dfc, banco_id, origen="PDF" if archivo.name.lower().endswith(".pdf") else "ARCHIVO")
                             registrar_importacion_archivo(conn,"CARTOLA",archivo.name,archivo_hash,lote,len(dfc),nuevos,repetidos)
                             sgci_exito(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
@@ -6202,7 +6253,10 @@ elif menu == "🏦 Bancos y Cartolas":
             if info:
                 sc,ss,dif,movs = info
                 a,b,c = st.columns(3); a.metric("Saldo cartola",money(sc)); b.metric("Saldo contable",money(ss)); c.metric("Diferencia",money(dif))
-                sgci_exito("🟢 Conciliación sin diferencia" if abs(dif)<0.01 else "🟡 Revisar diferencias")
+                if abs(dif)<0.01:
+                    st.success("🟢 Conciliación sin diferencia")
+                else:
+                    st.warning("🟡 Revisar diferencias")
 
             pendientes = pd.read_sql_query("""SELECT id,fecha,descripcion,referencia,cargo,abono,saldo,origen
                                                 FROM cartola_bancaria WHERE banco_id=? AND conciliado=0
@@ -6239,6 +6293,23 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.error(f"No se pudo conciliar: {e}")
 
                 mov_sel = pendientes.loc[pendientes["id"] == movimiento_id].iloc[0]
+                with st.expander("🛠️ Corregir cargo/abono del movimiento pendiente"):
+                    st.warning("Solo para errores de importación. No crea asientos ni altera movimientos conciliados. Comprueba el PDF original antes de guardar.")
+                    st.write(f"Movimiento #{movimiento_id} · {mov_sel['fecha']} · {mov_sel['descripcion']}")
+                    actual_tipo = "Cargo" if float(mov_sel["cargo"] or 0) > 0 else "Abono"
+                    tipo_nuevo = st.radio("Naturaleza correcta", ["Cargo", "Abono"],
+                                         index=0 if actual_tipo == "Cargo" else 1,
+                                         horizontal=True, key=f"sgci_signo_{movimiento_id}")
+                    confirmar_signo = st.checkbox("Verifiqué la naturaleza de este movimiento en la cartola bancaria original.",
+                                                  key=f"sgci_confirma_signo_{movimiento_id}")
+                    if st.button("Guardar corrección de signo", key=f"sgci_guardar_signo_{movimiento_id}",
+                                 disabled=not confirmar_signo or tipo_nuevo == actual_tipo):
+                        try:
+                            sgci_corregir_signo_cartola_pendiente(conn, movimiento_id, tipo_nuevo)
+                            sgci_exito(f"Movimiento #{movimiento_id} corregido a {tipo_nuevo} y registrado en auditoría.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"No se pudo corregir: {e}")
                 es_cargo = float(mov_sel["cargo"] or 0) > 0
                 es_abono = float(mov_sel["abono"] or 0) > 0
                 metodos = (["👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente"] if es_abono else []) + ["✏️ Una cuenta", "🧩 Varias cuentas"]
@@ -6262,13 +6333,14 @@ elif menu == "🏦 Bancos y Cartolas":
                         monto_banco_nom=clp_round(float(mov_sel["cargo"] or 0))
                         sugerido_nom=clp_round(float(trab_banco.sueldo_base or 0)*float(trab_banco.anticipo_porcentaje or 50)/100)
                         a_nom,b_nom=st.columns(2)
-                        a_nom.metric("Movimiento bancario",money(monto_banco_nom))
-                        b_nom.metric("Anticipo habitual según ficha",money(sugerido_nom))
+                        st.caption(f"Movimiento seleccionado: #{movimiento_id} · {mov_sel['fecha']} · {mov_sel['descripcion']}")
+                        a_nom.metric("Cargo de este movimiento",money(monto_banco_nom))
+                        b_nom.metric("Anticipo referencial (NO es pago registrado)",money(sugerido_nom))
                         if monto_banco_nom != sugerido_nom:
-                            st.caption("El monto bancario puede diferir del anticipo habitual. Se registrará exactamente el monto que salió del banco.")
+                            st.warning("El cargo bancario NO coincide con el anticipo habitual. Confirma que realmente corresponde al trabajador y período antes de contabilizar.")
                         obs_nom=st.text_input("Observación",value=f"Anticipo quincenal {periodo_banco}",key=f"nomina_obs_banco_{movimiento_id}")
                         confirma_nom=st.checkbox(
-                            "Confirmo que este cargo corresponde a un anticipo de remuneración del trabajador seleccionado.",
+                            f"Confirmo que el movimiento #{movimiento_id} por {money(monto_banco_nom)} corresponde a {trab_banco.nombre} y al período {periodo_banco}.",
                             key=f"nomina_conf_banco_{movimiento_id}"
                         )
                         if st.button("👤 Contabilizar y vincular anticipo",type="primary",disabled=not confirma_nom,key=f"nomina_btn_banco_{movimiento_id}"):
