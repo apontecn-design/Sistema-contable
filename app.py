@@ -4578,6 +4578,74 @@ def documentos_pendientes_cliente(conn, cliente_id):
     """, conn, params=(int(cliente_id),))
 
 
+def sgci_saldos_apertura_clientes(conn):
+    """Auxiliar histórico, sin crear nuevos asientos de apertura."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_apertura_clientes (
+        cliente_id INTEGER PRIMARY KEY, monto INTEGER NOT NULL,
+        observacion TEXT, fecha TEXT DEFAULT '2026-01-01')""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_aplicaciones_apertura_clientes (
+        movimiento_id INTEGER PRIMARY KEY, cliente_id INTEGER NOT NULL,
+        monto INTEGER NOT NULL, pago_id INTEGER, fecha TEXT NOT NULL)""")
+    conn.commit()
+
+def sgci_saldo_apertura_disponible(conn, cliente_id):
+    sgci_saldos_apertura_clientes(conn)
+    r=conn.execute("""SELECT COALESCE(a.monto,0)-COALESCE(
+      (SELECT SUM(x.monto) FROM sgci_aplicaciones_apertura_clientes x
+       WHERE x.cliente_id=a.cliente_id),0)
+      FROM sgci_apertura_clientes a WHERE a.cliente_id=?""",(int(cliente_id),)).fetchone()
+    return int(r[0]) if r else 0
+
+def sgci_cobro_mixto(conn,movimiento_id,cliente_id,venta_ids,monto_apertura):
+    """Un asiento Banco/Clientes; desglose auxiliar entre facturas y apertura."""
+    sgci_saldos_apertura_clientes(conn)
+    mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
+    if not mov or int(mov["conciliado"] or 0): raise ValueError("Movimiento inexistente o ya conciliado.")
+    if periodo_cerrado(conn,mov["fecha"]): raise ValueError("Período cerrado.")
+    monto=clp_round(float(mov["abono"] or 0))
+    apertura=int(monto_apertura)
+    if apertura<0 or apertura>sgci_saldo_apertura_disponible(conn,cliente_id):
+        raise ValueError("La aplicación supera el saldo de apertura disponible.")
+    docs=documentos_pendientes_cliente(conn,cliente_id)
+    docs=docs[docs["id"].isin([int(x) for x in venta_ids])]
+    total_docs=sum(clp_round(float(r.pendiente)) for r in docs.itertuples())
+    if len(docs)!=len(set(venta_ids)): raise ValueError("Alguna factura ya no está pendiente.")
+    if apertura+total_docs!=monto:
+        raise ValueError(f"Debe distribuir exactamente {money(monto)} entre facturas y apertura.")
+    if monto<=0: raise ValueError("Abono inválido.")
+    banco=conn.execute("SELECT * FROM bancos WHERE id=?",(mov["banco_id"],)).fetchone()
+    roles=cargar_roles(conn); cuenta_cli=roles.get("clientes")
+    if not banco or not banco["cuenta_contable"] or not cuenta_cli:
+        raise ValueError("Faltan cuentas contables de Banco o Clientes.")
+    cliente=conn.execute("SELECT * FROM clientes WHERE id=?",(int(cliente_id),)).fetchone()
+    if not cliente: raise ValueError("Cliente inexistente.")
+    glosa=f"Cobro mixto cliente {cliente_id}; apertura {apertura}; facturas {', '.join(str(r.folio) for r in docs.itertuples())}"
+    asiento=siguiente_asiento(conn)+1
+    lote="CONC-CLI-MIX-"+datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    plan=Plan(conn)
+    try:
+        for codigo,debe,haber in [(banco["cuenta_contable"],monto,0),(cuenta_cli[0],0,monto)]:
+            conn.execute("""INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                         VALUES(?,?,?,?,?,?,?,?,?)""",
+                         (mov["fecha"],plan.todos.get(codigo,codigo),debe,haber,glosa,codigo,asiento,lote,"CONCILIACION_COBRO_CLIENTE"))
+        cur=conn.execute("""INSERT INTO pagos_clientes(fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id,monto_recibido,cartola_id)
+                        VALUES(?,?,?,?,?,?,?,?,?)""",
+                        (mov["fecha"],int(cliente_id),monto,"Banco",banco["cuenta_contable"],glosa,lote,monto,int(movimiento_id)))
+        for r in docs.itertuples():
+            conn.execute("INSERT INTO aplicaciones_clientes(pago_id,venta_id,monto) VALUES(?,?,?)",
+                         (cur.lastrowid,int(r.id),clp_round(float(r.pendiente))))
+        if apertura:
+            conn.execute("""INSERT INTO sgci_aplicaciones_apertura_clientes(movimiento_id,cliente_id,monto,pago_id,fecha)
+                            VALUES(?,?,?,?,?)""",(int(movimiento_id),int(cliente_id),apertura,cur.lastrowid,mov["fecha"]))
+        conn.execute("""UPDATE cartola_bancaria SET conciliado=1,observacion=?,asiento_id=?,
+                        match_tipo='CLIENTE',match_id=?,match_confianza=100 WHERE id=?""",
+                     (glosa,asiento,int(cliente_id),int(movimiento_id)))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return asiento
+
 def contabilizar_cobro_cliente_desde_cartola(conn, movimiento_id, cliente_id, venta_ids,
                                                cuenta_diferencia=None, glosa_diferencia=""):
     """Conciliación de abono: aplica a facturas del cliente y lleva cualquier exceso a otra cuenta."""
@@ -6263,6 +6331,54 @@ elif menu == "🏦 Bancos y Cartolas":
                         cli_label=st.selectbox("Cliente",cli_labels,key=f"cobro_cli_{movimiento_id}")
                         cli_id=int(cli_label.split(" | ",1)[0])
                         docs_cli=documentos_pendientes_cliente(conn,cli_id)
+                        sgci_saldos_apertura_clientes(conn)
+                        with st.expander("📘 Saldo inicial 2026 del cliente (auxiliar, sin asiento contable)"):
+                            registro=conn.execute("SELECT monto FROM sgci_apertura_clientes WHERE cliente_id=?",(cli_id,)).fetchone()
+                            monto_reg=int(registro[0]) if registro else 0
+                            saldo_nuevo=st.number_input("Saldo inicial total del cliente al 01-01-2026 (CLP)",
+                                min_value=0,step=1000,value=monto_reg,key=f"apert_cli_monto_{cli_id}")
+                            st.caption("Solo registra el auxiliar; el saldo ya está en el Libro Diario. Verifica que coincida con el detalle del asiento de apertura.")
+                            if st.button("Guardar saldo inicial auxiliar",key=f"apert_cli_save_{cli_id}"):
+                                aplicado=conn.execute("SELECT COALESCE(SUM(monto),0) FROM sgci_aplicaciones_apertura_clientes WHERE cliente_id=?",(cli_id,)).fetchone()[0]
+                                if int(saldo_nuevo)<int(aplicado):
+                                    st.error("El saldo inicial no puede ser menor que lo ya aplicado.")
+                                else:
+                                    conn.execute("""INSERT INTO sgci_apertura_clientes(cliente_id,monto,observacion)
+                                      VALUES(?,?,'Saldo de apertura ya contabilizado')
+                                      ON CONFLICT(cliente_id) DO UPDATE SET monto=excluded.monto""",(cli_id,int(saldo_nuevo)))
+                                    conn.commit()
+                                    st.success("Saldo inicial auxiliar guardado; no se generó asiento.")
+                                    st.rerun()
+                        apertura_disponible=sgci_saldo_apertura_disponible(conn,cli_id)
+                        st.caption(f"Saldo de apertura disponible para aplicar: {money(apertura_disponible)}")
+                        with st.expander("🧩 Cobro mixto: varias facturas + saldo inicial"):
+                            st.caption("Marca las facturas de 2026 y asigna la parte del cobro correspondiente a 2025. Un solo asiento Banco / Clientes.")
+                            opciones={f"{r.folio} | {r.fecha} | {money(r.pendiente)}":int(r.id) for r in docs_cli.itertuples()}
+                            elegidas=st.multiselect("Facturas a cancelar",list(opciones),key=f"mix_docs_{movimiento_id}")
+                            ids_mix=[opciones[x] for x in elegidas]
+                            suma_docs=clp_round(float(docs_cli[docs_cli.id.isin(ids_mix)].pendiente.sum())) if ids_mix else 0
+                            importe_banco=clp_round(float(mov_sel["abono"] or 0))
+                            aplicar_apertura=st.number_input("Aplicar a saldo inicial 2025",min_value=0,
+                                max_value=max(0,min(apertura_disponible,importe_banco)),step=1,
+                                value=0,key=f"mix_apert_{movimiento_id}")
+                            diferencia_mix=importe_banco-suma_docs-int(aplicar_apertura)
+                            c1,c2,c3=st.columns(3)
+                            c1.metric("Abono bancario",money(importe_banco))
+                            c2.metric("Total distribuido",money(suma_docs+int(aplicar_apertura)))
+                            c3.metric("Diferencia",money(diferencia_mix))
+                            if diferencia_mix==0 and (ids_mix or aplicar_apertura):
+                                st.success("Distribución cuadrada.")
+                            else:
+                                st.warning("La suma de facturas y apertura debe coincidir exactamente con el abono.")
+                            confirm_mix=st.checkbox("Confirmo el cobro mixto y su imputación al cliente.",key=f"mix_conf_{movimiento_id}")
+                            if st.button("💰 Contabilizar y conciliar cobro mixto",
+                                disabled=not(confirm_mix and diferencia_mix==0 and (ids_mix or aplicar_apertura)),
+                                key=f"mix_btn_{movimiento_id}",type="primary"):
+                                try:
+                                    asi=sgci_cobro_mixto(conn,movimiento_id,cli_id,ids_mix,int(aplicar_apertura))
+                                    st.success(f"Cobro mixto contabilizado en asiento {asi}.")
+                                    st.rerun()
+                                except Exception as e: st.error(f"No se pudo conciliar: {e}")
                         modo_cli=st.radio("Aplicación del abono",
                                           ["Aplicar a factura(s) pendiente(s)","Anticipo / cobro sin documento"],
                                           key=f"modo_cobro_cli_{movimiento_id}",horizontal=True)
