@@ -55,6 +55,11 @@ hr { border-color:var(--sgci-border)!important; }
 </style>
 """, unsafe_allow_html=True)
 
+def sgci_exito(mensaje, *args, **kwargs):
+    """Confirma una acción exitosa y conserva el mensaje tras st.rerun()."""
+    st.session_state['_sgci_ultimo_exito'] = str(mensaje)
+    return st.success(mensaje, *args, **kwargs)
+
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
@@ -73,6 +78,11 @@ if not st.session_state["authenticated"]:
                 st.error("Contraseña incorrecta.")
     st.stop()
 
+
+# Mostrar el resultado de la acción anterior aunque Streamlit haya recargado la página.
+_mensaje_guardado=st.session_state.pop('_sgci_ultimo_exito',None)
+if _mensaje_guardado:
+    st.success('✅ ' + _mensaje_guardado)
 
 # ============================================================
 # CONEXIÓN
@@ -1490,7 +1500,7 @@ def normalizar_rcv(df, tipo):
                             conn, "EDITAR PLAN DE CUENTAS",
                             f"Cuenta {codigo_sel}: padre {padre_actual or 'SIN PADRE'} -> {nuevo_padre or 'SIN PADRE'}, nivel {int(fila['nivel'] or 1)} -> {int(nivel_edit)}"
                         )
-                        st.success(f"Cuenta {codigo_sel} actualizada correctamente.")
+                        sgci_exito(f"Cuenta {codigo_sel} actualizada correctamente.")
                         st.rerun()
                     except Exception as e:
                         conn.rollback()
@@ -5542,36 +5552,50 @@ def nomina_calcular(total_imponible, total_no_imponible, afp_comision, salud_tip
     return dict(afp=afp,salud=salud,salud_plan_pesos=clp_round(plan_pesos),total_desc=clp_round(total_desc),liquido=liquido,saldo=clp_round(liquido-antic))
 
 
-def nomina_contabilizar_periodo(conn, periodo):
+def nomina_vista_previa(conn, periodo):
+    """Construye exactamente las partidas que usará la contabilización, sin escribir en BD."""
     liq=pd.read_sql_query("SELECT * FROM nomina_liquidaciones WHERE periodo=?",conn,params=(periodo,))
     if liq.empty: raise ValueError('No existen liquidaciones para el período.')
-    if (liq['estado']=='CONTABILIZADO').all(): raise ValueError('Este período ya está contabilizado.')
-    fecha=f"{periodo}-01"
+    if (liq['estado']=='CONTABILIZADO').any():
+        raise ValueError('Hay liquidaciones contabilizadas en este período; se impide duplicar el asiento.')
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])',str(periodo)):
+        raise ValueError('Período inválido.')
+    y,m=map(int,periodo.split('-'))
+    fecha=(date(y+1,1,1)-timedelta(days=1) if m==12 else date(y,m+1,1)-timedelta(days=1)).isoformat()
+    if periodo_cerrado(conn,fecha): raise ValueError('El período contable ya está cerrado.')
+    tot=lambda c: sum(clp_round(v) for v in liq[c].fillna(0))
+    # Los montos se suman por trabajador, evitando diferencias de redondeo.
+    sueldo=sum(tot(c) for c in ['sueldo_periodo','horas_extras','bonos_imponibles','otros_imponibles'])
+    valores=[
+        ('5.2.03.01',sueldo,0),('5.2.03.02',tot('gratificacion'),0),
+        ('5.2.03.03',tot('total_no_imponible'),0),
+        ('2.1.02.02',0,tot('afp_descuento')+tot('salud_descuento')+tot('afc_descuento')),
+        ('2.1.02.05',0,tot('impuesto_unico')),
+        ('2.1.02.03',0,tot('otros_descuentos')),
+        ('1.1.07.01',0,tot('anticipo')),
+        ('1.1.07.02',0,tot('prestamo_descuento')),
+        ('2.1.02.01',0,tot('saldo_pagar'))]
+    plan=Plan(conn).todos
+    faltantes=[cod for cod,d,h in valores if (d or h) and cod not in plan]
+    if faltantes: raise ValueError('Faltan cuentas en el plan: '+', '.join(faltantes))
+    filas=[{'Código':cod,'Cuenta':plan.get(cod,cod),'Debe':int(d),'Haber':int(h)} for cod,d,h in valores if d or h]
+    debe=sum(f['Debe'] for f in filas); haber=sum(f['Haber'] for f in filas)
+    return fecha,filas,debe,haber
+
+
+def nomina_contabilizar_periodo(conn, periodo):
+    fecha,filas,debe,haber=nomina_vista_previa(conn,periodo)
+    if debe!=haber:
+        raise ValueError(f'Asiento de nómina descuadrado: Debe {debe:,.0f} / Haber {haber:,.0f}.')
+    asiento=siguiente_asiento(conn)+1
     try:
-        y,m=map(int,periodo.split('-')); fecha=(date(y+1,1,1)-timedelta(days=1) if m==12 else date(y,m+1,1)-timedelta(days=1)).isoformat()
-    except Exception: fecha=date.today().isoformat()
-    asiento=siguiente_asiento(conn)+1; glosa=f'Nómina {periodo}'
-    sueldo=float(liq['sueldo_periodo'].sum()+liq['horas_extras'].sum()+liq['bonos_imponibles'].sum()+liq['otros_imponibles'].sum())
-    grat=float(liq['gratificacion'].sum()); noimp=float(liq['total_no_imponible'].sum())
-    afp=float(liq['afp_descuento'].sum()); salud=float(liq['salud_descuento'].sum()); afc=float(liq['afc_descuento'].sum())
-    impuesto=float(liq['impuesto_unico'].sum()); otros=float(liq['otros_descuentos'].sum()); anticipos=float(liq['anticipo'].sum()); prestamos=float(liq['prestamo_descuento'].sum()); saldo=float(liq['saldo_pagar'].sum())
-    try:
-        nomina_asiento_linea(conn,fecha,'5.2.03.01',sueldo,0,glosa,asiento)
-        nomina_asiento_linea(conn,fecha,'5.2.03.02',grat,0,glosa,asiento)
-        nomina_asiento_linea(conn,fecha,'5.2.03.03',noimp,0,glosa,asiento)
-        nomina_asiento_linea(conn,fecha,'2.1.02.02',0,afp+salud+afc,glosa,asiento)
-        nomina_asiento_linea(conn,fecha,'2.1.02.05',0,impuesto,glosa,asiento)
-        nomina_asiento_linea(conn,fecha,'2.1.02.03',0,otros,glosa,asiento)
-        nomina_asiento_linea(conn,fecha,'1.1.07.01',0,anticipos,glosa,asiento)
-        nomina_asiento_linea(conn,fecha,'1.1.07.02',0,prestamos,glosa,asiento)
-        nomina_asiento_linea(conn,fecha,'2.1.02.01',0,saldo,glosa,asiento)
-        debe=conn.execute('SELECT COALESCE(SUM(debe),0) FROM libro_diario WHERE asiento_id=?',(asiento,)).fetchone()[0]
-        haber=conn.execute('SELECT COALESCE(SUM(haber),0) FROM libro_diario WHERE asiento_id=?',(asiento,)).fetchone()[0]
-        if abs(debe-haber)>.5: raise ValueError(f'Asiento de nómina descuadrado: Debe {debe:,.0f} / Haber {haber:,.0f}. Revisa descuentos y anticipos.')
+        for f in filas:
+            nomina_asiento_linea(conn,fecha,f['Código'],f['Debe'],f['Haber'],f'Nómina {periodo}',asiento)
         conn.execute("UPDATE nomina_liquidaciones SET estado='CONTABILIZADO' WHERE periodo=?",(periodo,))
         conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)",(periodo,))
         conn.execute("UPDATE nomina_periodos SET estado='CONTABILIZADO',fecha_cierre=?,asiento_id=? WHERE periodo=?",(fecha,asiento,periodo))
-        conn.commit(); return asiento
+        conn.commit()
+        return asiento
     except Exception:
         conn.rollback(); raise
 
@@ -5715,7 +5739,7 @@ if menu == "🏠 Inicio":
         diferencia = float(diario["debe"]) - float(diario["haber"])
 
         if abs(diferencia) < 0.01:
-            st.success("🟢 Libro Diario cuadrado")
+            sgci_exito("🟢 Libro Diario cuadrado")
         else:
             st.error(f"🔴 Diferencia: {money(diferencia)}")
 
@@ -5724,7 +5748,7 @@ if menu == "🏠 Inicio":
 
     with col2:
         st.subheader("Estado del sistema")
-        st.success("Base de datos conectada")
+        sgci_exito("Base de datos conectada")
         st.write(f"Base: `{DB_FILE}`")
         st.write(f"Fecha: {date.today().strftime('%d/%m/%Y')}")
 
@@ -5797,7 +5821,7 @@ elif menu == "👥 Nómina":
                         conn.execute("INSERT INTO nomina_trabajadores(rut,nombre,fecha_ingreso,cargo,tipo_contrato,sueldo_base,gratificacion_tipo,gratificacion_valor,afp,salud_tipo,isapre,salud_modalidad,salud_valor,afc,anticipo_quincenal,anticipo_porcentaje,banco,tipo_cuenta,numero_cuenta,activo,fecha_creacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",vals)
                     trabajador_id = edit_row.id if edit_row else conn.execute("SELECT id FROM nomina_trabajadores WHERE rut=?",(rut.strip(),)).fetchone()[0]
                     conn.execute("INSERT INTO nomina_historial_condiciones(trabajador_id,vigente_desde,sueldo_base,gratificacion_tipo,gratificacion_valor,afp,salud_tipo,isapre,salud_modalidad,salud_valor,observacion,fecha_registro) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(trabajador_id,vigente_desde) DO UPDATE SET sueldo_base=excluded.sueldo_base,gratificacion_tipo=excluded.gratificacion_tipo,gratificacion_valor=excluded.gratificacion_valor,afp=excluded.afp,salud_tipo=excluded.salud_tipo,isapre=excluded.isapre,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,fecha_registro=excluded.fecha_registro",(trabajador_id,vigencia_cond.isoformat(),clp_round(sueldo),grat_tipo,clp_round(grat),afp,salud_tipo,isapre.strip(),salud_modalidad,salud_valor,'Cambio desde ficha',datetime.now().isoformat(timespec='seconds')))
-                    conn.commit(); st.success('Ficha y vigencia histórica guardadas.'); st.rerun()
+                    conn.commit(); sgci_exito('Ficha y vigencia histórica guardadas.'); st.rerun()
 
         if edit_row:
             st.markdown('#### Historial de sueldo y condiciones previsionales')
@@ -5822,14 +5846,14 @@ elif menu == "👥 Nómina":
                 fecha_ant=st.date_input('Fecha del anticipo',date.today(),key='ant_fecha'); monto_ant=st.number_input('Monto',min_value=0.0,value=float(sugerido),step=10000.0,format='%.0f',key='ant_monto')
                 obs_ant=st.text_input('Observación',key='ant_obs')
                 if st.button('Registrar anticipo',key='ant_save'):
-                    conn.execute("INSERT INTO nomina_anticipos(trabajador_id,periodo,fecha,monto,observacion) VALUES(?,?,?,?,?)",(tr.id,periodo,fecha_ant.isoformat(),monto_ant,obs_ant)); conn.commit(); st.success('Anticipo registrado.'); st.rerun()
+                    conn.execute("INSERT INTO nomina_anticipos(trabajador_id,periodo,fecha,monto,observacion) VALUES(?,?,?,?,?)",(tr.id,periodo,fecha_ant.isoformat(),monto_ant,obs_ant)); conn.commit(); sgci_exito('Anticipo registrado.'); st.rerun()
             with c2:
                 st.markdown('#### Préstamo al trabajador')
                 quienp=st.selectbox('Trabajador',list(mapa),key='pre_trab'); tp=mapa[quienp]
                 fecha_p=st.date_input('Fecha préstamo',date.today(),key='pre_fecha'); monto_p=st.number_input('Monto original',min_value=0.0,value=0.0,step=10000.0,format='%.0f',key='pre_monto'); cuotas=st.number_input('N° cuotas',min_value=1,max_value=120,value=1,key='pre_cuotas'); cuota=st.number_input('Cuota mensual',min_value=0.0,value=0.0,step=1000.0,format='%.0f',key='pre_cuota'); primera=st.text_input('Primera cuota (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='pre_primera'); obs_p=st.text_input('Observación',key='pre_obs')
                 if st.button('Registrar préstamo',key='pre_save'):
                     cuota_final=cuota or (monto_p/cuotas if cuotas else monto_p)
-                    conn.execute("INSERT INTO nomina_prestamos(trabajador_id,fecha,monto_original,numero_cuotas,cuota,primera_cuota,saldo,observacion) VALUES(?,?,?,?,?,?,?,?)",(tp.id,fecha_p.isoformat(),monto_p,int(cuotas),cuota_final,primera,monto_p,obs_p)); conn.commit(); st.success('Préstamo registrado.'); st.rerun()
+                    conn.execute("INSERT INTO nomina_prestamos(trabajador_id,fecha,monto_original,numero_cuotas,cuota,primera_cuota,saldo,observacion) VALUES(?,?,?,?,?,?,?,?)",(tp.id,fecha_p.isoformat(),monto_p,int(cuotas),cuota_final,primera,monto_p,obs_p)); conn.commit(); sgci_exito('Préstamo registrado.'); st.rerun()
             st.divider(); st.markdown('#### Movimientos registrados')
             ants=pd.read_sql_query("SELECT a.id,t.nombre,a.periodo,a.fecha,a.monto,a.contabilizado,a.asiento_id FROM nomina_anticipos a JOIN nomina_trabajadores t ON t.id=a.trabajador_id ORDER BY a.id DESC",conn)
             pres=pd.read_sql_query("SELECT p.id,t.nombre,p.fecha,p.monto_original,p.numero_cuotas,p.cuota,p.saldo,p.estado,p.contabilizado,p.asiento_id FROM nomina_prestamos p JOIN nomina_trabajadores t ON t.id=p.trabajador_id ORDER BY p.id DESC",conn)
@@ -5847,7 +5871,7 @@ elif menu == "👥 Nómina":
                 op=st.selectbox('Movimiento pendiente',[x[0] for x in pendientes]); mov=next(x for x in pendientes if x[0]==op)
                 bm={f"{r.nombre} - {r.numero_cuenta} ({r.cuenta_contable})":r for r in bancos.itertuples()}; bl=st.selectbox('Banco utilizado',list(bm)); br=bm[bl]
                 if st.button('Contabilizar salida bancaria',type='primary'):
-                    asi=nomina_registrar_pago_activo(conn,mov[1],mov[2],mov[3],mov[4],mov[5],br.cuenta_contable,mov[0]); st.success(f'Asiento N° {asi} generado.'); st.rerun()
+                    asi=nomina_registrar_pago_activo(conn,mov[1],mov[2],mov[3],mov[4],mov[5],br.cuenta_contable,mov[0]); sgci_exito(f'Asiento N° {asi} generado.'); st.rerun()
             elif pendientes: st.warning('Hay movimientos pendientes, pero no existe una cuenta bancaria activa vinculada contablemente.')
 
     with tabs[2]:
@@ -5902,7 +5926,7 @@ elif menu == "👥 Nómina":
             if st.button('💾 Guardar / recalcular liquidación',type='primary'):
                 vals=(periodo,tr.id,dias,sueldo_base,sueldo_periodo,grat,horas,bonos,otros_imp,bono_noimp,noimp,otros_noimp,total_imp,total_noimp,clp_round(total_imp+total_noimp),afp_vig,comision,calc['afp'],salud_tipo_vig,mod,sval,calc['salud'],afc,impuesto,pre_desc,otros_desc,calc['total_desc'],calc['liquido'],ant,calc['saldo'],uf_valor,calc['salud_plan_pesos'],'CALCULADO',obs)
                 conn.execute("""INSERT INTO nomina_liquidaciones(periodo,trabajador_id,dias_trabajados,sueldo_base,sueldo_periodo,gratificacion,horas_extras,bonos_imponibles,otros_imponibles,bono_no_imponible,asignacion_no_imponible,otros_no_imponibles,total_imponible,total_no_imponible,total_haberes,afp_nombre,afp_comision,afp_descuento,salud_tipo,salud_modalidad,salud_valor,salud_descuento,afc_descuento,impuesto_unico,prestamo_descuento,otros_descuentos,total_descuentos,liquido_periodo,anticipo,saldo_pagar,uf_valor,salud_plan_pesos,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(periodo,trabajador_id) DO UPDATE SET dias_trabajados=excluded.dias_trabajados,sueldo_base=excluded.sueldo_base,sueldo_periodo=excluded.sueldo_periodo,gratificacion=excluded.gratificacion,horas_extras=excluded.horas_extras,bonos_imponibles=excluded.bonos_imponibles,otros_imponibles=excluded.otros_imponibles,bono_no_imponible=excluded.bono_no_imponible,asignacion_no_imponible=excluded.asignacion_no_imponible,otros_no_imponibles=excluded.otros_no_imponibles,total_imponible=excluded.total_imponible,total_no_imponible=excluded.total_no_imponible,total_haberes=excluded.total_haberes,afp_nombre=excluded.afp_nombre,afp_comision=excluded.afp_comision,afp_descuento=excluded.afp_descuento,salud_tipo=excluded.salud_tipo,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,salud_descuento=excluded.salud_descuento,afc_descuento=excluded.afc_descuento,impuesto_unico=excluded.impuesto_unico,prestamo_descuento=excluded.prestamo_descuento,otros_descuentos=excluded.otros_descuentos,total_descuentos=excluded.total_descuentos,liquido_periodo=excluded.liquido_periodo,anticipo=excluded.anticipo,saldo_pagar=excluded.saldo_pagar,uf_valor=excluded.uf_valor,salud_plan_pesos=excluded.salud_plan_pesos,estado=CASE WHEN nomina_liquidaciones.estado='CONTABILIZADO' THEN nomina_liquidaciones.estado ELSE 'CALCULADO' END,observacion=excluded.observacion""",vals)
-                conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)",(periodo,)); conn.commit(); st.success('Liquidación guardada.'); st.rerun()
+                conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)",(periodo,)); conn.commit(); sgci_exito('Liquidación guardada.'); st.rerun()
 
     with tabs[3]:
         st.subheader('Resumen de nómina y reportes')
@@ -5936,12 +5960,12 @@ elif menu == "👥 Nómina":
         afpdf=pd.read_sql_query("SELECT afp,comision,vigente_desde,activo FROM nomina_parametros_afp ORDER BY afp",conn); st.dataframe(afpdf,use_container_width=True,hide_index=True)
         amap={r.afp:r for r in afpdf.itertuples()}; aa=st.selectbox('AFP a modificar',list(amap)); ar=amap[aa]; nueva=st.number_input('Comisión %',min_value=0.0,max_value=10.0,value=float(ar.comision),step=.01); vig=st.text_input('Vigente desde',value=ar.vigente_desde or '')
         if st.button('Guardar parámetro AFP'):
-            conn.execute("UPDATE nomina_parametros_afp SET comision=?,vigente_desde=? WHERE afp=?",(nueva,vig,aa)); conn.commit(); st.success('Parámetro actualizado.'); st.rerun()
+            conn.execute("UPDATE nomina_parametros_afp SET comision=?,vigente_desde=? WHERE afp=?",(nueva,vig,aa)); conn.commit(); sgci_exito('Parámetro actualizado.'); st.rerun()
         st.info('Salud: Fonasa usa 7% legal. Isapre admite 7%, porcentaje pactado, plan en UF o monto pactado en pesos; la liquidación conserva el valor UF utilizado y permite ajuste manual.')
         st.markdown('#### Valor UF por período')
         pu=st.text_input('Período UF (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='uf_per'); vu=st.number_input('Valor UF del período',min_value=0.0,value=0.0,step=1.0,key='uf_val')
         if st.button('Guardar valor UF',key='uf_save'):
-            conn.execute("INSERT INTO nomina_parametros_mensuales(periodo,valor_uf) VALUES(?,?) ON CONFLICT(periodo) DO UPDATE SET valor_uf=excluded.valor_uf",(pu,vu)); conn.commit(); st.success('UF guardada para el período.'); st.rerun()
+            conn.execute("INSERT INTO nomina_parametros_mensuales(periodo,valor_uf) VALUES(?,?) ON CONFLICT(periodo) DO UPDATE SET valor_uf=excluded.valor_uf",(pu,vu)); conn.commit(); sgci_exito('UF guardada para el período.'); st.rerun()
         ufdf=pd.read_sql_query("SELECT periodo,valor_uf FROM nomina_parametros_mensuales ORDER BY periodo DESC",conn)
         if not ufdf.empty: st.dataframe(ufdf,use_container_width=True,hide_index=True)
 
@@ -5955,9 +5979,28 @@ elif menu == "👥 Nómina":
             df=pd.read_sql_query("SELECT COUNT(*) n,COALESCE(SUM(total_haberes),0) haberes,COALESCE(SUM(total_descuentos),0) descuentos,COALESCE(SUM(anticipo),0) anticipos,COALESCE(SUM(saldo_pagar),0) saldo FROM nomina_liquidaciones WHERE periodo=?",conn,params=(per,)).iloc[0]
             a,b,c,d=st.columns(4); a.metric('Trabajadores',int(df.n)); b.metric('Haberes',money(df.haberes)); c.metric('Anticipos',money(df.anticipos)); d.metric('Saldo fin de mes',money(df.saldo))
             st.warning('Al contabilizar, el período queda marcado como CONTABILIZADO. Revisa primero el resumen y las liquidaciones.')
-            if st.button('🧾 Contabilizar nómina',type='primary'):
-                try: asi=nomina_contabilizar_periodo(conn,per); registrar_auditoria(conn,'CONTABILIZAR NÓMINA',f'{per} asiento {asi}'); st.success(f'Nómina contabilizada en asiento N° {asi}.'); st.rerun()
-                except Exception as e: st.error(str(e))
+            try:
+                fecha_previa, partidas, total_debe, total_haber=nomina_vista_previa(conn,per)
+                st.markdown('#### Vista previa del asiento contable (sin guardar)')
+                st.caption(f'Fecha del asiento: {fecha_previa}. Los anticipos se compensan como activo; no se registra un nuevo movimiento de Banco.')
+                st.dataframe(pd.DataFrame(partidas),use_container_width=True,hide_index=True)
+                c1,c2,c3=st.columns(3)
+                c1.metric('Debe',money(total_debe)); c2.metric('Haber',money(total_haber)); c3.metric('Diferencia',money(total_debe-total_haber))
+                if total_debe==total_haber:
+                    st.success('Vista previa cuadrada. Revisa las cuentas antes de confirmar.')
+                else:
+                    st.error('Asiento descuadrado. No se permite contabilizar.')
+                st.info('Las cotizaciones de cargo del empleador no están incluidas en este asiento y requieren su registro separado. El anticipo de febrero de Maricruz no se incluye en enero.')
+                confirma=st.checkbox('Revisé las cuentas y los montos de la vista previa.',key=f'confirmar_nomina_{per}')
+                if st.button('🧾 Contabilizar nómina',type='primary',disabled=(not confirma or total_debe!=total_haber)):
+                    try:
+                        asi=nomina_contabilizar_periodo(conn,per)
+                        registrar_auditoria(conn,'CONTABILIZAR NÓMINA',f'{per} asiento {asi}')
+                        sgci_exito(f'Nómina {per} contabilizada correctamente. Asiento N° {asi}.')
+                        st.rerun()
+                    except Exception as e: st.error(f'No se contabilizó la nómina: {e}')
+            except Exception as e:
+                st.error(f'No se puede preparar el asiento: {e}')
         else: st.info('No hay períodos pendientes de contabilización.')
 
 
@@ -5981,7 +6024,7 @@ elif menu == "📊 Estados Financieros":
             st.dataframe(mostrar_ef,use_container_width=True,hide_index=True)
             pdf_ef=nomina_pdf("Estado de Resultados",f"Desde {ds} hasta {hs}",["Código","Cuenta","Saldo"],[[r.Código,r.Cuenta,money(r.Saldo)] for r in mostrar_ef.itertuples(index=False)],["","RESULTADO",money(resultado)])
             st.download_button("🖨️ Imprimir / PDF Estado de Resultados",pdf_ef,f"estado_resultados_{hs}.pdf","application/pdf",key="pdf_er")
-            st.success(f"Resultado del período: {money(resultado)}" if resultado>=0 else f"Resultado del período: {money(resultado)} (pérdida)")
+            sgci_exito(f"Resultado del período: {money(resultado)}" if resultado>=0 else f"Resultado del período: {money(resultado)} (pérdida)")
     elif modo=="Estado de Situación Financiera":
         df=estado_situacion(conn,hs)
         if df.empty: st.info("No hay movimientos para la fecha seleccionada.")
@@ -6003,7 +6046,7 @@ elif menu == "📊 Estados Financieros":
             st.dataframe(mostrar_bc,use_container_width=True,hide_index=True)
             pdf_bc=nomina_pdf("Balance de Comprobación",f"Al {hs}",["Código","Cuenta","Debe","Haber","Saldo"],[[r.Código,r.Cuenta,money(r.Debe),money(r.Haber),money(r.Saldo)] for r in mostrar_bc.itertuples(index=False)],["","TOTALES",money(df.debe.sum()),money(df.haber.sum()),money(df.saldo.sum())])
             st.download_button("🖨️ Imprimir / PDF Balance",pdf_bc,f"balance_comprobacion_{hs}.pdf","application/pdf",key="pdf_bc_ef")
-            st.success("🟢 Balance cuadrado" if abs(df.debe.sum()-df.haber.sum())<0.01 else f"🔴 Diferencia: {money(df.debe.sum()-df.haber.sum())}")
+            sgci_exito("🟢 Balance cuadrado" if abs(df.debe.sum()-df.haber.sum())<0.01 else f"🔴 Diferencia: {money(df.debe.sum()-df.haber.sum())}")
 
 
 # ============================================================
@@ -6030,7 +6073,7 @@ elif menu == "🏦 Bancos y Cartolas":
             saldo = st.number_input("Saldo inicial", value=0.0, step=1000.0,format='%.0f')
             if st.form_submit_button("Guardar cuenta bancaria"):
                 conn.execute("INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)", (nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo))
-                conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); st.success("Cuenta bancaria creada.")
+                conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); sgci_exito("Cuenta bancaria creada.")
 
         st.divider()
         st.subheader("Vinculación contable de cuentas bancarias")
@@ -6048,7 +6091,7 @@ elif menu == "🏦 Bancos y Cartolas":
             if st.button("💾 Guardar vinculación bancaria", key="guardar_cfg_banco"):
                 conn.execute("UPDATE bancos SET cuenta_contable=? WHERE id=?", (mapa[nueva_etiqueta], banco_cfg_id))
                 conn.commit(); registrar_auditoria(conn,"VINCULACIÓN BANCO",f"Banco {banco_cfg_id} -> {mapa[nueva_etiqueta]}")
-                st.success("Vinculación actualizada. Los próximos asientos de esta cartola usarán esa cuenta bancaria.")
+                sgci_exito("Vinculación actualizada. Los próximos asientos de esta cartola usarán esa cuenta bancaria.")
                 st.rerun()
 
     with tabs[1]:
@@ -6078,7 +6121,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         if st.button("Importar cartola", type="primary"):
                             nuevos,repetidos,lote = importar_cartola(conn, dfc, banco_id, origen="PDF" if archivo.name.lower().endswith(".pdf") else "ARCHIVO")
                             registrar_importacion_archivo(conn,"CARTOLA",archivo.name,archivo_hash,lote,len(dfc),nuevos,repetidos)
-                            st.success(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
+                            sgci_exito(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
                             st.rerun()
                 except Exception as e:
                     st.error(str(e))
@@ -6116,7 +6159,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     if st.button("🗑️ Eliminar importación seleccionada",disabled=not confirmar_borrado,key="borrar_lote_cartola"):
                         try:
                             n=eliminar_importacion_cartola(conn,banco_id,lote_sel)
-                            st.success(f"Importación eliminada correctamente: {n} movimiento(s).")
+                            sgci_exito(f"Importación eliminada correctamente: {n} movimiento(s).")
                             st.rerun()
                         except Exception as e:
                             st.error(str(e))
@@ -6144,7 +6187,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         abono = monto if naturaleza.startswith("Abono") else 0
                         nuevos,repetidos,_ = registrar_movimiento_manual(conn,banco_id,fecha_mov.strftime("%Y-%m-%d"),descripcion,referencia,cargo,abono,saldo)
                         if nuevos:
-                            st.success("Movimiento guardado. Ya está disponible para conciliación.")
+                            sgci_exito("Movimiento guardado. Ya está disponible para conciliación.")
                         else:
                             st.warning("Ese movimiento ya existe y no se duplicó.")
 
@@ -6159,13 +6202,13 @@ elif menu == "🏦 Bancos y Cartolas":
             if info:
                 sc,ss,dif,movs = info
                 a,b,c = st.columns(3); a.metric("Saldo cartola",money(sc)); b.metric("Saldo contable",money(ss)); c.metric("Diferencia",money(dif))
-                st.success("🟢 Conciliación sin diferencia" if abs(dif)<0.01 else "🟡 Revisar diferencias")
+                sgci_exito("🟢 Conciliación sin diferencia" if abs(dif)<0.01 else "🟡 Revisar diferencias")
 
             pendientes = pd.read_sql_query("""SELECT id,fecha,descripcion,referencia,cargo,abono,saldo,origen
                                                 FROM cartola_bancaria WHERE banco_id=? AND conciliado=0
                                                 ORDER BY fecha,id""", conn, params=[banco_id])
             if pendientes.empty:
-                st.success("No hay movimientos pendientes de conciliación.")
+                sgci_exito("No hay movimientos pendientes de conciliación.")
             else:
                 st.subheader("Movimientos pendientes")
                 opciones_mov = []
@@ -6190,7 +6233,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     if st.button("✅ Confirmar y contabilizar coincidencia", type="primary"):
                         try:
                             asiento = contabilizar_conciliacion_bancaria(conn,movimiento_id,elegido_c["tipo"],int(elegido_c["id"]))
-                            st.success(f"Movimiento conciliado y contabilizado en el asiento {asiento}.")
+                            sgci_exito(f"Movimiento conciliado y contabilizado en el asiento {asiento}.")
                             st.rerun()
                         except Exception as e:
                             st.error(f"No se pudo conciliar: {e}")
@@ -6233,7 +6276,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                 asiento_nom, anticipo_id=contabilizar_anticipo_nomina_desde_cartola(
                                     conn,movimiento_id,trab_banco.id,periodo_banco,obs_nom
                                 )
-                                st.success(f"Anticipo registrado en Nómina y conciliado. Asiento {asiento_nom} · Anticipo #{anticipo_id}.")
+                                sgci_exito(f"Anticipo registrado en Nómina y conciliado. Asiento {asiento_nom} · Anticipo #{anticipo_id}.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"No se pudo registrar el anticipo: {e}")
@@ -6302,7 +6345,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                         msg=f"Pago contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado."
                                         if diferencia>0:
                                             msg += f" Diferencia imputada: {money(diferencia)}."
-                                        st.success(msg)
+                                        sgci_exito(msg)
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"No se pudo contabilizar el pago: {e}")
@@ -6314,7 +6357,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             if st.button("💳 Contabilizar pago sin documento", type="primary", disabled=not confirma_sin_doc, key=f"btn_pago_prov_sd_{movimiento_id}"):
                                 try:
                                     asiento = contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, prov_id)
-                                    st.success(f"Pago sin documento contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado.")
+                                    sgci_exito(f"Pago sin documento contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado.")
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"No se pudo contabilizar el pago: {e}")
@@ -6347,7 +6390,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                       VALUES(?,?,'Saldo de apertura ya contabilizado')
                                       ON CONFLICT(cliente_id) DO UPDATE SET monto=excluded.monto""",(cli_id,int(saldo_nuevo)))
                                     conn.commit()
-                                    st.success("Saldo inicial auxiliar guardado; no se generó asiento.")
+                                    sgci_exito("Saldo inicial auxiliar guardado; no se generó asiento.")
                                     st.rerun()
                         apertura_disponible=sgci_saldo_apertura_disponible(conn,cli_id)
                         st.caption(f"Saldo de apertura disponible para aplicar: {money(apertura_disponible)}")
@@ -6367,7 +6410,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             c2.metric("Total distribuido",money(suma_docs+int(aplicar_apertura)))
                             c3.metric("Diferencia",money(diferencia_mix))
                             if diferencia_mix==0 and (ids_mix or aplicar_apertura):
-                                st.success("Distribución cuadrada.")
+                                sgci_exito("Distribución cuadrada.")
                             else:
                                 st.warning("La suma de facturas y apertura debe coincidir exactamente con el abono.")
                             confirm_mix=st.checkbox("Confirmo el cobro mixto y su imputación al cliente.",key=f"mix_conf_{movimiento_id}")
@@ -6376,7 +6419,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                 key=f"mix_btn_{movimiento_id}",type="primary"):
                                 try:
                                     asi=sgci_cobro_mixto(conn,movimiento_id,cli_id,ids_mix,int(aplicar_apertura))
-                                    st.success(f"Cobro mixto contabilizado en asiento {asi}.")
+                                    sgci_exito(f"Cobro mixto contabilizado en asiento {asi}.")
                                     st.rerun()
                                 except Exception as e: st.error(f"No se pudo conciliar: {e}")
                         modo_cli=st.radio("Aplicación del abono",
@@ -6415,7 +6458,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                 if st.button("💰 Contabilizar cobro de cliente",type="primary",disabled=(not conf or not ids or falta),key=f"btn_cobro_cli_{movimiento_id}"):
                                     try:
                                         asi,aps,sob=contabilizar_cobro_cliente_desde_cartola(conn,movimiento_id,cli_id,ids,cuenta_sobrante,glosa_sobrante)
-                                        st.success(f"Cobro contabilizado y conciliado en asiento {asi}."+ (f" Sobrante registrado: {money(sob)}." if sob else ""))
+                                        sgci_exito(f"Cobro contabilizado y conciliado en asiento {asi}."+ (f" Sobrante registrado: {money(sob)}." if sob else ""))
                                         st.rerun()
                                     except Exception as e: st.error(f"No se pudo contabilizar el cobro: {e}")
                         else:
@@ -6428,7 +6471,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             if st.button("💰 Registrar anticipo de cliente",type="primary",disabled=not conf,key=f"btn_ant_cli_{movimiento_id}"):
                                 try:
                                     asi=contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cli_id,mapa.get(selcta))
-                                    st.success(f"Anticipo/cobro sin documento contabilizado y conciliado en asiento {asi}.")
+                                    sgci_exito(f"Anticipo/cobro sin documento contabilizado y conciliado en asiento {asi}.")
                                     st.rerun()
                                 except Exception as e: st.error(f"No se pudo registrar el anticipo: {e}")
 
@@ -6452,7 +6495,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         if st.button("🧾 Contabilizar e imputar manualmente", type="primary", disabled=not confirmar_manual, key=f"imputacion_btn_{movimiento_id}"):
                             try:
                                 asiento = contabilizar_imputacion_manual_bancaria(conn,movimiento_id,mapa_manual[cuenta_manual],glosa_manual)
-                                st.success(f"Movimiento imputado, conciliado y contabilizado en el asiento {asiento}.")
+                                sgci_exito(f"Movimiento imputado, conciliado y contabilizado en el asiento {asiento}.")
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"No se pudo imputar el movimiento: {e}")
@@ -6488,14 +6531,14 @@ elif menu == "🏦 Bancos y Cartolas":
                     glosa_multi = st.text_input("Glosa del asiento distribuido", value=glosa_multi_base, key=f"multi_glosa_{movimiento_id}")
                     cuadra_multi = (clp_round(total_dist) == clp_round(monto_multi)) and sum(1 for _,v in distribuciones_ui if v>0) >= 2
                     if cuadra_multi:
-                        st.success("La distribución cuadra exactamente con el movimiento bancario.")
+                        sgci_exito("La distribución cuadra exactamente con el movimiento bancario.")
                     else:
                         st.warning("La distribución debe sumar exactamente el monto bancario y contener al menos dos montos mayores que cero.")
                     confirma_multi = st.checkbox("Confirmo la distribución y deseo contabilizar y conciliar este movimiento.", key=f"multi_conf_{movimiento_id}")
                     if st.button("🧩 Contabilizar distribución", type="primary", disabled=not (confirma_multi and cuadra_multi), key=f"multi_btn_{movimiento_id}"):
                         try:
                             asiento = contabilizar_imputacion_multiple_bancaria(conn, movimiento_id, distribuciones_ui, glosa_multi)
-                            st.success(f"Movimiento distribuido, conciliado y contabilizado en el asiento {asiento}.")
+                            sgci_exito(f"Movimiento distribuido, conciliado y contabilizado en el asiento {asiento}.")
                             st.rerun()
                         except Exception as e:
                             st.error(f"No se pudo contabilizar la distribución: {e}")
@@ -6518,7 +6561,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     st.error("Completa descripción, monto y cuenta contable.")
                 else:
                     crear_obligacion_manual(conn,fecha_op.strftime("%Y-%m-%d"),tipo_op,descripcion_op,referencia_op,monto_op,mapa[cuenta_op])
-                    st.success("Operación guardada. SGCI podrá encontrarla por coincidencia de monto.")
+                    sgci_exito("Operación guardada. SGCI podrá encontrarla por coincidencia de monto.")
                     st.rerun()
 
         ops = pd.read_sql_query("""SELECT o.id,o.fecha,o.tipo,o.descripcion,o.referencia,o.monto,o.codigo_cuenta,
@@ -6555,7 +6598,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 if st.button("↩️ Revertir y reabrir movimiento", disabled=not confirma_corr, key="corr_btn"):
                     try:
                         rev = corregir_conciliacion_manual(conn, corr_map[corr_label])
-                        st.success(f"Imputación revertida mediante el asiento {rev}. El movimiento vuelve a estar pendiente de conciliación.")
+                        sgci_exito(f"Imputación revertida mediante el asiento {rev}. El movimiento vuelve a estar pendiente de conciliación.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo corregir la imputación: {e}")
@@ -6587,14 +6630,14 @@ elif menu == "🔒 Cierre Mensual":
         st.subheader("Lista de comprobación")
         if alertas:
             for x in alertas: st.error("🔴 "+x)
-        else: st.success("🟢 No se detectaron diferencias básicas. El período está listo para revisión final.")
+        else: sgci_exito("🟢 No se detectaron diferencias básicas. El período está listo para revisión final.")
         if periodo_estado(conn,periodo)=="ABIERTO":
             if st.button("🔒 CERRAR PERÍODO",type="primary"):
                 if alertas: st.error("No se recomienda cerrar mientras existan alertas.")
                 else:
-                    conn.execute("UPDATE periodos_contables SET estado='CERRADO',fecha_cierre=? WHERE periodo=?",(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),periodo)); conn.commit(); registrar_auditoria(conn,"CIERRE CONTABLE",periodo); st.success("Período cerrado."); st.rerun()
+                    conn.execute("UPDATE periodos_contables SET estado='CERRADO',fecha_cierre=? WHERE periodo=?",(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),periodo)); conn.commit(); registrar_auditoria(conn,"CIERRE CONTABLE",periodo); sgci_exito("Período cerrado."); st.rerun()
         else:
-            st.success("🔒 Período cerrado")
+            sgci_exito("🔒 Período cerrado")
             if st.button("Reabrir período"):
                 conn.execute("UPDATE periodos_contables SET estado='ABIERTO',fecha_cierre=NULL WHERE periodo=?",(periodo,)); conn.commit(); registrar_auditoria(conn,"REAPERTURA CONTABLE",periodo); st.warning("Período reabierto."); st.rerun()
     except Exception as e: st.error(f"Período inválido: {e}")
@@ -6644,7 +6687,7 @@ elif menu == "📥 RCV Compras":
                     st.session_state.pop("rcv_compras",None); st.session_state.pop("rcv_compras_archivo",None)
                 else:
                     df_original = leer_archivo_tabular(archivo)
-                    st.success(f"Archivo leído: {len(df_original):,} filas")
+                    sgci_exito(f"Archivo leído: {len(df_original):,} filas")
                     df = normalizar_rcv(df_original,"compras")
                     df = preparar_documentos(conn,df,"compras")
                     st.session_state["rcv_compras"] = df
@@ -6713,7 +6756,7 @@ elif menu == "📥 RCV Compras":
                     df_procesado = preparar_documentos(conn,df_prep,"compras")
                     st.session_state["rcv_compras"] = df_procesado
                     st.session_state["rcv_compras_archivo"]={"nombre":archivo_subido.name,"hash":archivo_hash,"leidos":len(df_subido)}
-                    st.success("¡Plantilla adjuntada y procesada con éxito! Revisa la bandeja de revisión abajo.")
+                    sgci_exito("¡Plantilla adjuntada y procesada con éxito! Revisa la bandeja de revisión abajo.")
             except Exception as e:
                 st.error(f"Error procesando la plantilla adjunta: {e}")
 
@@ -6763,7 +6806,7 @@ elif menu == "📥 RCV Compras":
             if st.button("🔄 RECLASIFICAR COMPRAS", type="primary", disabled=(not seleccionados or not confirmar), key="btn_reclas_compras"):
                 try:
                     r = reclasificar_compras(conn, seleccionados, nueva_codigo, recordar)
-                    st.success(f"Reclasificación completada: {r['reclasificadas']} compra(s). Omitidas: {r['omitidas']}.")
+                    sgci_exito(f"Reclasificación completada: {r['reclasificadas']} compra(s). Omitidas: {r['omitidas']}.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"No fue posible reclasificar: {e}")
@@ -6867,7 +6910,7 @@ elif menu == "📥 RCV Compras":
                     if meta:
                         duplicados=int(df["estado"].astype(str).str.startswith("🔁").sum())
                         registrar_importacion_archivo(conn,"RCV_COMPRAS",meta["nombre"],meta["hash"],resultado.get("lote"),meta["leidos"],resultado["documentos"],duplicados)
-                    st.success(f"Se contabilizaron {resultado['documentos']} documentos. Los documentos ya existentes fueron omitidos.")
+                    sgci_exito(f"Se contabilizaron {resultado['documentos']} documentos. Los documentos ya existentes fueron omitidos.")
                     st.session_state.pop("rcv_compras",None); st.session_state.pop("rcv_compras_archivo",None)
                 except Exception as e:
                     st.error(f"No se contabilizó el lote: {e}")
@@ -6924,7 +6967,7 @@ elif menu == "📥 RCV Compras":
                         try:
                             res=recuperar_datos_tributarios_rcv(conn,cruces_hist)
                             if res["actualizados"] == res["verificados"] and not res["errores"]:
-                                st.success(
+                                sgci_exito(
                                     f"✅ {res['verificados']} documento(s) actualizados y verificados en SQLite. "
                                     f"IVA recuperable guardado: {money(res['iva'])}. "
                                     "No se generaron asientos contables."
@@ -6955,7 +6998,7 @@ elif menu == "📥 RCV Compras":
 
         pendientes_iva = compras_pendientes_regularizar_iva(conn)
         if pendientes_iva.empty:
-            st.success("No hay compras históricas pendientes de regularizar en IVA Crédito Fiscal.")
+            sgci_exito("No hay compras históricas pendientes de regularizar en IVA Crédito Fiscal.")
         else:
             total_iva_pend = float(pendientes_iva["iva"].abs().sum())
             civa1,civa2 = st.columns(2)
@@ -6995,7 +7038,7 @@ elif menu == "📥 RCV Compras":
             ):
                 try:
                     res_iva = regularizar_iva_historico_compras(conn)
-                    st.success(
+                    sgci_exito(
                         f"Regularización completada: {res_iva['documentos']} documento(s) · "
                         f"IVA neto {money(res_iva['iva'])} · Lote {res_iva['lote']}."
                     )
@@ -7039,7 +7082,7 @@ elif menu == "📤 RCV Ventas":
                 df=preparar_documentos(conn,df,"ventas")
                 st.session_state["rcv_ventas"]=df
                 st.session_state["rcv_ventas_archivo"]={"nombre":archivo.name,"hash":archivo_hash,"leidos":len(df_original)}
-                st.success(f"{len(df):,} documentos encontrados.")
+                sgci_exito(f"{len(df):,} documentos encontrados.")
         except Exception as e:
             st.error(f"Error: {e}")
 
@@ -7132,7 +7175,7 @@ elif menu == "📤 RCV Ventas":
                     if meta:
                         duplicados=int(df["estado"].astype(str).str.startswith("🔁").sum())
                         registrar_importacion_archivo(conn,"RCV_VENTAS",meta["nombre"],meta["hash"],resultado.get("lote"),meta["leidos"],resultado["documentos"],duplicados)
-                    st.success(f"Se contabilizaron {resultado['documentos']} documentos. Los documentos ya existentes fueron omitidos.")
+                    sgci_exito(f"Se contabilizaron {resultado['documentos']} documentos. Los documentos ya existentes fueron omitidos.")
                     st.session_state.pop("rcv_ventas",None); st.session_state.pop("rcv_ventas_archivo",None)
                 except Exception as e:
                     st.error(f"No se contabilizó el lote: {e}")
@@ -7249,7 +7292,7 @@ elif menu == "✍️ Asientos y Saldos":
                         VALUES (?,?,?,?,?,?)
                     """,(periodo_f29.strip(),fecha_iso_f29,float(debito_f29),float(credito_f29),float(iva_pagar_f29),asiento))
                     conn.commit()
-                    st.success(f"Compensación registrada. Asiento {asiento}. IVA por pagar: {_f29_clp(iva_pagar_f29)}")
+                    sgci_exito(f"Compensación registrada. Asiento {asiento}. IVA por pagar: {_f29_clp(iva_pagar_f29)}")
                     st.rerun()
                 except Exception as e:
                     conn.rollback()
@@ -7351,7 +7394,7 @@ elif menu == "✍️ Asientos y Saldos":
                 if errores:
                     st.error("Se encontraron errores en la matriz:\n\n" + "\n".join(errores[:30]))
                 else:
-                    st.success("¡Matriz validada y cuadrada correctamente!")
+                    sgci_exito("¡Matriz validada y cuadrada correctamente!")
                     st.dataframe(resultado, use_container_width=True, hide_index=True)
 
                     if st.button("✅ REGISTRAR EN LIBRO DIARIO", type="primary"):
@@ -7400,7 +7443,7 @@ elif menu == "✍️ Asientos y Saldos":
                                 )
 
                             conn.commit()
-                            st.success(f"¡Registrado con éxito! Lote generado: {lote}")
+                            sgci_exito(f"¡Registrado con éxito! Lote generado: {lote}")
                         except Exception as e:
                             conn.rollback()
                             st.error(f"Error al guardar: {e}")
@@ -7536,7 +7579,7 @@ elif menu == "👥 Clientes":
                             )
                         )
                         conn.commit()
-                        st.success("Cliente creado.")
+                        sgci_exito("Cliente creado.")
                     except Exception as e:
                         st.error(str(e))
 
@@ -7649,7 +7692,7 @@ elif menu == "🏢 Proveedores":
                             )
                         )
                         conn.commit()
-                        st.success("Proveedor creado.")
+                        sgci_exito("Proveedor creado.")
                     except Exception as e:
                         st.error(str(e))
 
@@ -7712,7 +7755,7 @@ elif menu == "💵 Pagos":
                             cuenta_banco,
                             glosa
                         )
-                        st.success(f"Pago registrado. Lote: {lote}")
+                        sgci_exito(f"Pago registrado. Lote: {lote}")
                     except Exception as e:
                         st.error(str(e))
 
@@ -7762,7 +7805,7 @@ elif menu == "💵 Pagos":
                             cuenta_banco,
                             glosa
                         )
-                        st.success(f"Pago registrado. Lote: {lote}")
+                        sgci_exito(f"Pago registrado. Lote: {lote}")
                     except Exception as e:
                         st.error(str(e))
 
@@ -7859,7 +7902,7 @@ elif menu == "⚖️ Balance de Comprobación":
         c3.metric("Diferencia", money(debe - haber))
 
         if abs(debe - haber) < 0.01:
-            st.success("🟢 Balance cuadrado.")
+            sgci_exito("🟢 Balance cuadrado.")
         else:
             st.error("🔴 Existe diferencia.")
 
@@ -7921,7 +7964,7 @@ elif menu == "📊 Conciliación":
                         monto_asig=asignar_anticipo_contable_a_cliente(
                             conn,mapa_ant[ant_lab],mapa_cli_asig[cli_lab_asig]
                         )
-                        st.success(f"Anticipo por {money(monto_asig)} asignado al auxiliar. El asiento contable original no fue modificado.")
+                        sgci_exito(f"Anticipo por {money(monto_asig)} asignado al auxiliar. El asiento contable original no fue modificado.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo asignar el anticipo: {e}")
@@ -7981,7 +8024,7 @@ elif menu == "📊 Conciliación":
                     try:
                         apps_aux,saldo_aux=aplicar_abono_auxiliar_cliente(conn,id_cli_aux,pago_id_aux,ids_docs_aux)
                         total_ap_aux=sum(x[1] for x in apps_aux)
-                        st.success(f"Aplicación auxiliar realizada por {money(total_ap_aux)}. Saldo disponible del abono: {money(saldo_aux)}.")
+                        sgci_exito(f"Aplicación auxiliar realizada por {money(total_ap_aux)}. Saldo disponible del abono: {money(saldo_aux)}.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"No se pudo aplicar el abono: {e}")
@@ -7995,7 +8038,7 @@ elif menu == "📊 Conciliación":
             st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
             diferencia = df.iloc[0]["Diferencia"]
             if abs(diferencia) < 0.01:
-                st.success("🟢 Auxiliar de clientes conciliado.")
+                sgci_exito("🟢 Auxiliar de clientes conciliado.")
             else:
                 st.error(f"🔴 Diferencia: {money(diferencia)}")
 
@@ -8088,7 +8131,7 @@ elif menu == "📊 Conciliación":
                             conn,id_prov_aux,pago_id_prov,ids_docs_prov
                         )
                         total_ap_prov=sum(x[1] for x in apps_prov)
-                        st.success(
+                        sgci_exito(
                             f"Aplicación auxiliar realizada por {money(total_ap_prov)}. "
                             f"Saldo disponible del pago: {money(saldo_prov)}."
                         )
@@ -8105,7 +8148,7 @@ elif menu == "📊 Conciliación":
             st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
             diferencia = df.iloc[0]["Diferencia"]
             if abs(diferencia) < 0.01:
-                st.success("🟢 Auxiliar de proveedores conciliado.")
+                sgci_exito("🟢 Auxiliar de proveedores conciliado.")
             else:
                 st.error(f"🔴 Diferencia: {money(diferencia)}")
 
@@ -8169,7 +8212,7 @@ elif menu == "📋 Plan de Cuentas":
 
             if st.button(f"Guardar {descripcion}", key=f"guardar_rol_{rol}"):
                 guardar_rol(conn, rol, mapa[nuevo])
-                st.success("Configuración guardada.")
+                sgci_exito("Configuración guardada.")
 
     with pestañas[2]:
         with st.form("nueva_cuenta"):
@@ -8205,7 +8248,7 @@ elif menu == "📋 Plan de Cuentas":
                         )
                     )
                     conn.commit()
-                    st.success("Cuenta creada.")
+                    sgci_exito("Cuenta creada.")
                 except Exception as e:
                     st.error(str(e))
 
@@ -8316,7 +8359,7 @@ elif menu == "📋 Plan de Cuentas":
                         )
                     )
                     conn.commit()
-                    st.success(f"Cuenta {codigo_editar} actualizada correctamente.")
+                    sgci_exito(f"Cuenta {codigo_editar} actualizada correctamente.")
                     st.rerun()
                 except Exception as e:
                     conn.rollback()
@@ -8360,7 +8403,7 @@ elif menu == "⚙️ Reglas Contables":
                 prioridad,
                 descripcion
             )
-            st.success("Regla guardada.")
+            sgci_exito("Regla guardada.")
 
     st.divider()
     st.subheader("Reglas configuradas actualmente")
@@ -8418,7 +8461,7 @@ elif menu == "📦 Lotes":
         if st.button("🗑️ DESHACER LOTE", type="secondary"):
             try:
                 resultado = deshacer_lote(conn, lote)
-                st.success(f"Lote eliminado: {resultado}")
+                sgci_exito(f"Lote eliminado: {resultado}")
             except Exception as e:
                 st.error(f"No fue posible eliminar el lote: {e}")
 
@@ -8496,7 +8539,7 @@ elif menu == "🧰 Matriz Contable":
                 if errores:
                     st.error("\n".join(errores[:30]))
                 else:
-                    st.success("Matriz validada correctamente.")
+                    sgci_exito("Matriz validada correctamente.")
                     st.dataframe(resultado, use_container_width=True, hide_index=True)
 
                     if st.button("✅ IMPORTAR MATRIZ", type="primary"):
@@ -8545,7 +8588,7 @@ elif menu == "🧰 Matriz Contable":
                                 )
 
                             conn.commit()
-                            st.success(f"Matriz importada. Lote: {lote}")
+                            sgci_exito(f"Matriz importada. Lote: {lote}")
                         except Exception as e:
                             conn.rollback()
                             st.error(f"Error: {e}")
