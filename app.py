@@ -6089,9 +6089,17 @@ elif menu == "📊 Estados Financieros":
 elif menu == "🏦 Bancos y Cartolas":
     st.title("🏦 Banco")
     st.caption("Gestión bancaria, cartolas, movimientos y conciliación bancaria.")
-    tabs = st.tabs(["Cuentas bancarias", "Cargar cartola", "Movimiento manual", "Conciliación", "Operaciones manuales", "Movimientos"])
+    # La navegación se guarda en session_state: st.tabs vuelve a la primera pestaña
+    # en cada rerun (selectbox, radio, botones, conciliaciones, etc.).
+    banco_secciones = ["Cuentas bancarias", "Cargar cartola", "Movimiento manual", "Conciliación", "Operaciones manuales", "Movimientos"]
+    if st.session_state.get("sgci_banco_seccion") not in banco_secciones:
+        st.session_state["sgci_banco_seccion"] = "Conciliación"
+    banco_seccion = st.radio(
+        "Sección bancaria", banco_secciones, horizontal=True,
+        key="sgci_banco_seccion", label_visibility="collapsed"
+    )
 
-    with tabs[0]:
+    if banco_seccion == "Cuentas bancarias":
         df = pd.read_sql_query("SELECT b.id AS ID,b.nombre AS Banco,b.numero_cuenta AS Cuenta,b.tipo AS Tipo,b.moneda AS Moneda,b.cuenta_contable AS Cuenta_Contable,b.saldo_inicial AS Saldo_Inicial FROM bancos b WHERE activo=1 ORDER BY nombre", conn)
         if not df.empty:
             st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
@@ -6127,7 +6135,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 sgci_exito("Vinculación actualizada. Los próximos asientos de esta cartola usarán esa cuenta bancaria.")
                 st.rerun()
 
-    with tabs[1]:
+    if banco_seccion == "Cargar cartola":
         bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
         if bancos.empty:
             st.warning("Primero crea una cuenta bancaria.")
@@ -6215,7 +6223,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         except Exception as e:
                             st.error(str(e))
 
-    with tabs[2]:
+    if banco_seccion == "Movimiento manual":
         bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
         if bancos.empty:
             st.warning("Primero crea una cuenta bancaria.")
@@ -6242,7 +6250,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         else:
                             st.warning("Ese movimiento ya existe y no se duplicó.")
 
-    with tabs[3]:
+    if banco_seccion == "Conciliación":
         bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
         if bancos.empty:
             st.info("No hay cuentas bancarias.")
@@ -6615,7 +6623,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         except Exception as e:
                             st.error(f"No se pudo contabilizar la distribución: {e}")
 
-    with tabs[4]:
+    if banco_seccion == "Operaciones manuales":
         st.subheader("Servicios, nómina y otros pagos/abonos")
         st.caption("Registra aquí operaciones que no provienen del RCV. Luego SGCI las buscará por coincidencia de monto contra la cartola.")
         cuentas = cuentas_imputables(conn)
@@ -6642,7 +6650,7 @@ elif menu == "🏦 Bancos y Cartolas":
         if not ops.empty:
             st.dataframe(ops, use_container_width=True, hide_index=True)
 
-    with tabs[5]:
+    if banco_seccion == "Movimientos":
         bancos = pd.read_sql_query("SELECT id,nombre FROM bancos WHERE activo=1 ORDER BY nombre", conn)
         if not bancos.empty:
             label = st.selectbox("Cuenta", [f"{r.id} - {r.nombre}" for r in bancos.itertuples()], key="mov_banco")
