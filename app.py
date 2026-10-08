@@ -4043,6 +4043,10 @@ def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
         cargo = abs(numero(r.get(cargo_c))) if cargo_c else 0
         abono = abs(numero(r.get(abono_c))) if abono_c else 0
         saldo = numero(r.get(saldo_c)) if saldo_c and limpiar_texto(r.get(saldo_c)) else None
+        # BCI puede tener dos transferencias idénticas en fecha, descripción e importe.
+        # El saldo progresivo distingue las operaciones reales sin inventar documentos bancarios.
+        if not ref and saldo is not None:
+            ref = f"SGCI-SALDO-{int(round(saldo))}"
 
         if not fecha or not desc or (cargo <= 0 and abono <= 0):
             continue
@@ -4179,7 +4183,7 @@ def leer_cartola_pdf(uploaded_file, password=""):
 
     palabras_abono = (
         "ABONO", "DEPOSITO", "DEPÓSITO", "TRANSFERENCIA RECIBIDA",
-        "PAGO RECIBIDO", "TRANSFERENCIA DE", "DEPOSITO EN", "DEPÓSITO EN"
+        "PAGO RECIBIDO", "TRANSFERENCIA DE", "TRANSFER DE", "DEPOSITO EN", "DEPÓSITO EN"
     )
 
     for linea in texto.splitlines():
@@ -4261,15 +4265,43 @@ def sgci_corregir_signo_cartola_pendiente(conn, movimiento_id, tipo_correcto):
     nuevo_abono = monto if tipo_correcto == "Abono" else 0.0
     if cargo == nuevo_cargo and abono == nuevo_abono:
         raise ValueError("El movimiento ya tiene el signo seleccionado.")
+    referencia_original = str(mov["referencia"] or "")
+    referencia_nueva = referencia_original
+    # Si otra transferencia real tiene exactamente el mismo importe y descripción,
+    # la restricción UNIQUE no debe impedir corregir el signo de esta operación.
+    # Usamos el saldo progresivo original para diferenciarla, sin tocar la otra fila.
+    conflicto = conn.execute(
+        """SELECT id FROM cartola_bancaria
+           WHERE banco_id=? AND fecha=? AND descripcion=? AND cargo=? AND abono=?
+             AND referencia=? AND id<>? LIMIT 1""",
+        (mov["banco_id"], mov["fecha"], mov["descripcion"], nuevo_cargo,
+         nuevo_abono, referencia_original, int(movimiento_id))
+    ).fetchone()
+    if conflicto:
+        if mov["saldo"] is None:
+            raise ValueError("Existe otro movimiento igual y falta el saldo bancario para distinguirlos. No se modificó nada.")
+        referencia_nueva = f"SGCI-SALDO-{int(round(float(mov['saldo'])))}"
+        existe_ref = conn.execute(
+            """SELECT id FROM cartola_bancaria WHERE banco_id=? AND fecha=?
+               AND descripcion=? AND cargo=? AND abono=? AND referencia=? AND id<>?""",
+            (mov["banco_id"], mov["fecha"], mov["descripcion"], nuevo_cargo,
+             nuevo_abono, referencia_nueva, int(movimiento_id))
+        ).fetchone()
+        if existe_ref:
+            raise ValueError("Ya existe un movimiento con el mismo saldo y referencia interna. Revisa el PDF; no se modificó nada.")
     try:
-        conn.execute("UPDATE cartola_bancaria SET cargo=?,abono=? WHERE id=? AND conciliado=0 AND asiento_id IS NULL",
-                     (nuevo_cargo, nuevo_abono, int(movimiento_id)))
-        if conn.total_changes < 1:
+        cur = conn.execute(
+            """UPDATE cartola_bancaria SET cargo=?, abono=?, referencia=?
+               WHERE id=? AND conciliado=0 AND asiento_id IS NULL""",
+            (nuevo_cargo, nuevo_abono, referencia_nueva, int(movimiento_id))
+        )
+        if cur.rowcount != 1:
             raise ValueError("No se pudo modificar el movimiento.")
-        conn.commit()
         registrar_auditoria(conn, "CORREGIR SIGNO CARTOLA",
                             f"Movimiento {movimiento_id} banco {mov['banco_id']} fecha {mov['fecha']}: "
-                            f"cargo {cargo} abono {abono} -> cargo {nuevo_cargo} abono {nuevo_abono}")
+                            f"cargo {cargo} abono {abono} -> cargo {nuevo_cargo} abono {nuevo_abono}; "
+                            f"referencia {referencia_original!r} -> {referencia_nueva!r}")
+        conn.commit()
     except Exception:
         conn.rollback()
         raise
