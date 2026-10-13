@@ -5772,6 +5772,45 @@ def dte_guardar(conn, datos, archivo):
     return nuevos,duplicados
 
 
+def dte_reporte_pdf(titulo, df, filtros=''):
+    # PDF horizontal con celdas multilínea; no modifica datos contables.
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, KeepTogether
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import mm
+    from xml.sax.saxutils import escape
+    buffer=io.BytesIO()
+    doc=SimpleDocTemplate(buffer,pagesize=landscape(A4),rightMargin=12*mm,leftMargin=12*mm,topMargin=12*mm,bottomMargin=12*mm)
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='DTECell',fontName='Helvetica',fontSize=7.5,leading=10,alignment=TA_LEFT,wordWrap='CJK'))
+    styles.add(ParagraphStyle(name='DTEHeader',parent=styles['DTECell'],fontName='Helvetica-Bold',textColor=colors.white))
+    story=[Paragraph(escape('SGCI | '+titulo),styles['Heading2']),Paragraph(escape(filtros),styles['Normal']),Spacer(1,6*mm)]
+    if df.empty:
+        story.append(Paragraph('No hay registros para los filtros seleccionados.',styles['Normal']))
+    else:
+        tabla=[ [Paragraph(escape(str(c)),styles['DTEHeader']) for c in df.columns] ]
+        for fila in df.fillna('').itertuples(index=False,name=None):
+            tabla.append([Paragraph(escape(str(v)).replace('\n','<br/>'),styles['DTECell']) for v in fila])
+        anchos=[max(15,len(str(c))) for c in df.columns]
+        if 'descripcion' in df.columns:
+            anchos[df.columns.get_loc('descripcion')]=48
+        total=sum(anchos)
+        disponible=landscape(A4)[0]-24*mm
+        anchos=[disponible*a/total for a in anchos]
+        t=Table(tabla,colWidths=anchos,repeatRows=1,hAlign='LEFT')
+        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#176B55')),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),('GRID',(0,0),(-1,-1),.25,colors.HexColor('#DCE8E3')),
+            ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F2F7F4')]),
+            ('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),
+            ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
+        story.append(t)
+    story.extend([Spacer(1,6*mm),Paragraph('Reporte documental; no representa contabilización ni conciliación con RCV.',styles['Normal'])])
+    doc.build(story)
+    return buffer.getvalue()
+
+
 def pantalla_dte(conn):
     st.title('🧾 Facturación y DTE')
     st.caption('Repositorio documental independiente. La importación NO crea ventas, cuentas por cobrar ni asientos contables.')
@@ -5803,8 +5842,8 @@ def pantalla_dte(conn):
             st.success(f'Importados: {nuevos} | Ya existentes: {duplicados}')
             if errores: st.warning('Archivos con observaciones: '+'; '.join(errores[:15]))
     with tab2:
-        df=pd.read_sql_query("""SELECT id,fecha,tipo_doc,folio,razon_receptor,rut_receptor,neto,iva,total
-            FROM dte_documentos ORDER BY fecha DESC,id DESC""",conn)
+        df=pd.read_sql_query('''SELECT id,fecha,tipo_doc,folio,razon_receptor,rut_receptor,neto,iva,total
+            FROM dte_documentos ORDER BY fecha DESC,id DESC''',conn)
         if df.empty:
             st.info('Aún no hay documentos importados.')
         else:
@@ -5812,34 +5851,63 @@ def pantalla_dte(conn):
             if busqueda:
                 df=df[df[['razon_receptor','rut_receptor','folio']].fillna('').astype(str).apply(
                     lambda x:x.str.contains(busqueda,case=False,regex=False)).any(axis=1)]
-            st.dataframe(formatear_montos_df(df.drop(columns='id')),use_container_width=True,hide_index=True)
-            if not df.empty:
-                opciones={f"{r.fecha} · DTE {r.tipo_doc} · N.º {r.folio} · {r.razon_receptor}":int(r.id) for r in df.itertuples()}
-                elegido=st.selectbox('Ver documento',list(opciones),key='dte_elegido')
-                fila=conn.execute('SELECT * FROM dte_documentos WHERE id=?',(opciones[elegido],)).fetchone()
-                items=pd.read_sql_query("""SELECT linea,codigo,nombre,descripcion,cantidad,unidad,precio,descuento,monto
-                    FROM dte_items WHERE documento_id=? ORDER BY linea""",conn,params=(fila['id'],))
-                st.subheader(f"{nombre_documento(fila['tipo_doc'])} N.º {fila['folio']}")
-                c1,c2=st.columns(2)
-                with c1:
-                    st.markdown('**Emisor**')
-                    st.write(f"{fila['razon_emisor']} · {fila['rut_emisor']}")
-                with c2:
-                    st.markdown('**Receptor**')
-                    st.write(f"{fila['razon_receptor']} · {fila['rut_receptor']}")
-                st.write(f"**Fecha:** {fila['fecha']} · **Pago:** {fila['forma_pago']}")
-                st.markdown('**Ítems facturados**')
-                st.dataframe(items,use_container_width=True,hide_index=True)
-                a,b,c,d=st.columns(4)
-                a.metric('Neto',money(fila['neto']))
-                b.metric('Exento',money(fila['exento']))
-                c.metric('IVA',money(fila['iva']))
-                d.metric('Total',money(fila['total']))
-                st.download_button('⬇️ XML original',bytes(fila['xml_original']),
-                    file_name=f"DTE_{fila['tipo_doc']}_{fila['folio']}.xml",mime='application/xml')
+            st.caption('Pulsa 🔍 en la factura que quieras consultar. Ningún documento se abre automáticamente.')
+            if df.empty:
+                st.info('No hay documentos que coincidan con la búsqueda.')
+            else:
+                tamano=15
+                paginas=max(1,(len(df)+tamano-1)//tamano)
+                pagina=st.number_input('Página',min_value=1,max_value=paginas,value=1,step=1,key='dte_pagina')
+                visible=df.iloc[(pagina-1)*tamano:pagina*tamano]
+                cab=st.columns([1.1,.7,.8,2.6,1.25,1.15,.45])
+                for c,t in zip(cab,['Fecha','Tipo','Folio','Cliente','RUT','Total','Ver']): c.markdown('**'+t+'**')
+                for r in visible.itertuples(index=False):
+                    c=st.columns([1.1,.7,.8,2.6,1.25,1.15,.45],vertical_alignment='center')
+                    for col,val in zip(c[:6],[r.fecha,r.tipo_doc,r.folio,r.razon_receptor,r.rut_receptor,money(r.total)]):
+                        col.write(str(val or ''))
+                    if c[6].button('🔍',key=f'dte_lupa_{r.id}',help='Ver factura '+str(r.folio)):
+                        st.session_state['dte_documento_abierto']=int(r.id)
+                abierto=st.session_state.get('dte_documento_abierto')
+                if abierto is not None:
+                    fila=conn.execute('SELECT * FROM dte_documentos WHERE id=?',(abierto,)).fetchone()
+                    if fila:
+                        st.divider()
+                        c_t,c_x=st.columns([5,1])
+                        c_t.subheader(f"{nombre_documento(fila['tipo_doc'])} N.º {fila['folio']}")
+                        if c_x.button('✖ Cerrar vista',key='dte_cerrar'):
+                            st.session_state['dte_documento_abierto']=None
+                            st.rerun()
+                        c1,c2=st.columns(2)
+                        with c1:
+                            st.markdown('**Emisor**')
+                            st.write(f"{fila['razon_emisor']} · {fila['rut_emisor']}")
+                        with c2:
+                            st.markdown('**Receptor**')
+                            st.write(f"{fila['razon_receptor']} · {fila['rut_receptor']}")
+                        st.write(f"**Fecha:** {fila['fecha']} · **Pago:** {fila['forma_pago']}")
+                        items=pd.read_sql_query('''SELECT linea,codigo,nombre,descripcion,cantidad,unidad,precio,descuento,monto
+                            FROM dte_items WHERE documento_id=? ORDER BY linea''',conn,params=(fila['id'],))
+                        st.markdown('**Ítems facturados — descripción íntegra**')
+                        for item in items.itertuples(index=False):
+                            with st.container(border=True):
+                                st.markdown(f'**Ítem {item.linea}: {item.nombre or "Sin nombre"}**')
+                                if item.codigo: st.caption('Código: '+str(item.codigo))
+                                if item.descripcion: st.text(str(item.descripcion))
+                                a,b,c,d=st.columns(4)
+                                a.write(f'Cantidad: {item.cantidad:g}' if item.cantidad is not None else 'Cantidad: —')
+                                b.write(f'Unidad: {item.unidad or "—"}')
+                                c.write(f'Precio: {money(item.precio)}')
+                                d.write(f'Monto: {money(item.monto)}')
+                        a,b,c,d=st.columns(4)
+                        a.metric('Neto',money(fila['neto']))
+                        b.metric('Exento',money(fila['exento']))
+                        c.metric('IVA',money(fila['iva']))
+                        d.metric('Total',money(fila['total']))
+                        st.download_button('⬇️ XML original',bytes(fila['xml_original']),
+                            file_name=f"DTE_{fila['tipo_doc']}_{fila['folio']}.xml",mime='application/xml')
     with tab3:
-        df=pd.read_sql_query("""SELECT fecha,tipo_doc,folio,rut_receptor,razon_receptor,neto,exento,iva,total
-            FROM dte_documentos ORDER BY fecha DESC""",conn)
+        df=pd.read_sql_query('''SELECT fecha,tipo_doc,folio,rut_receptor,razon_receptor,neto,exento,iva,total
+            FROM dte_documentos ORDER BY fecha DESC''',conn)
         if df.empty:
             st.info('Importa documentos para visualizar reportes.')
         else:
@@ -5847,20 +5915,46 @@ def pantalla_dte(conn):
             periodos=sorted(df['periodo'].unique(),reverse=True)
             elegidos=st.multiselect('Períodos',periodos,default=periodos,key='dte_periodos')
             filtrado=df[df['periodo'].isin(elegidos)].copy()
-            st.metric('Documentos',len(filtrado))
-            st.metric('Total documentos (sin ajuste por notas de crédito)',money(filtrado['total'].sum()))
             st.caption('Los importes de notas de crédito se presentan sin signo ajustado; no equivalen a ventas netas tributarias.')
-            st.subheader('Por período')
-            st.dataframe(formatear_montos_df(filtrado.groupby('periodo',as_index=False)[['neto','exento','iva','total']].sum()),use_container_width=True,hide_index=True)
-            st.subheader('Por cliente')
-            st.dataframe(formatear_montos_df(filtrado.groupby(['rut_receptor','razon_receptor'],as_index=False)[['neto','total']].sum()),use_container_width=True,hide_index=True)
-            st.subheader('Ítems facturados')
-            detalle=pd.read_sql_query("""SELECT d.fecha,d.tipo_doc,d.folio,d.razon_receptor,i.nombre,i.descripcion,i.cantidad,i.precio,i.monto
-                FROM dte_items i JOIN dte_documentos d ON d.id=i.documento_id ORDER BY d.fecha DESC""",conn)
-            detalle=detalle[detalle['fecha'].fillna('').str[:7].isin(elegidos)]
-            st.dataframe(detalle,use_container_width=True,hide_index=True)
-            st.download_button('⬇️ Exportar ítems CSV',detalle.to_csv(index=False).encode('utf-8-sig'),
-                'dte_items.csv','text/csv')
+            reporte=st.selectbox('Selecciona el reporte',[
+                'Por período','Por fecha','Por cliente','Por tipo de documento','Documentos individuales','Ítems facturados'],key='dte_tipo_reporte')
+            if reporte=='Por período':
+                tabla=filtrado.groupby('periodo',as_index=False)[['neto','exento','iva','total']].sum()
+            elif reporte=='Por fecha':
+                tabla=filtrado.groupby('fecha',as_index=False)[['neto','exento','iva','total']].sum()
+            elif reporte=='Por cliente':
+                clientes=sorted(filtrado['razon_receptor'].dropna().unique())
+                seleccion=st.multiselect('Filtrar clientes',clientes,default=clientes,key='dte_reporte_clientes')
+                filtrado=filtrado[filtrado['razon_receptor'].isin(seleccion)]
+                tabla=filtrado.groupby(['rut_receptor','razon_receptor'],as_index=False)[['neto','exento','iva','total']].sum()
+            elif reporte=='Por tipo de documento':
+                tabla=filtrado.groupby('tipo_doc',as_index=False)[['neto','exento','iva','total']].sum()
+                tabla.insert(1,'documento',tabla['tipo_doc'].apply(nombre_documento))
+            elif reporte=='Documentos individuales':
+                tabla=filtrado[['fecha','tipo_doc','folio','razon_receptor','neto','exento','iva','total']].copy()
+            else:
+                tabla=pd.read_sql_query('''SELECT d.fecha,d.tipo_doc,d.folio,d.razon_receptor,
+                    i.nombre,i.descripcion,i.cantidad,i.precio,i.monto
+                    FROM dte_items i JOIN dte_documentos d ON d.id=i.documento_id
+                    ORDER BY d.fecha DESC''',conn)
+                tabla=tabla[tabla['fecha'].fillna('').str[:7].isin(elegidos)].copy()
+                st.caption('Para leer descripciones largas, abre el ítem en Documentos y visor o consulta el PDF.')
+            st.subheader(reporte)
+            st.metric('Documentos incluidos en el filtro',len(filtrado))
+            st.dataframe(formatear_montos_df(tabla),use_container_width=True,hide_index=True,
+                column_config={'descripcion':st.column_config.TextColumn('Descripción',width='large')} if 'descripcion' in tabla else None)
+            col1,col2=st.columns(2)
+            with col1:
+                st.download_button('⬇️ Exportar CSV',tabla.to_csv(index=False).encode('utf-8-sig'),
+                    file_name='SGCI_'+reporte.lower().replace(' ','_')+'.csv',mime='text/csv',key='dte_csv_reporte')
+            with col2:
+                try:
+                    pdf=dte_reporte_pdf('Facturación DTE - '+reporte,formatear_montos_df(tabla),
+                        'Períodos: '+(', '.join(elegidos) if elegidos else 'Ninguno'))
+                    st.download_button('🖨️ Generar PDF para imprimir',pdf,
+                        file_name='SGCI_'+reporte.lower().replace(' ','_')+'.pdf',mime='application/pdf',key='dte_pdf_reporte')
+                except ImportError:
+                    st.warning('Para generar PDF, agrega reportlab a requirements.txt y vuelve a desplegar la aplicación.')
 
 
 # ============================================================
