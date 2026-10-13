@@ -63,6 +63,20 @@ def sgci_exito(mensaje, *args, **kwargs):
     st.session_state['_sgci_ultimo_exito'] = str(mensaje)
     return st.success(mensaje, *args, **kwargs)
 
+# La contraseña real nunca se almacena en este archivo ni en GitHub.
+# Configurar SGCI_PASSWORD_HASH en Render > Environment con el hash Argon2.
+def verificar_clave_sgci(clave_ingresada):
+    hash_configurado = os.environ.get("SGCI_PASSWORD_HASH", "").strip()
+    if not hash_configurado or not hash_configurado.startswith("$argon2"):
+        return False
+    try:
+        from argon2 import PasswordHasher
+        from argon2.exceptions import VerificationError, InvalidHashError
+        return PasswordHasher().verify(hash_configurado, clave_ingresada)
+    except (VerificationError, InvalidHashError, ValueError, TypeError):
+        return False
+
+
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
@@ -71,14 +85,20 @@ if not st.session_state["authenticated"]:
     _, col2, _ = st.columns([1, 2, 1])
     with col2:
         st.title("🔐 Acceso Restringido - SGCI")
-        st.info("Por seguridad, ingresa la contraseña para acceder al sistema contable.")
-        pwd = st.text_input("Contraseña de acceso", type="password")
-        if st.button("Ingresar al Sistema", type="primary", use_container_width=True):
-            if pwd == "admin2026":
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Contraseña incorrecta.")
+        if not os.environ.get("SGCI_PASSWORD_HASH", "").strip().startswith("$argon2"):
+            st.error("El acceso aún no está configurado. Agrega SGCI_PASSWORD_HASH en las variables de entorno de Render.")
+        else:
+            st.info("Ingresa tu contraseña para acceder al sistema contable.")
+            with st.form("sgci_login_form", clear_on_submit=False):
+                pwd = st.text_input("Contraseña de acceso", type="password")
+                ingresar = st.form_submit_button("Ingresar al Sistema", type="primary", use_container_width=True)
+            if ingresar:
+                if verificar_clave_sgci(pwd):
+                    st.session_state["authenticated"] = True
+                    st.rerun()
+                else:
+                    st.error("Contraseña incorrecta.")
+        st.caption("¿Olvidaste tu contraseña? Por seguridad, solicita el restablecimiento al administrador del SGCI.")
     st.stop()
 
 
