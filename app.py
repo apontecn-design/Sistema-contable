@@ -13,6 +13,9 @@ import io
 import os
 import re
 import sqlite3
+import zipfile
+import xml.etree.ElementTree as ET
+import html
 from datetime import datetime, date, timedelta
 from hashlib import sha256
 from decimal import Decimal, ROUND_HALF_UP
@@ -5666,12 +5669,208 @@ def nomina_contabilizar_periodo(conn, periodo):
 
 
 # ============================================================
+# FACTURACIÓN DTE: REPOSITORIO DOCUMENTAL (SIN CONTABILIZACIÓN)
+# ============================================================
+
+def dte_crear_tablas(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS dte_documentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rut_emisor TEXT NOT NULL, tipo_doc INTEGER NOT NULL, folio TEXT NOT NULL,
+        fecha TEXT, razon_emisor TEXT, rut_receptor TEXT, razon_receptor TEXT,
+        giro_emisor TEXT, giro_receptor TEXT, direccion_receptor TEXT,
+        forma_pago TEXT, neto INTEGER DEFAULT 0, exento INTEGER DEFAULT 0,
+        iva INTEGER DEFAULT 0, total INTEGER DEFAULT 0,
+        xml_original BLOB NOT NULL, archivo TEXT, fecha_importacion TEXT,
+        UNIQUE(rut_emisor, tipo_doc, folio))""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS dte_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, documento_id INTEGER NOT NULL,
+        linea INTEGER, codigo TEXT, nombre TEXT, descripcion TEXT,
+        cantidad REAL, unidad TEXT, precio REAL, descuento REAL,
+        monto INTEGER, FOREIGN KEY(documento_id) REFERENCES dte_documentos(id))""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dte_fecha ON dte_documentos(fecha)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_dte_receptor ON dte_documentos(rut_receptor)")
+    conn.commit()
+
+
+def dte_texto(nodo, ruta, defecto=''):
+    encontrado = nodo.find(ruta, {'s': 'http://www.sii.cl/SiiDte'})
+    return (encontrado.text or '').strip() if encontrado is not None else defecto
+
+
+def dte_numero(valor):
+    try:
+        return float(valor or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def dte_parsear(datos):
+    if len(datos) > 15 * 1024 * 1024:
+        raise ValueError('XML excede 15 MB.')
+    if b'<!DOCTYPE' in datos.upper() or b'<!ENTITY' in datos.upper():
+        raise ValueError('No se aceptan entidades externas ni DTD.')
+    raiz = ET.fromstring(datos)
+    ns = {'s': 'http://www.sii.cl/SiiDte'}
+    documentos = raiz.findall('.//s:DTE/s:Documento', ns)
+    if raiz.tag.endswith('}DTE'):
+        documentos = raiz.findall('./s:Documento', ns)
+    if raiz.tag.endswith('}Documento'):
+        documentos = [raiz]
+    if not documentos:
+        raise ValueError('No se encontraron documentos DTE en el XML.')
+    resultado = []
+    for doc in documentos:
+        enc = doc.find('s:Encabezado', ns)
+        if enc is None:
+            raise ValueError('Documento sin encabezado.')
+        get = lambda ruta: dte_texto(enc, ruta)
+        rut = normalizar_rut(get('s:Emisor/s:RUTEmisor'))
+        receptor = normalizar_rut(get('s:Receptor/s:RUTRecep'))
+        tipo = int(get('s:IdDoc/s:TipoDTE') or 0)
+        folio = get('s:IdDoc/s:Folio')
+        if not rut or not folio or not tipo or not validar_rut(rut):
+            raise ValueError('DTE con emisor, tipo o folio inválido.')
+        items = []
+        for linea in doc.findall('s:Detalle', ns):
+            cod = linea.find('s:CdgItem/s:VlrCodigo', ns)
+            items.append((int(dte_texto(linea,'s:NroLinDet') or len(items)+1),
+                (cod.text or '').strip() if cod is not None else '',
+                dte_texto(linea,'s:NmbItem'),dte_texto(linea,'s:DscItem'),
+                dte_numero(dte_texto(linea,'s:QtyItem')),
+                dte_texto(linea,'s:UnmdItem'),dte_numero(dte_texto(linea,'s:PrcItem')),
+                dte_numero(dte_texto(linea,'s:DescuentoMonto')),
+                round(dte_numero(dte_texto(linea,'s:MontoItem')))))
+        resultado.append((dict(rut_emisor=rut,tipo_doc=tipo,folio=folio,
+            fecha=get('s:IdDoc/s:FchEmis'),razon_emisor=get('s:Emisor/s:RznSoc'),
+            rut_receptor=receptor,razon_receptor=get('s:Receptor/s:RznSocRecep'),
+            giro_emisor=get('s:Emisor/s:GiroEmis'),giro_receptor=get('s:Receptor/s:GiroRecep'),
+            direccion_receptor=get('s:Receptor/s:DirRecep'),
+            forma_pago={'1':'Contado','2':'Crédito','3':'Sin costo'}.get(get('s:IdDoc/s:FmaPago'),'No informado'),
+            neto=round(dte_numero(get('s:Totales/s:MntNeto'))),
+            exento=round(dte_numero(get('s:Totales/s:MntExe'))),
+            iva=round(dte_numero(get('s:Totales/s:IVA'))),
+            total=round(dte_numero(get('s:Totales/s:MntTotal')))),items))
+    return resultado
+
+
+def dte_guardar(conn, datos, archivo):
+    registros = dte_parsear(datos)
+    nuevos = duplicados = 0
+    for cab, items in registros:
+        existe = conn.execute('SELECT id FROM dte_documentos WHERE rut_emisor=? AND tipo_doc=? AND folio=?',
+            (cab['rut_emisor'],cab['tipo_doc'],cab['folio'])).fetchone()
+        if existe:
+            duplicados += 1
+            continue
+        campos = list(cab) + ['xml_original','archivo','fecha_importacion']
+        valores = list(cab.values()) + [datos,archivo,datetime.now().isoformat(timespec='seconds')]
+        cur = conn.execute('INSERT INTO dte_documentos ('+','.join(campos)+') VALUES ('+','.join(['?']*len(campos))+')',valores)
+        for item in items:
+            conn.execute("""INSERT INTO dte_items (documento_id,linea,codigo,nombre,descripcion,cantidad,unidad,precio,descuento,monto)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""",(cur.lastrowid,*item))
+        nuevos += 1
+    return nuevos,duplicados
+
+
+def pantalla_dte(conn):
+    st.title('🧾 Facturación y DTE')
+    st.caption('Repositorio documental independiente. La importación NO crea ventas, cuentas por cobrar ni asientos contables.')
+    tab1,tab2,tab3 = st.tabs(['📥 Importar XML','🔎 Documentos y visor','📊 Reportería'])
+    with tab1:
+        st.info('Selecciona varios XML o archivos ZIP con XML del SII. Se admiten sobres EnvioDTE con múltiples documentos.')
+        archivos = st.file_uploader('Archivos XML o ZIP',type=['xml','zip'],accept_multiple_files=True,key='dte_carga')
+        if archivos and st.button('Importar documentos',type='primary',key='dte_importar'):
+            nuevos=duplicados=0; errores=[]
+            with conn:
+                for archivo in archivos:
+                    try:
+                        contenido=archivo.getvalue()
+                        if archivo.name.lower().endswith('.zip'):
+                            with zipfile.ZipFile(io.BytesIO(contenido)) as z:
+                                miembros=[x for x in z.infolist() if x.filename.lower().endswith('.xml') and not x.is_dir()]
+                                if len(miembros)>1000: raise ValueError('ZIP supera 1000 XML.')
+                                for miembro in miembros:
+                                    try:
+                                        if miembro.file_size>15*1024*1024: raise ValueError('XML supera 15 MB.')
+                                        with z.open(miembro) as f: datos=f.read(15*1024*1024+1)
+                                        a,b=dte_guardar(conn,datos,miembro.filename)
+                                        nuevos+=a; duplicados+=b
+                                    except Exception as e: errores.append(f'{miembro.filename}: {e}')
+                        else:
+                            a,b=dte_guardar(conn,contenido,archivo.name)
+                            nuevos+=a; duplicados+=b
+                    except Exception as e: errores.append(f'{archivo.name}: {e}')
+            st.success(f'Importados: {nuevos} | Ya existentes: {duplicados}')
+            if errores: st.warning('Archivos con observaciones: '+'; '.join(errores[:15]))
+    with tab2:
+        df=pd.read_sql_query("""SELECT id,fecha,tipo_doc,folio,razon_receptor,rut_receptor,neto,iva,total
+            FROM dte_documentos ORDER BY fecha DESC,id DESC""",conn)
+        if df.empty:
+            st.info('Aún no hay documentos importados.')
+        else:
+            busqueda=st.text_input('Buscar cliente, RUT o folio',key='dte_busqueda')
+            if busqueda:
+                df=df[df[['razon_receptor','rut_receptor','folio']].fillna('').astype(str).apply(
+                    lambda x:x.str.contains(busqueda,case=False,regex=False)).any(axis=1)]
+            st.dataframe(formatear_montos_df(df.drop(columns='id')),use_container_width=True,hide_index=True)
+            if not df.empty:
+                opciones={f"{r.fecha} · DTE {r.tipo_doc} · N.º {r.folio} · {r.razon_receptor}":int(r.id) for r in df.itertuples()}
+                elegido=st.selectbox('Ver documento',list(opciones),key='dte_elegido')
+                fila=conn.execute('SELECT * FROM dte_documentos WHERE id=?',(opciones[elegido],)).fetchone()
+                items=pd.read_sql_query("""SELECT linea,codigo,nombre,descripcion,cantidad,unidad,precio,descuento,monto
+                    FROM dte_items WHERE documento_id=? ORDER BY linea""",conn,params=(fila['id'],))
+                st.subheader(f"{nombre_documento(fila['tipo_doc'])} N.º {fila['folio']}")
+                c1,c2=st.columns(2)
+                with c1:
+                    st.markdown('**Emisor**')
+                    st.write(f"{fila['razon_emisor']} · {fila['rut_emisor']}")
+                with c2:
+                    st.markdown('**Receptor**')
+                    st.write(f"{fila['razon_receptor']} · {fila['rut_receptor']}")
+                st.write(f"**Fecha:** {fila['fecha']} · **Pago:** {fila['forma_pago']}")
+                st.markdown('**Ítems facturados**')
+                st.dataframe(items,use_container_width=True,hide_index=True)
+                a,b,c,d=st.columns(4)
+                a.metric('Neto',money(fila['neto']))
+                b.metric('Exento',money(fila['exento']))
+                c.metric('IVA',money(fila['iva']))
+                d.metric('Total',money(fila['total']))
+                st.download_button('⬇️ XML original',bytes(fila['xml_original']),
+                    file_name=f"DTE_{fila['tipo_doc']}_{fila['folio']}.xml",mime='application/xml')
+    with tab3:
+        df=pd.read_sql_query("""SELECT fecha,tipo_doc,folio,rut_receptor,razon_receptor,neto,exento,iva,total
+            FROM dte_documentos ORDER BY fecha DESC""",conn)
+        if df.empty:
+            st.info('Importa documentos para visualizar reportes.')
+        else:
+            df['periodo']=df['fecha'].fillna('').str[:7]
+            periodos=sorted(df['periodo'].unique(),reverse=True)
+            elegidos=st.multiselect('Períodos',periodos,default=periodos,key='dte_periodos')
+            filtrado=df[df['periodo'].isin(elegidos)].copy()
+            st.metric('Documentos',len(filtrado))
+            st.metric('Total documentos (sin ajuste por notas de crédito)',money(filtrado['total'].sum()))
+            st.caption('Los importes de notas de crédito se presentan sin signo ajustado; no equivalen a ventas netas tributarias.')
+            st.subheader('Por período')
+            st.dataframe(formatear_montos_df(filtrado.groupby('periodo',as_index=False)[['neto','exento','iva','total']].sum()),use_container_width=True,hide_index=True)
+            st.subheader('Por cliente')
+            st.dataframe(formatear_montos_df(filtrado.groupby(['rut_receptor','razon_receptor'],as_index=False)[['neto','total']].sum()),use_container_width=True,hide_index=True)
+            st.subheader('Ítems facturados')
+            detalle=pd.read_sql_query("""SELECT d.fecha,d.tipo_doc,d.folio,d.razon_receptor,i.nombre,i.descripcion,i.cantidad,i.precio,i.monto
+                FROM dte_items i JOIN dte_documentos d ON d.id=i.documento_id ORDER BY d.fecha DESC""",conn)
+            detalle=detalle[detalle['fecha'].fillna('').str[:7].isin(elegidos)]
+            st.dataframe(detalle,use_container_width=True,hide_index=True)
+            st.download_button('⬇️ Exportar ítems CSV',detalle.to_csv(index=False).encode('utf-8-sig'),
+                'dte_items.csv','text/csv')
+
+
+# ============================================================
 # INICIALIZACIÓN
 # ============================================================
 
 conn = conectar()
 
 crear_esquema(conn)
+dte_crear_tablas(conn)
 reorganizar_plan_2026_seguro(conn)
 instalar_cuentas_nomina(conn)
 
@@ -5691,7 +5890,7 @@ st.sidebar.markdown("---")
 
 modulo_principal = st.sidebar.radio(
     "Navegación",
-    ["🏠 Inicio", "🏦 Banco", "💰 Cuentas por Cobrar", "💳 Cuentas por Pagar", "👥 Nómina", "📚 Contabilidad", "⚙️ Administración"],
+    ["🏠 Inicio", "🏦 Banco", "💰 Cuentas por Cobrar", "💳 Cuentas por Pagar", "🧾 Facturación y DTE", "👥 Nómina", "📚 Contabilidad", "⚙️ Administración"],
     label_visibility="collapsed",
     key="nav_modulo_principal"
 )
@@ -5719,6 +5918,8 @@ elif modulo_principal == "💳 Cuentas por Pagar":
     elif sub == "RCV Compras": menu = "📥 RCV Compras"
     elif sub == "Antigüedad de saldos": menu = "📌 Cuentas por Cobrar/Pagar"; nav_context = "proveedores"
     else: menu = "📊 Conciliación"; nav_context = "proveedores"
+elif modulo_principal == "🧾 Facturación y DTE":
+    menu = "🧾 Facturación y DTE"
 elif modulo_principal == "👥 Nómina":
     st.sidebar.caption("NÓMINA")
     st.sidebar.info("Trabajadores · Anticipos · Préstamos · Liquidación · Reportes · Contabilización")
@@ -5760,7 +5961,9 @@ if st.sidebar.button("🚪 Cerrar sesión"):
 # INICIO
 # ============================================================
 
-if menu == "🏠 Inicio":
+if menu == "🧾 Facturación y DTE":
+    pantalla_dte(conn)
+elif menu == "🏠 Inicio":
 
     st.title("📊 SGCI")
     st.subheader("Sistema de Gestión Contable Integral")
