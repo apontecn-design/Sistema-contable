@@ -77,28 +77,180 @@ def verificar_clave_sgci(clave_ingresada):
         return False
 
 
+# Supabase Auth mediante HTTPS; no requiere librerías adicionales.
+# La clave publicable se utiliza únicamente para endpoints de autenticación de usuario.
+import json
+import urllib.request
+import urllib.error
+import time
+
+
+def sgci_supabase_config():
+    url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    key = (os.getenv("SUPABASE_ANON_KEY", "") or os.getenv("SUPABASE_PUBLISHABLE_KEY", "")).strip()
+    if not url.startswith("https://") or not key:
+        return None
+    return url, key
+
+
+def sgci_auth_request(ruta, datos, access_token=None):
+    config = sgci_supabase_config()
+    if not config:
+        raise ValueError("Supabase no está configurado en Render.")
+    url, key = config
+    headers = {"apikey": key, "Content-Type": "application/json", "Accept": "application/json"}
+    if access_token:
+        headers["Authorization"] = "Bearer " + access_token
+    peticion = urllib.request.Request(
+        url + "/auth/v1/" + ruta,
+        data=json.dumps(datos).encode("utf-8"),
+        headers=headers,
+        method="POST" if ruta != "user" else "PUT",
+    )
+    try:
+        with urllib.request.urlopen(peticion, timeout=15) as respuesta:
+            contenido = respuesta.read().decode("utf-8")
+            return json.loads(contenido) if contenido else {}
+    except urllib.error.HTTPError as error:
+        # No mostrar respuestas técnicas del proveedor ni datos sensibles al usuario.
+        if error.code in (400, 401, 403, 422):
+            raise ValueError("No fue posible completar la operación. Revisa los datos y vuelve a intentar.") from None
+        if error.code == 429:
+            raise ValueError("Demasiados intentos. Espera unos minutos antes de continuar.") from None
+        raise ValueError("Servicio de autenticación temporalmente no disponible.") from None
+    except (urllib.error.URLError, TimeoutError):
+        raise ValueError("No se pudo conectar con el servicio de autenticación.") from None
+
+
+def sgci_guardar_sesion(respuesta):
+    token = respuesta.get("access_token")
+    refresh = respuesta.get("refresh_token")
+    if not token or not refresh:
+        raise ValueError("No se recibió una sesión válida de Supabase.")
+    st.session_state["sgci_sb_access"] = token
+    st.session_state["sgci_sb_refresh"] = refresh
+    st.session_state["sgci_sb_expira"] = time.time() + int(respuesta.get("expires_in", 3600))
+    st.session_state["sgci_sb_email"] = respuesta.get("user", {}).get("email", "")
+    st.session_state["sgci_auth_tipo"] = "supabase"
+    st.session_state["authenticated"] = True
+
+
+def sgci_sesion_valida():
+    if not st.session_state.get("authenticated"):
+        return False
+    if st.session_state.get("sgci_auth_tipo") != "supabase":
+        return st.session_state.get("sgci_auth_tipo") == "argon2"
+    if time.time() < st.session_state.get("sgci_sb_expira", 0) - 60:
+        return True
+    refresh = st.session_state.get("sgci_sb_refresh")
+    if not refresh:
+        return False
+    try:
+        respuesta = sgci_auth_request("token?grant_type=refresh_token", {"refresh_token": refresh})
+        sgci_guardar_sesion(respuesta)
+        return True
+    except ValueError:
+        return False
+
+
+def sgci_cerrar_sesion():
+    # Invalidar el token en el servidor cuando sea posible; limpiar siempre la sesión local.
+    token = st.session_state.get("sgci_sb_access")
+    if token and sgci_supabase_config():
+        try:
+            url, key = sgci_supabase_config()
+            req = urllib.request.Request(url + "/auth/v1/logout", data=b"{}", headers={
+                "apikey": key, "Authorization": "Bearer " + token,
+                "Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=5).close()
+        except Exception:
+            pass
+    for nombre in ("sgci_sb_access", "sgci_sb_refresh", "sgci_sb_expira", "sgci_sb_email", "sgci_auth_tipo"):
+        st.session_state.pop(nombre, None)
+    st.session_state["authenticated"] = False
+
+
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
-if not st.session_state["authenticated"]:
+if not sgci_sesion_valida():
+    sgci_cerrar_sesion()
     st.markdown("<br><br>", unsafe_allow_html=True)
     _, col2, _ = st.columns([1, 2, 1])
     with col2:
         st.title("🔐 Acceso Restringido - SGCI")
-        if not os.environ.get("SGCI_PASSWORD_HASH", "").strip().startswith("$argon2"):
-            st.error("El acceso aún no está configurado. Agrega SGCI_PASSWORD_HASH en las variables de entorno de Render.")
-        else:
-            st.info("Ingresa tu contraseña para acceder al sistema contable.")
-            with st.form("sgci_login_form", clear_on_submit=False):
-                pwd = st.text_input("Contraseña de acceso", type="password")
-                ingresar = st.form_submit_button("Ingresar al Sistema", type="primary", use_container_width=True)
-            if ingresar:
-                if verificar_clave_sgci(pwd):
-                    st.session_state["authenticated"] = True
-                    st.rerun()
+        supabase_disponible = bool(sgci_supabase_config())
+        opciones = (["Correo y contraseña", "Recuperar contraseña", "Acceso de respaldo (Argon2)"]
+                    if supabase_disponible else ["Acceso de respaldo (Argon2)"])
+        modo = st.radio("Método de acceso", opciones, horizontal=False)
+        if modo == "Correo y contraseña":
+            with st.form("sgci_supabase_login"):
+                correo = st.text_input("Correo electrónico").strip().lower()
+                clave = st.text_input("Contraseña", type="password")
+                enviar = st.form_submit_button("Ingresar al SGCI", type="primary", use_container_width=True)
+            if enviar:
+                if not correo or not clave:
+                    st.error("Ingresa tu correo y contraseña.")
                 else:
-                    st.error("Contraseña incorrecta.")
-        st.caption("¿Olvidaste tu contraseña? Por seguridad, solicita el restablecimiento al administrador del SGCI.")
+                    try:
+                        respuesta = sgci_auth_request("token?grant_type=password", {"email": correo, "password": clave})
+                        sgci_guardar_sesion(respuesta)
+                        st.rerun()
+                    except ValueError as error:
+                        st.error(str(error))
+        elif modo == "Recuperar contraseña":
+            st.info("Solicita un código de recuperación al correo registrado en Supabase.")
+            with st.form("sgci_recuperacion_solicitud"):
+                correo = st.text_input("Correo registrado", key="sgci_recuperar_correo").strip().lower()
+                solicitar = st.form_submit_button("Enviar código")
+            if solicitar:
+                if not correo:
+                    st.error("Ingresa tu correo.")
+                else:
+                    try:
+                        sgci_auth_request("recover", {"email": correo})
+                        st.success("Si el correo está registrado, recibirás instrucciones de recuperación.")
+                    except ValueError as error:
+                        st.error(str(error))
+            st.caption("La plantilla 'Reset password' de Supabase debe incluir {{ .Token }} para mostrar el código de seis dígitos.")
+            with st.form("sgci_recuperacion_confirmacion"):
+                correo_codigo = st.text_input("Correo electrónico", key="sgci_codigo_correo").strip().lower()
+                codigo = st.text_input("Código recibido por correo")
+                nueva = st.text_input("Nueva contraseña", type="password")
+                confirmar = st.text_input("Repetir nueva contraseña", type="password")
+                cambiar = st.form_submit_button("Cambiar contraseña", type="primary")
+            if cambiar:
+                if not correo_codigo or not codigo or not nueva:
+                    st.error("Completa todos los campos.")
+                elif len(nueva) < 8:
+                    st.error("La nueva contraseña debe tener al menos ocho caracteres.")
+                elif nueva != confirmar:
+                    st.error("Las contraseñas no coinciden.")
+                else:
+                    try:
+                        verificacion = sgci_auth_request("verify", {"email": correo_codigo, "token": codigo.strip(), "type": "recovery"})
+                        token_recuperacion = verificacion.get("access_token")
+                        if not token_recuperacion:
+                            raise ValueError("El código no pudo validarse. Solicita uno nuevo.")
+                        sgci_auth_request("user", {"password": nueva}, access_token=token_recuperacion)
+                        st.success("Contraseña actualizada. Selecciona 'Correo y contraseña' para ingresar.")
+                    except ValueError as error:
+                        st.error(str(error))
+        else:
+            if not os.environ.get("SGCI_PASSWORD_HASH", "").strip().startswith("$argon2"):
+                st.error("El acceso de respaldo no está configurado en Render.")
+            else:
+                st.info("Acceso temporal de respaldo para el administrador.")
+                with st.form("sgci_login_form", clear_on_submit=False):
+                    pwd = st.text_input("Contraseña de respaldo", type="password")
+                    ingresar = st.form_submit_button("Ingresar al Sistema", type="primary", use_container_width=True)
+                if ingresar:
+                    if verificar_clave_sgci(pwd):
+                        st.session_state["authenticated"] = True
+                        st.session_state["sgci_auth_tipo"] = "argon2"
+                        st.rerun()
+                    else:
+                        st.error("Contraseña incorrecta.")
     st.stop()
 
 
@@ -6066,7 +6218,7 @@ if os.path.exists(DB_FILE):
 
 
 if st.sidebar.button("🚪 Cerrar sesión"):
-    st.session_state["authenticated"] = False
+    sgci_cerrar_sesion()
     st.rerun()
 
 
