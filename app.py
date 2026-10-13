@@ -6137,9 +6137,14 @@ elif menu == "🏠 Inicio":
 elif menu == "👥 Nómina":
     st.title("👥 Nómina")
     st.caption("Gestión simple de remuneraciones: trabajadores, anticipos quincenales, préstamos, liquidaciones, reportes y contabilización.")
-    tabs=st.tabs(["Trabajadores","Anticipos y préstamos","Liquidación mensual","Resumen y reportes","Parámetros","Contabilización"])
+    # Navegación persistente: evita que las actualizaciones de Streamlit devuelvan
+    # al usuario a la primera pestaña al cambiar trabajadores u otros controles.
+    nomina_opciones = ["Trabajadores", "Anticipos y préstamos", "Liquidación mensual",
+                      "Resumen y reportes", "Parámetros", "Contabilización"]
+    nomina_seccion = st.radio("Sección de Nómina", nomina_opciones,
+                              horizontal=True, key="sgci_nomina_seccion")
 
-    with tabs[0]:
+    if nomina_seccion == 'Trabajadores':
         st.subheader("Ficha del trabajador")
         trabajadores=pd.read_sql_query("SELECT * FROM nomina_trabajadores ORDER BY activo DESC,nombre",conn)
         if not trabajadores.empty:
@@ -6194,7 +6199,7 @@ elif menu == "👥 Nómina":
                 pdf_ficha=nomina_pdf('Ficha e historial del trabajador',f'{edit_row.nombre} · RUT {edit_row.rut}',['Vigente desde','Sueldo','AFP','Salud','Isapre','Modalidad','Valor'],[[r.vigente_desde,money(r.sueldo_base),r.afp,r.salud_tipo,r.isapre or '',r.salud_modalidad,r.salud_valor] for r in hc.itertuples()])
                 st.download_button('🖨️ PDF ficha / historial',pdf_ficha,f'ficha_{edit_row.rut}.pdf','application/pdf',key='pdf_ficha_nom')
 
-    with tabs[1]:
+    if nomina_seccion == 'Anticipos y préstamos':
         trab=pd.read_sql_query("SELECT id,rut,nombre,sueldo_base,anticipo_porcentaje FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",conn)
         if trab.empty: st.info('Primero crea trabajadores activos.')
         else:
@@ -6236,7 +6241,7 @@ elif menu == "👥 Nómina":
                     asi=nomina_registrar_pago_activo(conn,mov[1],mov[2],mov[3],mov[4],mov[5],br.cuenta_contable,mov[0]); sgci_exito(f'Asiento N° {asi} generado.'); st.rerun()
             elif pendientes: st.warning('Hay movimientos pendientes, pero no existe una cuenta bancaria activa vinculada contablemente.')
 
-    with tabs[2]:
+    if nomina_seccion == 'Liquidación mensual':
         st.subheader('Liquidación mensual')
         periodo=st.text_input('Período a liquidar (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='liq_periodo')
         trab=pd.read_sql_query("SELECT * FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",conn)
@@ -6290,7 +6295,7 @@ elif menu == "👥 Nómina":
                 conn.execute("""INSERT INTO nomina_liquidaciones(periodo,trabajador_id,dias_trabajados,sueldo_base,sueldo_periodo,gratificacion,horas_extras,bonos_imponibles,otros_imponibles,bono_no_imponible,asignacion_no_imponible,otros_no_imponibles,total_imponible,total_no_imponible,total_haberes,afp_nombre,afp_comision,afp_descuento,salud_tipo,salud_modalidad,salud_valor,salud_descuento,afc_descuento,impuesto_unico,prestamo_descuento,otros_descuentos,total_descuentos,liquido_periodo,anticipo,saldo_pagar,uf_valor,salud_plan_pesos,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(periodo,trabajador_id) DO UPDATE SET dias_trabajados=excluded.dias_trabajados,sueldo_base=excluded.sueldo_base,sueldo_periodo=excluded.sueldo_periodo,gratificacion=excluded.gratificacion,horas_extras=excluded.horas_extras,bonos_imponibles=excluded.bonos_imponibles,otros_imponibles=excluded.otros_imponibles,bono_no_imponible=excluded.bono_no_imponible,asignacion_no_imponible=excluded.asignacion_no_imponible,otros_no_imponibles=excluded.otros_no_imponibles,total_imponible=excluded.total_imponible,total_no_imponible=excluded.total_no_imponible,total_haberes=excluded.total_haberes,afp_nombre=excluded.afp_nombre,afp_comision=excluded.afp_comision,afp_descuento=excluded.afp_descuento,salud_tipo=excluded.salud_tipo,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,salud_descuento=excluded.salud_descuento,afc_descuento=excluded.afc_descuento,impuesto_unico=excluded.impuesto_unico,prestamo_descuento=excluded.prestamo_descuento,otros_descuentos=excluded.otros_descuentos,total_descuentos=excluded.total_descuentos,liquido_periodo=excluded.liquido_periodo,anticipo=excluded.anticipo,saldo_pagar=excluded.saldo_pagar,uf_valor=excluded.uf_valor,salud_plan_pesos=excluded.salud_plan_pesos,estado=CASE WHEN nomina_liquidaciones.estado='CONTABILIZADO' THEN nomina_liquidaciones.estado ELSE 'CALCULADO' END,observacion=excluded.observacion""",vals)
                 conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)",(periodo,)); conn.commit(); sgci_exito('Liquidación guardada.'); st.rerun()
 
-    with tabs[3]:
+    if nomina_seccion == 'Resumen y reportes':
         st.subheader('Resumen de nómina y reportes')
         periodos=pd.read_sql_query("SELECT DISTINCT periodo FROM nomina_liquidaciones ORDER BY periodo DESC",conn)['periodo'].tolist()
         if not periodos: st.info('Aún no existen liquidaciones.')
@@ -6316,7 +6321,7 @@ elif menu == "👥 Nómina":
             pdfh=nomina_pdf('Historial de Remuneraciones',f'{rr.nombre} · RUT {rr.rut}',['Período','Haberes','Descuentos','Líquido','Anticipo','Saldo final','Estado'],[[x.periodo,money(x.total_haberes),money(x.total_descuentos),money(x.liquido_periodo),money(x.anticipo),money(x.saldo_pagar),x.estado] for x in hist.itertuples()])
             st.download_button('🖨️ PDF historial trabajador',pdfh,f'historial_nomina_{rr.rut}.pdf','application/pdf')
 
-    with tabs[4]:
+    if nomina_seccion == 'Parámetros':
         st.subheader('Parámetros previsionales')
         st.caption('Las comisiones AFP se guardan como parámetros editables para no depender de cambios en el código. Verifica vigencia antes de cerrar cada nómina.')
         afpdf=pd.read_sql_query("SELECT afp,comision,vigente_desde,activo FROM nomina_parametros_afp ORDER BY afp",conn); st.dataframe(afpdf,use_container_width=True,hide_index=True)
@@ -6331,7 +6336,7 @@ elif menu == "👥 Nómina":
         ufdf=pd.read_sql_query("SELECT periodo,valor_uf FROM nomina_parametros_mensuales ORDER BY periodo DESC",conn)
         if not ufdf.empty: st.dataframe(ufdf,use_container_width=True,hide_index=True)
 
-    with tabs[5]:
+    if nomina_seccion == 'Contabilización':
         st.subheader('Contabilización de nómina')
         periodos=pd.read_sql_query("SELECT periodo,estado,fecha_cierre,asiento_id FROM nomina_periodos ORDER BY periodo DESC",conn)
         st.dataframe(periodos,use_container_width=True,hide_index=True)
@@ -7717,6 +7722,142 @@ elif menu == "✍️ Asientos y Saldos":
             st.markdown("#### Historial de compensaciones")
             st.dataframe(hist_f29,use_container_width=True,hide_index=True)
 
+    # ============================================================
+    # NUEVO: ASIENTO MANUAL DIRECTAMENTE EN PANTALLA
+    # ============================================================
+    st.subheader("🖊️ Nuevo asiento manual en pantalla")
+    st.caption("Registra ajustes y reclasificaciones sin CSV. El asiento original no se modifica.")
+    plan_manual = Plan(conn)
+    opciones_manual = [f"{c} - {n}" for c, n in plan_manual.hojas.items()]
+    if len(opciones_manual) < 2:
+        st.warning("Necesitas al menos dos cuentas imputables en el plan de cuentas.")
+    else:
+        ejemplo_manual = pd.DataFrame([
+            {"Cuenta": "", "Debe": 0, "Haber": 0},
+            {"Cuenta": "", "Debe": 0, "Haber": 0},
+        ])
+        with st.form("sgci_asiento_manual_form", clear_on_submit=False):
+            fecha_manual = st.date_input("Fecha contable", value=date.today(), key="sgci_manual_fecha")
+            glosa_manual = st.text_input("Glosa del asiento", key="sgci_manual_glosa",
+                                         placeholder="Ej.: Reclasificación pago Previred, asiento 824")
+            centro_manual = st.text_input("Centro de costo", value="General / Ninguno",
+                                          key="sgci_manual_centro")
+            st.caption("Agrega o elimina filas. Selecciona cuentas imputables del plan; ingresa importes en pesos, sin puntos de miles.")
+            lineas_manual = st.data_editor(
+                ejemplo_manual, num_rows="dynamic", hide_index=True,
+                use_container_width=True, key="sgci_manual_lineas",
+                column_config={
+                    "Cuenta": st.column_config.SelectboxColumn(
+                        "Cuenta contable", options=opciones_manual, required=True, width="large"),
+                    "Debe": st.column_config.NumberColumn("Debe ($)", min_value=0, step=1, format="%d"),
+                    "Haber": st.column_config.NumberColumn("Haber ($)", min_value=0, step=1, format="%d"),
+                },
+            )
+            validar_manual = st.form_submit_button("🔎 Validar y previsualizar", type="primary")
+
+        if validar_manual:
+            errores_manual = []
+            fecha_str_manual = fecha_manual.strftime("%Y-%m-%d")
+            if not glosa_manual.strip():
+                errores_manual.append("La glosa es obligatoria.")
+            if periodo_cerrado(conn, fecha_str_manual):
+                errores_manual.append("El período contable está cerrado.")
+            detalle_manual = []
+            for idx, fila in lineas_manual.iterrows():
+                cuenta_et = str(fila.get("Cuenta") or "").strip()
+                debe_raw = fila.get("Debe", 0)
+                haber_raw = fila.get("Haber", 0)
+                try:
+                    debe_val = float(debe_raw) if pd.notna(debe_raw) else 0.0
+                    haber_val = float(haber_raw) if pd.notna(haber_raw) else 0.0
+                except (ValueError, TypeError):
+                    errores_manual.append(f"Fila {idx+1}: importe no válido.")
+                    continue
+                if not cuenta_et and debe_val == 0 and haber_val == 0:
+                    continue
+                cuenta_res = plan_manual.resolver(cuenta_et)
+                if cuenta_res is None:
+                    errores_manual.append(f"Fila {idx+1}: selecciona una cuenta imputable válida.")
+                if not (0 <= debe_val < 1e15 and 0 <= haber_val < 1e15):
+                    errores_manual.append(f"Fila {idx+1}: importe fuera de rango.")
+                if debe_val > 0 and haber_val > 0:
+                    errores_manual.append(f"Fila {idx+1}: no puede haber Debe y Haber simultáneos.")
+                if debe_val == 0 and haber_val == 0:
+                    errores_manual.append(f"Fila {idx+1}: debe existir un importe.")
+                if debe_val != int(debe_val) or haber_val != int(haber_val):
+                    errores_manual.append(f"Fila {idx+1}: usa pesos enteros.")
+                if cuenta_res:
+                    detalle_manual.append((cuenta_res[0], cuenta_res[1], int(debe_val), int(haber_val)))
+            total_debe = sum(r[2] for r in detalle_manual)
+            total_haber = sum(r[3] for r in detalle_manual)
+            if len(detalle_manual) < 2:
+                errores_manual.append("El asiento necesita al menos dos líneas válidas.")
+            if total_debe <= 0 or total_haber <= 0 or total_debe != total_haber:
+                errores_manual.append("El asiento debe cuadrar y tener Debe y Haber mayores que cero.")
+            if errores_manual:
+                st.session_state.pop("sgci_manual_borrador_validado", None)
+                for err in errores_manual:
+                    st.error(err)
+            else:
+                st.session_state["sgci_manual_borrador_validado"] = {
+                    "fecha": fecha_str_manual, "glosa": glosa_manual.strip(),
+                    "centro": centro_manual.strip() or "General / Ninguno",
+                    "detalle": detalle_manual,
+                }
+
+        borrador_manual = st.session_state.get("sgci_manual_borrador_validado")
+        if borrador_manual:
+            st.markdown("**Vista previa del asiento (todavía sin guardar)**")
+            vista_manual = pd.DataFrame(borrador_manual["detalle"],
+                                        columns=["Código", "Cuenta", "Debe", "Haber"])
+            st.dataframe(formatear_montos_df(vista_manual), use_container_width=True, hide_index=True)
+            col_debe, col_haber, col_dif = st.columns(3)
+            suma_debe = int(vista_manual["Debe"].sum())
+            suma_haber = int(vista_manual["Haber"].sum())
+            col_debe.metric("Debe", money(suma_debe))
+            col_haber.metric("Haber", money(suma_haber))
+            col_dif.metric("Diferencia", money(suma_debe - suma_haber))
+            st.info("Revisa fecha, glosa y cuentas. No se generará movimiento de Banco salvo que incluyas esa cuenta.")
+            confirmar_manual = st.checkbox("Confirmo que revisé el asiento y deseo contabilizarlo.",
+                                           key="sgci_manual_confirmar")
+            if st.button("✅ Contabilizar asiento manual", type="primary",
+                         disabled=not confirmar_manual, key="sgci_manual_guardar"):
+                try:
+                    # Revalidación de cierre y cuentas justo antes de escribir.
+                    if periodo_cerrado(conn, borrador_manual["fecha"]):
+                        raise ValueError("El período está cerrado.")
+                    plan_actual = Plan(conn)
+                    for cod, nombre, debe, haber in borrador_manual["detalle"]:
+                        if cod not in plan_actual.hojas:
+                            raise ValueError(f"La cuenta {cod} ya no es imputable.")
+                    if sum(x[2] for x in borrador_manual["detalle"]) != sum(x[3] for x in borrador_manual["detalle"]):
+                        raise ValueError("El asiento no cuadra.")
+                    cur = conn.cursor()
+                    cur.execute("BEGIN IMMEDIATE")
+                    nuevo_asiento = int(cur.execute(
+                        "SELECT COALESCE(MAX(asiento_id),0)+1 FROM libro_diario"
+                    ).fetchone()[0])
+                    lote_manual = "MANUAL-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+                    for cod, nombre, debe, haber in borrador_manual["detalle"]:
+                        cur.execute("""INSERT INTO libro_diario
+                            (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
+                            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                            (borrador_manual["fecha"], nombre, debe, haber,
+                             borrador_manual["glosa"], borrador_manual["centro"],
+                             cod, nuevo_asiento, lote_manual, "Asiento manual"))
+                    conn.commit()
+                    registrar_auditoria(conn, "ASIENTO MANUAL EN PANTALLA",
+                                       f"Asiento {nuevo_asiento}; fecha {borrador_manual['fecha']}; "
+                                       f"glosa {borrador_manual['glosa']}; total {suma_debe}")
+                    st.session_state.pop("sgci_manual_borrador_validado", None)
+                    sgci_exito(f"Asiento manual N.º {nuevo_asiento} contabilizado correctamente.")
+                    st.rerun()
+                except Exception as exc:
+                    conn.rollback()
+                    st.error(f"No se pudo contabilizar: {exc}")
+
+    st.divider()
+    st.subheader("📥 Importación masiva de asientos por CSV")
     st.divider()
     st.info(
         """
