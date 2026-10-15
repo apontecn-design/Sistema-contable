@@ -42,19 +42,34 @@ st.set_page_config(
 # Identidad visual SGCI: verde sobrio, superficies claras y navegación compacta.
 st.markdown("""
 <style>
-:root { --sgci-green:#176B55; --sgci-green-dark:#0F4F3F; --sgci-soft:#EAF5F0; --sgci-border:#DCE8E3; }
-[data-testid="stAppViewContainer"] { background:#F7F9F8; }
-[data-testid="stSidebar"] { background:#FFFFFF; border-right:1px solid var(--sgci-border); }
-[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 { color:var(--sgci-green-dark); }
-[data-testid="stSidebar"] div[role="radiogroup"] label { padding:.18rem .35rem; border-radius:8px; }
-[data-testid="stSidebar"] div[role="radiogroup"] label:hover { background:var(--sgci-soft); }
-.stButton > button, .stDownloadButton > button { border-radius:8px; border:1px solid #BFD8CD; }
-.stButton > button[kind="primary"] { background:var(--sgci-green)!important; border-color:var(--sgci-green)!important; color:white!important; }
-.stButton > button[kind="primary"]:hover { background:var(--sgci-green-dark)!important; border-color:var(--sgci-green-dark)!important; }
-[data-testid="stMetric"] { background:#FFFFFF; border:1px solid var(--sgci-border); padding:14px 16px; border-radius:10px; }
-[data-baseweb="tab-list"] { gap:.35rem; }
-button[data-baseweb="tab"] { border-radius:8px 8px 0 0; }
-hr { border-color:var(--sgci-border)!important; }
+:root {--olive:#46543A;--olive-deep:#303D2A;--olive-mid:#78866B;--sage:#B7C2A7;--cream:#F3F4EE;--gold:#D1B57A;--border:#E1E6DA;}
+[data-testid="stAppViewContainer"] {background:var(--cream);color:#303D2A;}
+[data-testid="stSidebar"] {background:linear-gradient(175deg,#46543A,#303D2A);border-right:1px solid #64715A;}
+[data-testid="stSidebar"] * {color:#F7F8F2!important;}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {color:#F7F8F2!important;}
+/* Botones de respaldo y salida: texto legible en estado normal, hover y foco. */
+[data-testid="stSidebar"] [data-testid="stDownloadButton"] button,
+[data-testid="stSidebar"] [data-testid="stButton"] button {background:#F3F4EE!important;color:#303D2A!important;border:1px solid #B7C2A7!important;}
+[data-testid="stSidebar"] [data-testid="stDownloadButton"] button *,
+[data-testid="stSidebar"] [data-testid="stButton"] button * {color:#303D2A!important;}
+[data-testid="stSidebar"] [data-testid="stDownloadButton"] button:hover,
+[data-testid="stSidebar"] [data-testid="stButton"] button:hover {background:#DCE6D2!important;color:#24301F!important;}
+[data-testid="stSidebar"] [data-testid="stDownloadButton"] button:hover *,
+[data-testid="stSidebar"] [data-testid="stButton"] button:hover * {color:#24301F!important;}
+[data-testid="stSidebar"] div[role="radiogroup"] label {border-radius:11px;padding:.42rem .5rem;transition:background .15s;}
+[data-testid="stSidebar"] div[role="radiogroup"] label:hover {background:#617151;}
+[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {background:#78866B;box-shadow:inset 3px 0 #D1B57A;}
+.stButton>button,.stDownloadButton>button {border-radius:11px;border:1px solid #C8D2C1;transition:all .15s;}
+.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"] {background:#46543A!important;color:white!important;border-color:#46543A!important;}
+.stButton>button[kind="primary"]:hover,.stFormSubmitButton>button[kind="primary"]:hover {background:#303D2A!important;}
+[data-testid="stMetric"] {background:#FFFFFF;border:1px solid var(--border);border-radius:16px;padding:16px;box-shadow:0 3px 14px rgba(48,61,42,.045);}
+[data-testid="stMetricValue"] {color:#46543A;}
+[data-testid="stVerticalBlockBorderWrapper"]>div[data-testid="stVerticalBlock"] {border-radius:12px;}
+[data-testid="stDataFrame"], [data-testid="stTable"] {border-radius:13px;overflow:hidden;}
+[data-baseweb="tab-list"] {gap:.4rem;border-bottom:1px solid #D8DFD1;}
+button[data-baseweb="tab"] {border-radius:11px 11px 0 0;}
+h1,h2,h3 {letter-spacing:-.025em;color:#35432D;}
+hr {border-color:#DDE4D7!important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -3091,6 +3106,7 @@ def registrar_pago_cliente(
     cuenta_banco,
     glosa
 ):
+    sgci_autorizar_operacion(conn, 'cxc', 'crear')
 
     roles = cargar_roles(conn)
     plan = Plan(conn)
@@ -3224,6 +3240,7 @@ def registrar_pago_proveedor(
     cuenta_banco,
     glosa
 ):
+    sgci_autorizar_operacion(conn, 'cxp', 'crear')
 
     roles = cargar_roles(conn)
     plan = Plan(conn)
@@ -4483,6 +4500,7 @@ def sgci_corregir_signo_cartola_pendiente(conn, movimiento_id, tipo_correcto):
 
 
 def registrar_movimiento_manual(conn, banco_id, fecha, descripcion, referencia, cargo, abono, saldo=None):
+    sgci_autorizar_operacion(conn, 'banco', 'crear')
     df = pd.DataFrame([{
         "fecha": fecha,
         "descripcion": descripcion,
@@ -4585,6 +4603,7 @@ def candidatos_conciliacion(conn, movimiento_id):
 
 
 def contabilizar_conciliacion_bancaria(conn, movimiento_id, candidato_tipo, candidato_id):
+    sgci_autorizar_operacion(conn, 'banco', 'conciliar')
     """Confirma una coincidencia, genera el asiento bancario y deja trazabilidad."""
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
     if not mov:
@@ -4684,6 +4703,7 @@ def contabilizar_conciliacion_bancaria(conn, movimiento_id, candidato_tipo, cand
 
 
 def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, descripcion=None):
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
     """Imputa directamente un movimiento bancario a una cuenta contable y lo deja conciliado.
 
     Cargo: Debe contrapartida / Haber Banco.
@@ -4752,6 +4772,7 @@ def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, 
 
 
 def contabilizar_imputacion_multiple_bancaria(conn, movimiento_id, distribuciones, descripcion=None):
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
     """Distribuye un único movimiento bancario entre varias cuentas y lo concilia en un solo asiento."""
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
     if not mov:
@@ -4898,6 +4919,7 @@ def sgci_cobro_mixto(conn,movimiento_id,cliente_id,venta_ids,monto_apertura):
 
 def contabilizar_cobro_cliente_desde_cartola(conn, movimiento_id, cliente_id, venta_ids,
                                                cuenta_diferencia=None, glosa_diferencia=""):
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
     """Conciliación de abono: aplica a facturas del cliente y lleva cualquier exceso a otra cuenta."""
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov: raise ValueError("Movimiento bancario no encontrado.")
@@ -4971,6 +4993,7 @@ def contabilizar_cobro_cliente_desde_cartola(conn, movimiento_id, cliente_id, ve
 
 
 def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuenta_anticipo):
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
     """Registra un abono sin factura como anticipo/saldo a favor del cliente y lo deja en su auxiliar."""
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov: raise ValueError("Movimiento bancario no encontrado.")
@@ -5372,6 +5395,7 @@ def aplicar_pago_auxiliar_proveedor(conn, proveedor_id, pago_id, compra_ids):
 
 def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id, compra_ids,
                                                  cuenta_diferencia=None, glosa_diferencia=""):
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
     """Contabiliza un cargo bancario como pago a proveedor.
 
     El monto aplicado al auxiliar del proveedor nunca supera el saldo de los documentos elegidos.
@@ -5497,6 +5521,7 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
 
 
 def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id):
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
     """Contabiliza un cargo bancario como pago a proveedor sin aplicarlo a una factura específica.
 
     Se usa para pagos de saldos anteriores o documentos que todavía no están cargados en SGCI.
@@ -5789,6 +5814,7 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
 
 
 def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_id, periodo, observacion=""):
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
     """Vincula un cargo real de cartola con un anticipo de nómina y lo contabiliza una sola vez."""
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov:
@@ -5892,6 +5918,7 @@ def nomina_vista_previa(conn, periodo):
 
 
 def nomina_contabilizar_periodo(conn, periodo):
+    sgci_autorizar_operacion(conn, 'nomina', 'contabilizar')
     fecha,filas,debe,haber=nomina_vista_previa(conn,periodo)
     if debe!=haber:
         raise ValueError(f'Asiento de nómina descuadrado: Debe {debe:,.0f} / Haber {haber:,.0f}.')
@@ -6197,6 +6224,643 @@ def pantalla_dte(conn):
                     st.warning('Para generar PDF, agrega reportlab a requirements.txt y vuelve a desplegar la aplicación.')
 
 
+
+# TESORERÍA - reportes imprimibles con ReportLab
+
+def tes_reporte_imprimible(titulo, datos):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import landscape, A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, LongTable, TableStyle
+    from reportlab.lib.enums import TA_CENTER
+    import io as _io
+    buffer=_io.BytesIO()
+    doc=SimpleDocTemplate(buffer,pagesize=landscape(A4),leftMargin=25,rightMargin=25,topMargin=30,bottomMargin=30)
+    styles=getSampleStyleSheet()
+    styles['Title'].textColor=colors.HexColor('#46543A')
+    story=[Paragraph('SGCI | '+str(titulo),styles['Title']),Spacer(1,12)]
+    if datos is not None and not datos.empty:
+        d=datos.copy().fillna('')
+        # Ancho adaptable y texto ajustado para no cortar las columnas.
+        ancho=landscape(A4)[0]-50
+        n=len(d.columns)
+        celda=ancho/max(n,1)
+        estilo=styles['BodyText'].clone('tescelda')
+        estilo.fontSize=7
+        estilo.leading=9
+        filas=[[Paragraph(str(x),estilo) for x in d.columns]]
+        for row in d.astype(str).itertuples(index=False,name=None):
+            filas.append([Paragraph(__import__('html').escape(str(x)),estilo) for x in row])
+        t=LongTable(filas,colWidths=[celda]*n,repeatRows=1,hAlign='LEFT')
+        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#B7C2A7')),
+            ('GRID',(0,0),(-1,-1),.25,colors.HexColor('#DDE4D7')),
+            ('VALIGN',(0,0),(-1,-1),'TOP'),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F3F4EE')]),
+            ('BOTTOMPADDING',(0,0),(-1,-1),6),('TOPPADDING',(0,0),(-1,-1),6)]))
+        story.append(t)
+    else:
+        story.append(Paragraph('Sin registros para mostrar.',styles['Normal']))
+    doc.build(story)
+    return buffer.getvalue()
+
+
+def tes_boton_imprimir(titulo,df,key):
+    try:
+        st.download_button('🖨️ Imprimir / PDF · '+titulo,
+            data=tes_reporte_imprimible(titulo,df),file_name='SGCI_'+key+'.pdf',
+            mime='application/pdf',key='tes_print_'+key)
+    except ImportError:
+        st.caption('Para imprimir en PDF, instalar reportlab en requirements.txt.')
+
+
+def tes_vista_comprobante(pago,sid):
+    nombre=str(pago['nombre_comprobante'] or '')
+    datos=bytes(pago['comprobante'])
+    if st.button('👁️ Visualizar comprobante',key=f'tes_view_{sid}'):
+        st.session_state[f'tes_show_{sid}']=not st.session_state.get(f'tes_show_{sid}',False)
+    if st.session_state.get(f'tes_show_{sid}',False):
+        tipo=nombre.lower().rsplit('.',1)[-1]
+        if tipo=='pdf':
+            import base64
+            b64=base64.b64encode(datos).decode('ascii')
+            st.markdown(f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="580" title="Comprobante"></iframe>',unsafe_allow_html=True)
+        elif tipo in ('jpg','jpeg','png'):
+            st.image(datos,caption=nombre,use_container_width=True)
+        else:
+            st.warning('Formato no compatible con vista previa.')
+        st.download_button('⬇️ Descargar desde el visor',datos,file_name=nombre,key=f'tes_view_download_{sid}')
+
+
+def tes_conciliar_pago(conn,movimiento_id,solicitud_id):
+    sgci_autorizar_operacion(conn, 'banco', 'conciliar')
+    """Solo vincula cartola con asiento ya existente. No crea un asiento nuevo."""
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        mov=conn.execute('SELECT * FROM cartola_bancaria WHERE id=?',(movimiento_id,)).fetchone()
+        pago=conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?',(solicitud_id,)).fetchone()
+        sol=conn.execute('SELECT * FROM tes_solicitudes WHERE id=?',(solicitud_id,)).fetchone()
+        if not mov or int(mov['conciliado'] or 0)!=0:
+            raise ValueError('El movimiento ya fue conciliado o no existe.')
+        if not pago or not sol or sol['estado']!='CONTABILIZADA' or pago['asiento_id'] is None:
+            raise ValueError('Solo se pueden conciliar pagos de Tesorería ya contabilizados.')
+        if int(pago['banco_id'] or 0)!=int(mov['banco_id'] or -1):
+            raise ValueError('El banco de la transferencia no coincide con la cartola.')
+        monto=conn.execute('SELECT COALESCE(SUM(monto),0) FROM tes_solicitud_detalle WHERE solicitud_id=?',(solicitud_id,)).fetchone()[0]
+        if int(round(float(mov['cargo'] or 0)))!=int(round(float(monto))) or float(mov['abono'] or 0)>0:
+            raise ValueError('El monto y la naturaleza del cargo no coinciden.')
+        ya=conn.execute("SELECT 1 FROM cartola_bancaria WHERE match_tipo='TESORERIA' AND match_id=? AND conciliado=1",(solicitud_id,)).fetchone()
+        if ya:
+            raise ValueError('Esta solicitud ya está conciliada con otra cartola.')
+        cur=conn.execute("""UPDATE cartola_bancaria SET conciliado=1,match_tipo='TESORERIA',match_id=?,asiento_id=?,match_confianza=100,
+            observacion=? WHERE id=? AND conciliado=0""",(solicitud_id,int(pago['asiento_id']),f'Tesorería SF-{solicitud_id:06d}',movimiento_id))
+        if cur.rowcount!=1: raise ValueError('La cartola ya no está disponible.')
+        conn.commit()
+        return int(pago['asiento_id'])
+    except Exception:
+        conn.rollback()
+        raise
+
+# ============================================================
+# TESORERÍA - ETAPA 1: SOLICITUDES (SIN ASIENTOS CONTABLES)
+# ============================================================
+def tes_crear_tablas(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS tes_solicitudes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL,
+        beneficiario TEXT NOT NULL,
+        proveedor_id INTEGER,
+        concepto TEXT NOT NULL,
+        fecha_limite TEXT,
+        moneda TEXT NOT NULL DEFAULT 'CLP',
+        estado TEXT NOT NULL DEFAULT 'BORRADOR',
+        observacion TEXT,
+        fecha_creacion TEXT NOT NULL,
+        fecha_envio TEXT,
+        fecha_aprobacion TEXT,
+        fecha_rechazo TEXT,
+        UNIQUE(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tes_solicitud_detalle (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        solicitud_id INTEGER NOT NULL REFERENCES tes_solicitudes(id),
+        tipo TEXT NOT NULL,
+        referencia TEXT,
+        descripcion TEXT NOT NULL,
+        monto INTEGER NOT NULL CHECK(monto > 0)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS tes_confirmaciones_pago (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        solicitud_id INTEGER NOT NULL UNIQUE REFERENCES tes_solicitudes(id),
+        medio TEXT NOT NULL CHECK(medio IN ('TRANSFERENCIA','CHEQUE')),
+        fecha_pago TEXT NOT NULL,
+        banco_descripcion TEXT NOT NULL,
+        referencia TEXT NOT NULL,
+        nombre_comprobante TEXT NOT NULL,
+        comprobante BLOB NOT NULL,
+        observaciones TEXT,
+        fecha_registro TEXT NOT NULL,
+        estado TEXT NOT NULL DEFAULT 'PENDIENTE_CONTABILIZACION',
+        CHECK(length(comprobante) > 0)
+    )""")
+    # Extensión no destructiva para vincular solicitudes con compras contabilizadas.
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(tes_solicitud_detalle)').fetchall()}
+    if 'compra_id' not in cols:
+        conn.execute('ALTER TABLE tes_solicitud_detalle ADD COLUMN compra_id INTEGER')
+    if 'tratamiento' not in cols:
+        conn.execute('ALTER TABLE tes_solicitud_detalle ADD COLUMN tratamiento TEXT')
+    for col, typ in [('banco_id','INTEGER'),('asiento_id','INTEGER'),('pago_proveedor_id','INTEGER'),('fecha_contabilizacion','TEXT'),('cuenta_contrapartida','TEXT'),('error_contabilizacion','TEXT')]:
+        agregar_columna(conn, 'tes_confirmaciones_pago', col, typ)
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_tes_asiento ON tes_confirmaciones_pago(asiento_id) WHERE asiento_id IS NOT NULL")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_tes_solicitudes_estado ON tes_solicitudes(estado)")
+    conn.commit()
+
+
+def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
+    sgci_autorizar_operacion(conn, 'tesoreria', 'contabilizar')
+    """Contabilización atómica y única. No registra cartola ni conciliación."""
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        sol=conn.execute('SELECT * FROM tes_solicitudes WHERE id=?',(sid,)).fetchone()
+        pago=conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?',(sid,)).fetchone()
+        if not sol or not pago or sol['estado'] != 'PENDIENTE_CONTABILIZACION' or pago['asiento_id'] is not None:
+            raise ValueError('Esta solicitud no está pendiente o ya fue contabilizada.')
+        if periodo_cerrado(conn,pago['fecha_pago']):
+            raise ValueError('El período contable de la fecha del pago está cerrado.')
+        banco=conn.execute('SELECT * FROM bancos WHERE id=? AND activo=1',(int(banco_id),)).fetchone()
+        if not banco or not banco['cuenta_contable']:
+            raise ValueError('Selecciona un banco activo con cuenta contable configurada.')
+        plan=Plan(conn).hojas
+        cuenta_banco=str(banco['cuenta_contable']).strip()
+        if cuenta_banco not in plan:
+            raise ValueError('La cuenta contable del banco no es imputable o no existe.')
+        detalles=conn.execute('SELECT * FROM tes_solicitud_detalle WHERE solicitud_id=?',(sid,)).fetchall()
+        if not detalles:
+            raise ValueError('La solicitud no tiene detalle.')
+        movimientos=[]
+        aplicaciones=[]
+        for d in detalles:
+            monto=int(d['monto'])
+            if monto <= 0:
+                raise ValueError('Monto inválido.')
+            if d['compra_id'] is not None:
+                compra=conn.execute('SELECT * FROM compras WHERE id=?',(int(d['compra_id']),)).fetchone()
+                if not compra or not sol['proveedor_id'] or compra['proveedor_id'] != sol['proveedor_id']:
+                    raise ValueError('La factura no pertenece al proveedor seleccionado.')
+                if int(compra['tipo_doc'] or 0) in (60,61,52):
+                    raise ValueError('Este tipo de documento requiere revisión antes del pago.')
+                saldo=conn.execute('SELECT ABS(COALESCE(monto_total,0)) - COALESCE((SELECT SUM(ABS(monto)) FROM aplicaciones_proveedores WHERE compra_id=?),0) FROM compras WHERE id=?',(compra['id'],compra['id'])).fetchone()[0]
+                reservado=sum(x[1] for x in aplicaciones if x[0]==compra['id'])
+                if monto > round(saldo-reservado):
+                    raise ValueError(f'El documento {compra["folio"]} no tiene saldo suficiente.')
+                rol=cargar_roles(conn).get('proveedores')
+                cuenta=rol[0] if rol else None
+                aplicaciones.append((compra['id'],monto))
+            else:
+                tratamiento=str(d['tratamiento'] or '').strip()
+                if not tratamiento or tratamiento == 'Obligación ya contabilizada':
+                    raise ValueError('El pago sin DTE requiere identificar su obligación contable antes de contabilizar.')
+                if not cuenta_sin_dte:
+                    cuenta_sin_dte = pago['cuenta_contrapartida']
+                if not cuenta_sin_dte:
+                    raise ValueError('Selecciona una cuenta contable para el desembolso sin DTE.')
+                cuenta=str(cuenta_sin_dte)
+                if tratamiento == 'Pendiente de reconocimiento contable' and not cuenta.startswith(('4.','5.','6.','7.')):
+                    raise ValueError('Para un gasto directo selecciona una cuenta de resultados apropiada.')
+                if tratamiento == 'Anticipo a proveedor / beneficiario' and not cuenta.startswith('1.'):
+                    raise ValueError('Un anticipo debe imputarse a una cuenta de activo.')
+            if cuenta not in plan or cuenta == cuenta_banco:
+                raise ValueError('La cuenta de contrapartida no es imputable o coincide con el banco.')
+            movimientos.append((cuenta,monto))
+        total=sum(m for _,m in movimientos)
+        asiento=siguiente_asiento(conn)+1
+        glosa=f'Tesorería SF-{sid:06d} · {sol["beneficiario"]} · {pago["referencia"]}'
+        for cuenta,monto in movimientos:
+            nomina_asiento_linea(conn,pago['fecha_pago'],cuenta,monto,0,glosa,asiento,'TESORERIA')
+        nomina_asiento_linea(conn,pago['fecha_pago'],cuenta_banco,0,total,glosa,asiento,'TESORERIA')
+        pago_proveedor_id=None
+        if aplicaciones:
+            if len(aplicaciones) != len(detalles):
+                raise ValueError('No se admite mezclar DTE y otros conceptos en la misma solicitud.')
+            cur=conn.execute('INSERT INTO pagos_proveedores(fecha,proveedor_id,monto,medio_pago,cuenta_banco,glosa,lote_id) VALUES(?,?,?,?,?,?,?)',
+                (pago['fecha_pago'],sol['proveedor_id'],total,pago['medio'],cuenta_banco,glosa,f'TES-SF-{sid:06d}'))
+            pago_proveedor_id=cur.lastrowid
+            for compra_id,monto in aplicaciones:
+                conn.execute('INSERT INTO aplicaciones_proveedores(pago_id,compra_id,monto) VALUES(?,?,?)',(pago_proveedor_id,compra_id,monto))
+        cur=conn.execute("""UPDATE tes_confirmaciones_pago SET banco_id=?,asiento_id=?,pago_proveedor_id=? ,
+            fecha_contabilizacion=?,estado='CONTABILIZADO',error_contabilizacion=NULL WHERE solicitud_id=? AND asiento_id IS NULL""",
+            (int(banco_id),asiento,pago_proveedor_id,datetime.now().isoformat(timespec='seconds'),sid))
+        if cur.rowcount != 1:
+            raise ValueError('El pago ya fue contabilizado.')
+        conn.execute("UPDATE tes_solicitudes SET estado='CONTABILIZADA' WHERE id=? AND estado='PENDIENTE_CONTABILIZACION'",(sid,))
+        conn.commit()
+        return asiento
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def pantalla_tesoreria(conn):
+    st.title('💼 Tesorería · Solicitudes de fondos')
+    st.caption('Gestión de solicitudes, confirmación de pagos y trazabilidad contable y bancaria.')
+    tes_crear_tablas(conn)
+    resumen_tes=pd.read_sql_query('SELECT estado,COUNT(*) AS cantidad FROM tes_solicitudes GROUP BY estado',conn)
+    estados_tes=dict(zip(resumen_tes.estado,resumen_tes.cantidad)) if not resumen_tes.empty else {}
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric('Borradores',estados_tes.get('BORRADOR',0))
+    c2.metric('Enviadas / aprobadas',estados_tes.get('ENVIADA',0)+estados_tes.get('APROBADA',0))
+    c3.metric('Pendientes de contabilizar',estados_tes.get('PENDIENTE_CONTABILIZACION',0))
+    c4.metric('Contabilizadas',estados_tes.get('CONTABILIZADA',0))
+    # En Streamlit las pestañas se restablecen tras st.rerun; situar la pestaña
+    # de registros primero después de una acción evita devolver al usuario a Nueva solicitud.
+    preferir_listado=st.session_state.get('tes_preferir_listado',False)
+    if preferir_listado:
+        tab_listado,tab_nueva=st.tabs(['📋 Solicitudes registradas','➕ Nueva solicitud'])
+    else:
+        tab_nueva,tab_listado=st.tabs(['➕ Nueva solicitud','📋 Solicitudes registradas'])
+    with tab_nueva:
+        proveedores = pd.read_sql_query("SELECT id, rut, COALESCE(NULLIF(razon_social, ''), nombre) AS nombre FROM proveedores ORDER BY nombre", conn)
+        opciones = {'Beneficiario externo / sin ficha de proveedor': None}
+        for _, p in proveedores.iterrows():
+            opciones[f"{p['nombre']} · {p['rut'] or 'Sin RUT'} · ID {int(p['id'])}"] = int(p['id'])
+        # Fuera del formulario: permite refrescar las facturas al cambiar proveedor/tipo.
+        opcion = st.selectbox('Proveedor / beneficiario registrado', list(opciones), key='tes2_proveedor')
+        tipo = st.selectbox('Origen del documento', ['DTE contabilizado', 'Documento sin DTE', 'Anticipo', 'Otro'], key='tes2_tipo')
+        pid_previo = opciones[opcion]
+        compra_elegida = None
+        doc_elegido = None
+        tratamiento = None
+        if tipo == 'DTE contabilizado':
+            if pid_previo is None:
+                st.warning('Selecciona un proveedor registrado para buscar facturas contabilizadas desde RCV.')
+            else:
+                docs = documentos_pendientes_proveedor(conn, pid_previo)
+                # Las compras con saldo en el auxiliar se muestran por identificador interno.
+                if docs.empty:
+                    st.warning('Este proveedor no tiene facturas contabilizadas con saldo pendiente.')
+                else:
+                    opciones_docs = {f"ID {int(r.id)} · {r.fecha or 'Sin fecha'} · Tipo {r.tipo_doc} · Folio {r.folio or '—'} · Saldo {money(r.pendiente)}": int(r.id) for r in docs.itertuples(index=False)}
+                    doc_label = st.selectbox('Factura contabilizada pendiente', list(opciones_docs), key='tes2_factura')
+                    compra_elegida = opciones_docs[doc_label]
+                    doc_elegido = docs.loc[docs.id == compra_elegida].iloc[0]
+                    st.caption('Primera integración: una factura por solicitud. Posteriormente permitiremos varias facturas del mismo proveedor.')
+        elif tipo == 'Documento sin DTE':
+            tratamiento = st.radio('Tratamiento contable del documento',
+                ['Pendiente de reconocimiento contable', 'Obligación ya contabilizada'], key='tes2_tratamiento')
+            st.caption('Si el gasto aún no se ha reconocido, elige pendiente de reconocimiento; si ya está contabilizado, debe identificarse la obligación de origen antes del pago.')
+        elif tipo == 'Anticipo':
+            tratamiento = 'Anticipo a proveedor / beneficiario'
+            st.caption('El anticipo no se considera automáticamente gasto.')
+        with st.form('tes_nueva_solicitud', clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            fecha = c1.date_input('Fecha de solicitud', value=date.today())
+            fecha_limite = c2.date_input('Fecha límite de pago', value=date.today())
+            beneficiario = st.text_input('Nombre del beneficiario (obligatorio si es externo)')
+            concepto = st.text_input('Concepto de la solicitud')
+            referencia = st.text_input('Número de factura, boleta o referencia (opcional)',
+                value=str(doc_elegido['folio'] or '') if doc_elegido is not None else '')
+            descripcion = st.text_input('Descripción del documento / desembolso')
+            monto = st.number_input('Monto solicitado (CLP)', min_value=0, step=1,
+                value=int(round(float(doc_elegido['pendiente']))) if doc_elegido is not None else 0)
+            observacion = st.text_area('Observaciones', height=80)
+            guardar = st.form_submit_button('Guardar solicitud en borrador', type='primary')
+        if guardar:
+            sgci_exigir_permiso(conn, 'tesoreria', 'crear')
+            pid = opciones[opcion]
+            if pid is not None:
+                beneficiario = str(proveedores.loc[proveedores.id == pid, 'nombre'].iloc[0])
+            beneficiario = beneficiario.strip()
+            if not beneficiario or not concepto.strip() or not descripcion.strip() or int(monto) <= 0:
+                st.error('Completa beneficiario, concepto, descripción y un monto mayor que cero.')
+            elif tipo == 'DTE contabilizado' and (compra_elegida is None or int(monto) > int(round(float(doc_elegido['pendiente'])))):
+                st.error('Selecciona una factura pendiente y no superes su saldo disponible.')
+            elif fecha_limite < fecha:
+                st.error('La fecha límite no puede ser anterior a la solicitud.')
+            else:
+                try:
+                    with conn:
+                        cur = conn.execute("""INSERT INTO tes_solicitudes
+                            (fecha, beneficiario, proveedor_id, concepto, fecha_limite, moneda, estado, observacion, fecha_creacion)
+                            VALUES (?,?,?,?,?,'CLP','BORRADOR',?,?)""",
+                            (fecha.isoformat(), beneficiario, pid, concepto.strip(), fecha_limite.isoformat(), observacion.strip(), datetime.now().isoformat(timespec='seconds')))
+                        sid = cur.lastrowid
+                        conn.execute("""INSERT INTO tes_solicitud_detalle
+                            (solicitud_id, tipo, referencia, descripcion, monto, compra_id, tratamiento)
+                            VALUES (?,?,?,?,?,?,?)""",
+                            (sid, tipo, referencia.strip(), descripcion.strip(), int(monto), compra_elegida, tratamiento))
+                    st.session_state['tes_preferir_listado']=True
+                    sgci_exito(f'Solicitud SF-{sid:06d} guardada como borrador. No se generó ningún asiento.')
+                    st.session_state['tes_preferir_listado']=True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f'No se pudo guardar la solicitud: {e}')
+    with tab_listado:
+        solicitudes = pd.read_sql_query("""SELECT s.id, s.fecha, s.beneficiario, s.concepto, s.fecha_limite,
+            s.estado, COALESCE(SUM(d.monto),0) AS total
+            FROM tes_solicitudes s LEFT JOIN tes_solicitud_detalle d ON d.solicitud_id=s.id
+            GROUP BY s.id ORDER BY s.id DESC""", conn)
+        if solicitudes.empty:
+            st.info('Todavía no hay solicitudes registradas.')
+        else:
+            filtro_estado=st.selectbox('Filtrar por estado',['Todos']+sorted(solicitudes.estado.unique().tolist()),key='tes_estado_filtro')
+            solicitudes_visibles=solicitudes if filtro_estado=='Todos' else solicitudes[solicitudes.estado==filtro_estado]
+            st.dataframe(solicitudes_visibles, hide_index=True, use_container_width=True)
+            tes_boton_imprimir('Solicitudes '+filtro_estado,solicitudes_visibles,'solicitudes_'+filtro_estado.lower())
+            pendientes_imp=solicitudes[solicitudes.estado=='PENDIENTE_CONTABILIZACION']
+            tes_boton_imprimir('Pendientes de contabilización',pendientes_imp,'pendientes_contabilizacion')
+            ids = solicitudes.id.astype(int).tolist()
+            sid = st.selectbox('Selecciona una solicitud', ids, format_func=lambda n: f'SF-{n:06d}')
+            fila = conn.execute('SELECT * FROM tes_solicitudes WHERE id=?', (sid,)).fetchone()
+            detalle = pd.read_sql_query('SELECT tipo, referencia, descripcion, monto, compra_id, tratamiento FROM tes_solicitud_detalle WHERE solicitud_id=?', conn, params=(sid,))
+            st.write(f"**Beneficiario:** {fila['beneficiario']} · **Estado:** {fila['estado']}")
+            # El tratamiento describe la naturaleza original del documento, no el estado actual del asiento.
+            detalle_vista=detalle.copy()
+            detalle_vista=detalle_vista.rename(columns={'tratamiento':'tratamiento declarado'})
+            st.dataframe(detalle_vista, hide_index=True, use_container_width=True)
+            tes_boton_imprimir(f'Detalle SF-{sid:06d}',detalle_vista,f'detalle_{sid}')
+            st.metric('Total solicitado', money(detalle.monto.sum()))
+            if fila['estado'] == 'BORRADOR':
+                if st.button('Marcar como enviada a Finanzas', key=f'tes_env_{sid}'):
+                    sgci_exigir_permiso(conn, 'tesoreria', 'crear')
+                    with conn:
+                        conn.execute("UPDATE tes_solicitudes SET estado='ENVIADA', fecha_envio=? WHERE id=? AND estado='BORRADOR'", (datetime.now().isoformat(timespec='seconds'), sid))
+                    st.session_state['tes_preferir_listado']=True
+                    st.rerun()
+            elif fila['estado'] == 'ENVIADA':
+                st.caption('Registra únicamente decisiones efectivamente comunicadas por Finanzas.')
+                c1, c2 = st.columns(2)
+                if c1.button('Registrar aprobación externa', key=f'tes_ap_{sid}'):
+                    sgci_exigir_permiso(conn, 'tesoreria', 'aprobar')
+                    with conn:
+                        conn.execute("UPDATE tes_solicitudes SET estado='APROBADA', fecha_aprobacion=? WHERE id=? AND estado='ENVIADA'", (datetime.now().isoformat(timespec='seconds'), sid))
+                    st.session_state['tes_preferir_listado']=True
+                    st.rerun()
+                if c2.button('Registrar rechazo externo', key=f'tes_re_{sid}'):
+                    sgci_exigir_permiso(conn, 'tesoreria', 'aprobar')
+                    with conn:
+                        conn.execute("UPDATE tes_solicitudes SET estado='RECHAZADA', fecha_rechazo=? WHERE id=? AND estado='ENVIADA'", (datetime.now().isoformat(timespec='seconds'), sid))
+                    st.session_state['tes_preferir_listado']=True
+                    st.rerun()
+            elif fila['estado'] == 'APROBADA':
+                # Se pide la cuenta antes de confirmar para contabilizar en una sola acción.
+                sin_dte_ap=detalle['compra_id'].isna().any()
+                cuenta_ap=None
+                if sin_dte_ap:
+                    hojas_ap=cuentas_imputables(conn)
+                    cuentas_ap={f'{r.codigo} - {r.nombre}':r.codigo for r in hojas_ap.itertuples(index=False)}
+                    opcion_ap=st.selectbox('Cuenta de contrapartida para pago sin DTE', ['Seleccionar cuenta']+list(cuentas_ap),key=f'tes_cuenta_ap_{sid}')
+                    cuenta_ap=cuentas_ap.get(opcion_ap)
+                st.info('Al guardar la confirmación, SGCI intentará contabilizar automáticamente. La conciliación se realiza después.')
+                with st.form(f'tes_pago_{sid}'):
+                    medio = st.selectbox('Medio de pago', ['TRANSFERENCIA', 'CHEQUE'])
+                    fecha_pago = st.date_input('Fecha de pago informada por Finanzas', value=date.today(), key=f'tes_fp_{sid}')
+                    bancos_pago=conn.execute('SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 ORDER BY nombre').fetchall()
+                    opciones_banco={f"{b['nombre']} · {b['numero_cuenta'] or 'Sin número'} · {b['cuenta_contable'] or 'Sin cuenta contable'}":b['id'] for b in bancos_pago}
+                    banco_etiqueta=st.selectbox('Banco de origen registrado', ['Seleccionar banco']+list(opciones_banco),key=f'tes_banco_id_{sid}')
+                    banco_desc=st.text_input('Descripción adicional del banco (opcional)', key=f'tes_banco_{sid}')
+                    referencia_pago = st.text_input('Referencia de transferencia o número de cheque', key=f'tes_ref_{sid}')
+                    respaldo = st.file_uploader('Comprobante recibido (PDF, JPG o PNG; máximo 5 MB)', type=['pdf','jpg','jpeg','png'], key=f'tes_comp_{sid}')
+                    observaciones_pago = st.text_area('Observaciones del pago', key=f'tes_obs_{sid}')
+                    conformidad = st.checkbox('Confirmo que recibí evidencia del pago y que los datos son correctos.', key=f'tes_ok_{sid}')
+                    registrar = st.form_submit_button('Confirmar transferencia y contabilizar', type='primary')
+                if registrar:
+                    sgci_exigir_permiso(conn, 'tesoreria', 'contabilizar')
+                    datos = respaldo.getvalue() if respaldo is not None else b''
+                    if sin_dte_ap and not cuenta_ap:
+                        st.error('Selecciona una cuenta contable para el pago sin DTE.')
+                    elif not conformidad:
+                        st.error('Debes confirmar la revisión de los datos.')
+                    elif banco_etiqueta == 'Seleccionar banco' or not referencia_pago.strip() or not datos:
+                        st.error('Indica banco, referencia y adjunta un comprobante.')
+                    elif len(datos) > 5 * 1024 * 1024:
+                        st.error('El comprobante supera el máximo de 5 MB.')
+                    else:
+                        try:
+                            with conn:
+                                actual = conn.execute('SELECT estado FROM tes_solicitudes WHERE id=?', (sid,)).fetchone()
+                                if not actual or actual['estado'] != 'APROBADA':
+                                    raise ValueError('La solicitud ya no está aprobada.')
+                                conn.execute('''INSERT INTO tes_confirmaciones_pago
+                                    (solicitud_id,medio,fecha_pago,banco_descripcion,referencia,nombre_comprobante,comprobante,observaciones,fecha_registro,banco_id,cuenta_contrapartida)
+                                    VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                                    (sid, medio, fecha_pago.isoformat(), banco_etiqueta, referencia_pago.strip(),
+                                     respaldo.name, sqlite3.Binary(datos), observaciones_pago.strip(),
+                                     datetime.now().isoformat(timespec='seconds'),opciones_banco[banco_etiqueta],cuenta_ap))
+                                conn.execute("UPDATE tes_solicitudes SET estado='PENDIENTE_CONTABILIZACION' WHERE id=? AND estado='APROBADA'", (sid,))
+                            try:
+                                if sin_dte_ap and not cuenta_ap:
+                                    raise ValueError('Debes seleccionar una cuenta de contrapartida antes de contabilizar.')
+                                asiento_auto=tes_contabilizar_pago(conn,sid,opciones_banco[banco_etiqueta],cuenta_ap)
+                                sgci_exito(f'Pago confirmado y contabilizado automáticamente · Asiento {asiento_auto}.')
+                            except Exception as error_auto:
+                                with conn:
+                                    conn.execute('UPDATE tes_confirmaciones_pago SET error_contabilizacion=? WHERE solicitud_id=?', (str(error_auto), sid))
+                                sgci_exito('Comprobante registrado. Contabilización pendiente: '+str(error_auto))
+                            st.session_state['tes_preferir_listado']=True
+                            st.rerun()
+                        except sqlite3.IntegrityError:
+                            st.error('Ya existe una confirmación de pago para esta solicitud.')
+                        except Exception as e:
+                            st.error(f'No se pudo registrar el comprobante: {e}')
+            elif fila['estado'] == 'PENDIENTE_CONTABILIZACION':
+                pago = conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?', (sid,)).fetchone()
+                st.warning('Pago confirmado, pero el asiento aún no se ha generado. La cartola se conciliará después.')
+                if pago and pago['error_contabilizacion']:
+                    st.error('Motivo de la contabilización pendiente: ' + str(pago['error_contabilizacion']))
+                for d in detalle.itertuples(index=False):
+                    if pd.notna(d.compra_id):
+                        st.info(f'DTE vinculado: compra interna ID {int(d.compra_id)}. Futuro asiento: Debe Proveedores / Haber Banco, previa verificación del saldo y del pago.')
+                    elif d.tratamiento:
+                        st.info(f'Tratamiento declarado: {d.tratamiento}. Se recuperará la cuenta ya seleccionada, si existe.')
+                    else:
+                        st.info('Solicitud anterior a Etapa 2B: tratamiento contable aún no clasificado. No se contabilizará automáticamente.')
+                if pago:
+                    st.write(f"**Medio:** {pago['medio']} · **Fecha:** {pago['fecha_pago']} · **Banco:** {pago['banco_descripcion']}")
+                    st.write(f"**Referencia:** {pago['referencia']}")
+                    tes_vista_comprobante(pago,sid)
+                    bancos_disponibles=conn.execute('SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 ORDER BY nombre').fetchall()
+                    opciones_bancos={f"{b['nombre']} · {b['numero_cuenta'] or 'Sin número'} · {b['cuenta_contable'] or 'SIN CUENTA'}":int(b['id']) for b in bancos_disponibles}
+                    predef_banco=next((i for i,k in enumerate(['Seleccionar banco']+list(opciones_bancos)) if opciones_bancos.get(k)==pago['banco_id']),0)
+                    banco_sel=st.selectbox('Banco de origen para contabilizar', ['Seleccionar banco']+list(opciones_bancos),index=predef_banco,key=f'tes_cont_banco_{sid}')
+                    sin_dte=any(pd.isna(d.compra_id) for d in detalle.itertuples(index=False))
+                    cuenta_sin_dte=None
+                    if sin_dte:
+                        st.caption('Los conceptos sin DTE requieren una cuenta contable apropiada. Los pagos de obligaciones previamente reconocidas requieren revisión.')
+                        hojas=cuentas_imputables(conn)
+                        etiquetas={f"{r.codigo} - {r.nombre}":r.codigo for r in hojas.itertuples(index=False)}
+                        cuenta_previa=str(pago['cuenta_contrapartida'] or '')
+                        etiquetas_lista=['Seleccionar cuenta']+list(etiquetas)
+                        indice_cuenta=next((i for i,e in enumerate(etiquetas_lista) if etiquetas.get(e)==cuenta_previa),0)
+                        cuenta_sel=st.selectbox('Cuenta de contrapartida (sin DTE)', etiquetas_lista,index=indice_cuenta,key=f'tes_cont_cuenta_{sid}')
+                        if cuenta_previa:
+                            st.caption('Cuenta recuperada de la confirmación de transferencia. Puedes revisarla antes de contabilizar.')
+                        cuenta_sin_dte=etiquetas.get(cuenta_sel)
+                    if st.button('Contabilizar pago confirmado',type='primary',key=f'tes_cont_{sid}'):
+                        sgci_exigir_permiso(conn, 'tesoreria', 'contabilizar')
+                        try:
+                            if banco_sel=='Seleccionar banco':
+                                raise ValueError('Selecciona el banco de origen.')
+                            with conn:
+                                conn.execute('UPDATE tes_confirmaciones_pago SET cuenta_contrapartida=? WHERE solicitud_id=? AND asiento_id IS NULL',(cuenta_sin_dte,sid))
+                            asiento=tes_contabilizar_pago(conn,sid,opciones_bancos[banco_sel],cuenta_sin_dte)
+                            sgci_exito(f'Pago SF-{sid:06d} contabilizado correctamente · Asiento {asiento}. Pendiente de conciliación bancaria.')
+                            st.session_state['tes_preferir_listado']=True
+                            st.rerun()
+                        except Exception as exc:
+                            with conn:
+                                conn.execute('UPDATE tes_confirmaciones_pago SET error_contabilizacion=? WHERE solicitud_id=? AND asiento_id IS NULL',(str(exc),sid))
+                            st.error(str(exc))
+            elif fila['estado']=='CONTABILIZADA':
+                pago=conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?',(sid,)).fetchone()
+                st.success(f"Pago contabilizado · Asiento {pago['asiento_id'] if pago else '—'}.")
+                if pago:
+                    tes_vista_comprobante(pago,sid)
+                    conciliado=conn.execute("SELECT id FROM cartola_bancaria WHERE match_tipo='TESORERIA' AND match_id=? AND conciliado=1",(sid,)).fetchone()
+                    st.info('Conciliada con cartola bancaria.' if conciliado else 'Pendiente de conciliación bancaria.')
+                    asientos_tes=pd.read_sql_query('SELECT fecha,codigo_cuenta,cuenta,debe,haber,glosa FROM libro_diario WHERE asiento_id=? ORDER BY id',conn,params=(pago['asiento_id'],))
+                    st.dataframe(asientos_tes,hide_index=True,use_container_width=True)
+                    tes_boton_imprimir(f'Asiento {pago["asiento_id"]}',asientos_tes,f'asiento_{sid}')
+
+
+# ============================================================
+# SEGURIDAD - ROLES Y ACCESO POR MODULO (PILOTO CON CONTROLES EN OPERACIONES CRÍTICAS)
+# ============================================================
+SGCI_MODULOS = {
+    "inicio": "Inicio", "banco": "Banco", "tesoreria": "Tesorería",
+    "cxc": "Cuentas por Cobrar", "cxp": "Cuentas por Pagar",
+    "dte": "Facturación y DTE", "nomina": "Nómina",
+    "contabilidad": "Contabilidad", "administracion": "Administración",
+}
+SGCI_ACCIONES = ("ver", "crear", "editar", "aprobar", "contabilizar", "conciliar", "eliminar", "exportar")
+SGCI_ROLES_BASE = ("Solicitante", "Contabilidad", "Finanzas", "Tesorería", "Auditoría", "Personalizado")
+
+
+def sgci_crear_seguridad(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_usuarios (
+        email TEXT PRIMARY KEY COLLATE NOCASE,
+        rol TEXT NOT NULL DEFAULT 'Personalizado',
+        activo INTEGER NOT NULL DEFAULT 1,
+        creado_en TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_permisos (
+        email TEXT NOT NULL COLLATE NOCASE,
+        modulo TEXT NOT NULL,
+        accion TEXT NOT NULL,
+        permitido INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(email,modulo,accion),
+        FOREIGN KEY(email) REFERENCES sgci_usuarios(email)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_auditoria_permisos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fecha TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        actor TEXT NOT NULL, usuario TEXT NOT NULL,
+        detalle TEXT NOT NULL
+    )""")
+    conn.commit()
+
+
+def sgci_identidad_actual():
+    if st.session_state.get('sgci_auth_tipo') == 'argon2':
+        return 'ADMINISTRADOR_RESPALDO'
+    return str(st.session_state.get('sgci_sb_email') or '').strip().lower()
+
+
+def sgci_es_propietario():
+    if st.session_state.get('sgci_auth_tipo') == 'argon2':
+        return True  # Acceso de recuperación: custodiar la contraseña fuera de la app.
+    propietario = os.getenv('SGCI_ADMIN_EMAIL', '').strip().lower()
+    return bool(propietario and sgci_identidad_actual() == propietario)
+
+
+def sgci_puede(conn, modulo, accion='ver'):
+    if sgci_es_propietario():
+        return True
+    email = sgci_identidad_actual()
+    if not email or modulo not in SGCI_MODULOS or accion not in SGCI_ACCIONES:
+        return False
+    fila = conn.execute('SELECT activo FROM sgci_usuarios WHERE email=?', (email,)).fetchone()
+    if not fila or not fila['activo']:
+        return False
+    permiso = conn.execute('SELECT permitido FROM sgci_permisos WHERE email=? AND modulo=? AND accion=?',
+                          (email, modulo, accion)).fetchone()
+    return bool(permiso and permiso['permitido'])
+
+
+def sgci_autorizar_operacion(conn, modulo, accion):
+    """Control de autorización ejecutado en el servidor antes de mutar datos."""
+    if not sgci_puede(conn, modulo, accion):
+        raise PermissionError(f'Acceso denegado: {modulo} / {accion}. Contacta al administrador.')
+
+
+def sgci_exigir_permiso(conn, modulo, accion='ver'):
+    if not sgci_puede(conn, modulo, accion):
+        st.error('No tienes autorización para esta operación. Contacta al administrador.')
+        st.stop()
+
+
+def sgci_guardar_permisos(conn, email, rol, activo, permisos):
+    if not sgci_es_propietario():
+        raise PermissionError('Solo el administrador principal puede gestionar permisos.')
+    email = str(email).strip().lower()
+    propietario = os.getenv('SGCI_ADMIN_EMAIL', '').strip().lower()
+    if not email or '@' not in email or email == propietario:
+        raise ValueError('Indica un correo válido distinto al del administrador principal.')
+    if rol not in SGCI_ROLES_BASE:
+        raise ValueError('Rol no válido.')
+    if any(mod not in SGCI_MODULOS or accion not in SGCI_ACCIONES for mod, accion in permisos):
+        raise ValueError('Permisos inválidos.')
+    with conn:
+        conn.execute('INSERT INTO sgci_usuarios(email,rol,activo) VALUES(?,?,?) '
+                     'ON CONFLICT(email) DO UPDATE SET rol=excluded.rol,activo=excluded.activo',
+                     (email,rol,int(activo)))
+        conn.execute('DELETE FROM sgci_permisos WHERE email=?',(email,))
+        conn.executemany('INSERT INTO sgci_permisos(email,modulo,accion,permitido) VALUES(?,?,?,1)',
+                         [(email,m,a) for m,a in permisos])
+        conn.execute('INSERT INTO sgci_auditoria_permisos(actor,usuario,detalle) VALUES(?,?,?)',
+                     (sgci_identidad_actual(),email,'Rol: '+rol+'; activo: '+str(activo)+'; permisos: '+repr(sorted(permisos))))
+
+
+def sgci_pantalla_permisos(conn):
+    sgci_exigir_permiso(conn,'administracion','ver')
+    if not sgci_es_propietario():
+        st.error('Solo el administrador principal puede modificar usuarios y permisos.')
+        return
+    st.title('🛡️ Usuarios y permisos')
+    st.caption('Control de acceso por módulo. Las acciones individuales requieren protección adicional antes de producción.')
+    existentes = [r['email'] for r in conn.execute('SELECT email FROM sgci_usuarios ORDER BY email')]
+    elegido = st.selectbox('Usuario existente', ['Crear nuevo usuario']+existentes)
+    email = st.text_input('Correo de acceso Supabase', value='' if elegido=='Crear nuevo usuario' else elegido,
+                          disabled=elegido!='Crear nuevo usuario')
+    previo = conn.execute('SELECT rol,activo FROM sgci_usuarios WHERE email=?',(email,)).fetchone() if email else None
+    rol = st.selectbox('Rol descriptivo', SGCI_ROLES_BASE,
+                       index=SGCI_ROLES_BASE.index(previo['rol']) if previo and previo['rol'] in SGCI_ROLES_BASE else 0)
+    activo = st.checkbox('Usuario habilitado', value=bool(previo['activo']) if previo else True)
+    guardados = {(r['modulo'],r['accion']) for r in conn.execute(
+        'SELECT modulo,accion FROM sgci_permisos WHERE email=? AND permitido=1',(email,))} if email else set()
+    st.caption('Marca los permisos expresamente autorizados. Sin marca = acceso denegado.')
+    permisos = set()
+    with st.form('sgci_form_permisos'):
+        encabezados = st.columns([2]+[1]*len(SGCI_ACCIONES))
+        encabezados[0].markdown('**Módulo**')
+        for col, accion in zip(encabezados[1:],SGCI_ACCIONES):
+            col.caption(accion.capitalize())
+        for mod, nombre in SGCI_MODULOS.items():
+            columnas = st.columns([2]+[1]*len(SGCI_ACCIONES))
+            columnas[0].write(nombre)
+            for columna,accion in zip(columnas[1:],SGCI_ACCIONES):
+                if columna.checkbox(' ',value=(mod,accion) in guardados,
+                                    key=f'sgci_perm_{email}_{mod}_{accion}',label_visibility='collapsed'):
+                    permisos.add((mod,accion))
+        enviar = st.form_submit_button('Guardar permisos',type='primary')
+    if enviar:
+        try:
+            sgci_guardar_permisos(conn,email,rol,activo,permisos)
+            st.success('Permisos guardados. Los cambios se aplicarán al navegar o recargar.')
+        except (ValueError,PermissionError) as exc:
+            st.error(str(exc))
+    st.subheader('Usuarios registrados')
+    st.dataframe(pd.read_sql_query('SELECT email,rol,activo,creado_en FROM sgci_usuarios ORDER BY email',conn),
+                 hide_index=True,use_container_width=True)
+
+
 # ============================================================
 # INICIALIZACIÓN
 # ============================================================
@@ -6204,6 +6868,7 @@ def pantalla_dte(conn):
 conn = conectar()
 
 crear_esquema(conn)
+sgci_crear_seguridad(conn)
 dte_crear_tablas(conn)
 reorganizar_plan_2026_seguro(conn)
 instalar_cuentas_nomina(conn)
@@ -6222,9 +6887,19 @@ st.sidebar.markdown("## SGCI")
 st.sidebar.caption("Sistema de Gestión Contable Integral")
 st.sidebar.markdown("---")
 
+sgci_nav_modulos = [
+    ("🏠 Inicio","inicio"), ("🏦 Banco","banco"), ("💼 Tesorería","tesoreria"),
+    ("💰 Cuentas por Cobrar","cxc"), ("💳 Cuentas por Pagar","cxp"),
+    ("🧾 Facturación y DTE","dte"), ("👥 Nómina","nomina"),
+    ("📚 Contabilidad","contabilidad"), ("⚙️ Administración","administracion")
+]
+sgci_nav_permitidos = [etiqueta for etiqueta,codigo in sgci_nav_modulos if sgci_puede(conn,codigo,'ver')]
+if not sgci_nav_permitidos:
+    st.error('Tu usuario no tiene módulos habilitados. Solicita permisos al administrador.')
+    st.stop()
 modulo_principal = st.sidebar.radio(
     "Navegación",
-    ["🏠 Inicio", "🏦 Banco", "💰 Cuentas por Cobrar", "💳 Cuentas por Pagar", "🧾 Facturación y DTE", "👥 Nómina", "📚 Contabilidad", "⚙️ Administración"],
+    sgci_nav_permitidos,
     label_visibility="collapsed",
     key="nav_modulo_principal"
 )
@@ -6236,6 +6911,8 @@ elif modulo_principal == "🏦 Banco":
     st.sidebar.caption("BANCO")
     st.sidebar.info("Cuentas bancarias · Cartolas · Movimientos · Conciliación bancaria")
     menu = "🏦 Bancos y Cartolas"
+elif modulo_principal == "💼 Tesorería":
+    menu = "💼 Tesorería"
 elif modulo_principal == "💰 Cuentas por Cobrar":
     st.sidebar.caption("CUENTAS POR COBRAR")
     sub = st.sidebar.radio("Sección", ["Clientes y estados de cuenta", "Pagos de clientes", "RCV Ventas", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxc")
@@ -6268,12 +6945,12 @@ elif modulo_principal == "📚 Contabilidad":
     }[sub]
 else:
     st.sidebar.caption("ADMINISTRACIÓN")
-    sub = st.sidebar.radio("Sección", ["Cierre Mensual", "Reglas Contables", "Lotes", "Matriz Contable"], key="nav_admin")
-    menu = {"Cierre Mensual":"🔒 Cierre Mensual", "Reglas Contables":"⚙️ Reglas Contables", "Lotes":"📦 Lotes", "Matriz Contable":"🧰 Matriz Contable"}[sub]
+    sub = st.sidebar.radio("Sección", (["Usuarios y permisos"] if sgci_es_propietario() else []) + ["Cierre Mensual", "Reglas Contables", "Lotes", "Matriz Contable"], key="nav_admin")
+    menu = {"Usuarios y permisos":"🛡️ Usuarios y permisos", "Cierre Mensual":"🔒 Cierre Mensual", "Reglas Contables":"⚙️ Reglas Contables", "Lotes":"📦 Lotes", "Matriz Contable":"🧰 Matriz Contable"}[sub]
 
 st.sidebar.divider()
 st.sidebar.caption("Respaldo de Datos")
-if os.path.exists(DB_FILE):
+if sgci_es_propietario() and os.path.exists(DB_FILE):
     with open(DB_FILE, "rb") as f:
         db_bytes = f.read()
     st.sidebar.download_button(
@@ -6295,7 +6972,11 @@ if st.sidebar.button("🚪 Cerrar sesión"):
 # INICIO
 # ============================================================
 
-if menu == "🧾 Facturación y DTE":
+if menu == "🛡️ Usuarios y permisos":
+    sgci_pantalla_permisos(conn)
+elif menu == "💼 Tesorería":
+    pantalla_tesoreria(conn)
+elif menu == "🧾 Facturación y DTE":
     pantalla_dte(conn)
 elif menu == "🏠 Inicio":
 
@@ -6865,7 +7546,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     sel = st.selectbox("Coincidencia propuesta", opciones_cand)
                     idx = int(sel.split(" | ",1)[0])
                     elegido_c = cand.iloc[idx]
-                    st.info("SGCI propone por coincidencia de monto y suma puntos por cercanía de fecha/referencia. La contabilización solo ocurre cuando tú confirmas.")
+                    st.info("Si el movimiento ya fue contabilizado en Tesorería, usa la opción 💼 Tesorería más abajo: NO confirmes aquí una nueva contabilización.")
                     if st.button("✅ Confirmar y contabilizar coincidencia", type="primary"):
                         try:
                             asiento = contabilizar_conciliacion_bancaria(conn,movimiento_id,elegido_c["tipo"],int(elegido_c["id"]))
@@ -6894,8 +7575,36 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.error(f"No se pudo corregir: {e}")
                 es_cargo = float(mov_sel["cargo"] or 0) > 0
                 es_abono = float(mov_sel["abono"] or 0) > 0
-                metodos = (["👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente"] if es_abono else []) + ["✏️ Una cuenta", "🧩 Varias cuentas"]
+                metodos = (["💼 Tesorería", "👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente"] if es_abono else []) + ["✏️ Una cuenta", "🧩 Varias cuentas"]
                 metodo_conc = st.radio("¿Cómo quieres conciliar este movimiento?", metodos, horizontal=True, key=f"metodo_conc_{movimiento_id}")
+                if es_cargo and metodo_conc == '💼 Tesorería':
+                    st.divider()
+                    st.subheader('💼 Conciliar pago ya contabilizado en Tesorería')
+                    tes_crear_tablas(conn)
+                    pendientes_tes=pd.read_sql_query("""SELECT s.id,s.beneficiario,p.fecha_pago,p.referencia,
+                        SUM(d.monto) AS monto,p.asiento_id FROM tes_solicitudes s
+                        JOIN tes_confirmaciones_pago p ON p.solicitud_id=s.id
+                        JOIN tes_solicitud_detalle d ON d.solicitud_id=s.id
+                        WHERE s.estado='CONTABILIZADA' AND p.banco_id=?
+                        AND NOT EXISTS(SELECT 1 FROM cartola_bancaria cb WHERE cb.conciliado=1
+                        AND cb.match_tipo='TESORERIA' AND cb.match_id=s.id)
+                        GROUP BY s.id HAVING ROUND(SUM(d.monto))=? ORDER BY p.fecha_pago DESC""",conn,
+                        params=(banco_id,int(round(float(mov_sel['cargo'] or 0)))))
+                    if pendientes_tes.empty:
+                        st.info('No hay pagos contabilizados en Tesorería pendientes de conciliación con este banco y monto.')
+                    else:
+                        st.dataframe(pendientes_tes,hide_index=True,use_container_width=True)
+                        opciones_tes={f'SF-{int(r.id):06d} · {r.beneficiario} · {r.fecha_pago} · {r.referencia}':int(r.id)
+                            for r in pendientes_tes.itertuples(index=False)}
+                        eleg_tes=st.selectbox('Selecciona el pago de Tesorería',list(opciones_tes),key=f'tes_match_{movimiento_id}')
+                        confirma_tes=st.checkbox('Confirmo que corresponde a la misma transferencia; no se generará otro asiento.',key=f'tes_match_ok_{movimiento_id}')
+                        if st.button('Conciliar sin contabilizar nuevamente',type='primary',disabled=not confirma_tes,key=f'tes_match_btn_{movimiento_id}'):
+                            try:
+                                asiento_tes=tes_conciliar_pago(conn,movimiento_id,opciones_tes[eleg_tes])
+                                sgci_exito(f'Conciliación registrada con asiento existente {asiento_tes}. Sin duplicar contabilidad.')
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(str(exc))
                 if es_cargo and metodo_conc == "👤 Nómina":
                     st.divider()
                     st.subheader("👤 Nómina / trabajador")
