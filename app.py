@@ -1040,6 +1040,10 @@ def crear_esquema(conn):
             contabilizado INTEGER DEFAULT 0
         )
     """)
+    # Anulación lógica: conserva el registro y evita descontarlo de nómina.
+    agregar_columna(conn, "nomina_anticipos", "anulado", "INTEGER DEFAULT 0")
+    agregar_columna(conn, "nomina_anticipos", "asiento_reverso_id", "INTEGER")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS nomina_prestamos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5851,7 +5855,7 @@ def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_i
 
     # Evita duplicar el mismo anticipo si por error se vuelve a procesar el movimiento.
     marca=f"CARTOLA:{int(movimiento_id)}"
-    dup=conn.execute("SELECT id FROM nomina_anticipos WHERE observacion LIKE ?",(f"%{marca}%",)).fetchone()
+    dup=conn.execute("SELECT id FROM nomina_anticipos WHERE COALESCE(anulado,0)=0 AND observacion LIKE ?",(f"%{marca}%",)).fetchone()
     if dup:
         raise ValueError("Este movimiento de cartola ya fue vinculado previamente a un anticipo de nómina.")
 
@@ -5879,6 +5883,75 @@ def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_i
     registrar_auditoria(conn,"ANTICIPO NOMINA DESDE CARTOLA",
                         f"Movimiento {movimiento_id} -> trabajador {trabajador_id}, período {periodo}, monto {monto}, asiento {asiento}")
     return asiento, anticipo_id
+
+
+
+def revertir_anticipo_nomina_cartola(conn, movimiento_id):
+    # Revierte exclusivamente anticipos creados desde cartola.
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+    if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo']!='NOMINA_ANTICIPO':
+        raise ValueError('El movimiento no es un anticipo de nómina conciliado.')
+    if not mov['asiento_id'] or not mov['match_id']:
+        raise ValueError('Falta la vinculación contable del anticipo.')
+    ant = conn.execute('SELECT * FROM nomina_anticipos WHERE id=?', (mov['match_id'],)).fetchone()
+    if not ant or int(ant['anulado'] or 0)!=0 or int(ant['contabilizado'] or 0)!=1:
+        raise ValueError('El anticipo no existe, ya fue anulado o no está contabilizado.')
+    if int(ant['asiento_id'] or 0)!=int(mov['asiento_id']):
+        raise ValueError('El asiento del anticipo no coincide con la cartola.')
+    if periodo_cerrado(conn,mov['fecha']):
+        raise ValueError('El período contable está cerrado. Requiere revisión contable.')
+    if conn.execute("SELECT 1 FROM nomina_liquidaciones WHERE trabajador_id=? AND periodo=? AND ABS(COALESCE(anticipo,0))>0.01", (ant['trabajador_id'],ant['periodo'])).fetchone():
+        raise ValueError('Existe una liquidación con anticipo aplicado a este trabajador y período. Revisar antes de revertir.')
+    if conn.execute("SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?", (mov['asiento_id'],movimiento_id)).fetchone():
+        raise ValueError('El asiento está asociado a más de un movimiento bancario.')
+    lineas=conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id', (mov['asiento_id'],)).fetchall()
+    banco=conn.execute('SELECT cuenta_contable FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
+    monto=clp_round(mov['cargo'] or 0)
+    if not banco or not banco['cuenta_contable'] or monto<=0 or len(lineas)!=2:
+        raise ValueError('La estructura bancaria del anticipo requiere revisión manual.')
+    if any(l['origen']!='NOMINA_ANTICIPO_CARTOLA' for l in lineas):
+        raise ValueError('El asiento contiene líneas ajenas al anticipo de cartola.')
+    debitos=sum(float(l['debe'] or 0) for l in lineas)
+    creditos=sum(float(l['haber'] or 0) for l in lineas)
+    if abs(debitos-creditos)>0.01 or abs(debitos-monto)>0.01:
+        raise ValueError('El asiento original no coincide con el cargo bancario.')
+    if not any(l['codigo_cuenta']=='1.1.07.01' and abs(float(l['debe'] or 0)-monto)<0.01 and abs(float(l['haber'] or 0))<0.01 for l in lineas):
+        raise ValueError('No coincide el débito a anticipos del personal.')
+    if not any(l['codigo_cuenta']==banco['cuenta_contable'] and abs(float(l['haber'] or 0)-monto)<0.01 and abs(float(l['debe'] or 0))<0.01 for l in lineas):
+        raise ValueError('No coincide el crédito a la cuenta bancaria.')
+    nuevo=siguiente_asiento(conn)+1
+    lote='REV-NOMINA-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        for l in lineas:
+            conn.execute('''INSERT INTO libro_diario
+                (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                (mov['fecha'],l['cuenta'],float(l['haber'] or 0),float(l['debe'] or 0),
+                 'Reverso anticipo mal asignado, cartola '+str(movimiento_id)+' / asiento '+str(mov['asiento_id']),
+                 l['centro_costo'],l['codigo_cuenta'],nuevo,lote,'REVERSO_NOMINA_ANTICIPO_CARTOLA'))
+        actualizado=conn.execute('''UPDATE nomina_anticipos SET anulado=1, asiento_reverso_id=?,
+            observacion=COALESCE(observacion,'') || ' | ANULADO POR REVERSO ' || ?
+            WHERE id=? AND COALESCE(anulado,0)=0 AND asiento_id=?''',
+            (nuevo,nuevo,ant['id'],mov['asiento_id']))
+        if actualizado.rowcount!=1:
+            raise ValueError('El anticipo cambió durante la operación.')
+        actualizado=conn.execute('''UPDATE cartola_bancaria SET conciliado=0,observacion=NULL,
+            asiento_id=NULL,match_tipo=NULL,match_id=NULL,match_confianza=NULL
+            WHERE id=? AND conciliado=1 AND match_tipo='NOMINA_ANTICIPO' AND asiento_id=? AND match_id=?''',
+            (int(movimiento_id),mov['asiento_id'],ant['id']))
+        if actualizado.rowcount!=1:
+            raise ValueError('La conciliación cambió durante la operación.')
+        conn.execute('''INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)''',
+            (datetime.now().isoformat(timespec='seconds'),st.session_state.get('sgci_sb_email') or 'SGCI',
+             'REVERSO ANTICIPO NOMINA',
+             f"Cartola {movimiento_id}; anticipo {ant['id']}; asiento original {mov['asiento_id']}; reverso {nuevo}; monto {monto}"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return nuevo
 
 
 def nomina_calcular(total_imponible, total_no_imponible, afp_comision, salud_tipo, salud_modalidad, salud_valor, uf_valor, afc_manual, impuesto, prestamo, otros_desc, anticipo, afp_manual=None, salud_manual=None):
@@ -7156,7 +7229,7 @@ elif menu == "👥 Nómina":
                     cuota_final=cuota or (monto_p/cuotas if cuotas else monto_p)
                     conn.execute("INSERT INTO nomina_prestamos(trabajador_id,fecha,monto_original,numero_cuotas,cuota,primera_cuota,saldo,observacion) VALUES(?,?,?,?,?,?,?,?)",(tp.id,fecha_p.isoformat(),monto_p,int(cuotas),cuota_final,primera,monto_p,obs_p)); conn.commit(); sgci_exito('Préstamo registrado.'); st.rerun()
             st.divider(); st.markdown('#### Movimientos registrados')
-            ants=pd.read_sql_query("SELECT a.id,t.nombre,a.periodo,a.fecha,a.monto,a.contabilizado,a.asiento_id FROM nomina_anticipos a JOIN nomina_trabajadores t ON t.id=a.trabajador_id ORDER BY a.id DESC",conn)
+            ants=pd.read_sql_query("SELECT a.id,t.nombre,a.periodo,a.fecha,a.monto,a.contabilizado,a.asiento_id FROM nomina_anticipos a JOIN nomina_trabajadores t ON t.id=a.trabajador_id WHERE COALESCE(a.anulado,0)=0 ORDER BY a.id DESC",conn)
             pres=pd.read_sql_query("SELECT p.id,t.nombre,p.fecha,p.monto_original,p.numero_cuotas,p.cuota,p.saldo,p.estado,p.contabilizado,p.asiento_id FROM nomina_prestamos p JOIN nomina_trabajadores t ON t.id=p.trabajador_id ORDER BY p.id DESC",conn)
             st.dataframe(formatear_montos_df(ants),use_container_width=True,hide_index=True); st.dataframe(formatear_montos_df(pres),use_container_width=True,hide_index=True)
             if not ants.empty:
@@ -7218,7 +7291,7 @@ elif menu == "👥 Nómina":
             prestamos=pd.read_sql_query("SELECT * FROM nomina_prestamos WHERE trabajador_id=? AND estado='VIGENTE' AND saldo>0 AND primera_cuota<=?",conn,params=(tr.id,periodo)); pre_sug=float(prestamos['cuota'].sum()) if not prestamos.empty else 0
             pre_desc=d2.number_input('Descuento préstamos',min_value=0.0,value=float(ex.get('prestamo_descuento',pre_sug)),step=1000.0,format='%.0f')
             otros_desc=d3.number_input('Otros descuentos',min_value=0.0,value=float(ex.get('otros_descuentos',0)),step=1000.0,format='%.0f')
-            ant=conn.execute("SELECT COALESCE(SUM(monto),0) FROM nomina_anticipos WHERE trabajador_id=? AND periodo=?",(tr.id,periodo)).fetchone()[0] or 0
+            ant=conn.execute("SELECT COALESCE(SUM(monto),0) FROM nomina_anticipos WHERE trabajador_id=? AND periodo=? AND COALESCE(anulado,0)=0",(tr.id,periodo)).fetchone()[0] or 0
             calc=nomina_calcular(total_imp,total_noimp,comision,salud_tipo_vig,mod,sval,uf_valor,afc,impuesto,pre_desc,otros_desc,ant,afp_manual if usar_afp_manual else None,salud_manual if usar_salud_manual else None)
             a,b,c,d=st.columns(4); a.metric('Total imponible',money(total_imp)); b.metric('Total no imponible',money(total_noimp)); c.metric('Total haberes',money(total_imp+total_noimp)); d.metric('Líquido período',money(calc['liquido']))
             e,f,g=st.columns(3); e.metric('Total descuentos',money(calc['total_desc'])); f.metric('Anticipo día 15',money(ant)); g.metric('Saldo fin de mes',money(calc['saldo']))
@@ -7972,6 +8045,29 @@ elif menu == "🏦 Bancos y Cartolas":
                     try:
                         nuevo=revertir_pago_proveedor_cartola(conn,opciones[opcion])
                         sgci_exito(f'Asiento reverso {nuevo} creado. Movimiento pendiente para conciliar nuevamente.')
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f'No se realizaron cambios: {e}')
+
+            anticipos_reversibles=pd.read_sql_query("""SELECT cb.id,cb.fecha,cb.descripcion,cb.cargo,cb.asiento_id,
+                a.id anticipo_id,t.nombre trabajador
+                FROM cartola_bancaria cb JOIN nomina_anticipos a ON a.id=cb.match_id
+                JOIN nomina_trabajadores t ON t.id=a.trabajador_id
+                WHERE cb.banco_id=? AND cb.conciliado=1 AND cb.match_tipo='NOMINA_ANTICIPO'
+                AND COALESCE(a.anulado,0)=0 ORDER BY cb.fecha DESC,cb.id DESC""",conn,
+                params=[int(label.split(' - ')[0])])
+            if not anticipos_reversibles.empty:
+                st.divider()
+                st.subheader('Revertir anticipo de trabajador mal conciliado')
+                st.caption('Genera asiento reverso, conserva el anticipo anulado y deja la transferencia pendiente. No elimina el asiento original.')
+                ant_map={f"Cartola {r.id} | {r.fecha} | {money(r.cargo)} | {r.trabajador} | anticipo {r.anticipo_id} | asiento {r.asiento_id}":int(r.id)
+                         for r in anticipos_reversibles.itertuples()}
+                ant_sel=st.selectbox('Anticipo a corregir',list(ant_map),key='sgci_rev_ant_sel')
+                ant_confirm=st.checkbox('Confirmo que esta transferencia NO corresponde a un anticipo del trabajador y debe volver a quedar pendiente.',key='sgci_rev_ant_conf')
+                if st.button('↩️ Revertir anticipo y reabrir transferencia',disabled=not ant_confirm,key='sgci_rev_ant_btn'):
+                    try:
+                        rev=revertir_anticipo_nomina_cartola(conn,ant_map[ant_sel])
+                        sgci_exito(f'Anticipo revertido mediante asiento {rev}. Transferencia pendiente para conciliar con el proveedor.')
                         st.rerun()
                     except Exception as e:
                         st.error(f'No se realizaron cambios: {e}')
