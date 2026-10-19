@@ -611,8 +611,8 @@ ROLES = {
         "5.2.02"
     ),
     "iva_uso_comun": (
-        "IVA de uso común",
-        "5.2.03"
+        "IVA de uso común por determinar",
+        "1.1.03.03"
     ),
 }
 
@@ -1329,6 +1329,18 @@ def reorganizar_plan_2026_seguro(conn):
     ]
     for codigo, nombre in cambios:
         conn.execute("UPDATE plan_cuentas SET nombre=? WHERE codigo=?", (nombre, codigo))
+    # Cuenta transitoria separada de Gastos de personal.
+    conn.execute("""
+        INSERT OR IGNORE INTO plan_cuentas
+        (codigo, nombre, categoria, tipo, padre_codigo, nivel)
+        VALUES ('1.1.03.03', 'IVA de uso común por determinar',
+                'Activo', 'Activo', '1.1.03', 4)
+    """)
+    # Migrar únicamente la asignación antigua y errónea; conservar roles personalizados.
+    conn.execute("""
+        UPDATE config_cuentas SET codigo='1.1.03.03'
+        WHERE rol='iva_uso_comun' AND codigo='5.2.03'
+    """)
     conn.commit()
 
 
@@ -1478,6 +1490,11 @@ def cargar_roles(conn):
 
 
 def guardar_rol(conn, rol, codigo):
+
+    if rol == "iva_uso_comun" and (
+        codigo == "5.2.03" or str(codigo).startswith("5.2.03.")
+    ):
+        raise ValueError("El IVA de uso común no puede asignarse a Gastos de personal.")
 
     conn.execute(
         """
@@ -2174,16 +2191,12 @@ def armar_asiento(doc, tipo, cuenta, roles):
         # ----------------------------------------------------
 
         if iva_uso_comun > 0.001:
-            lineas_normales.append(
-                (
-                    codigo_rol(
-                        "iva_uso_comun",
-                        cuenta_principal
-                    ),
-                    iva_uso_comun,
-                    0.0
+            cuenta_iva_uc = codigo_rol("iva_uso_comun", None)
+            if not cuenta_iva_uc or cuenta_iva_uc == "5.2.03" or str(cuenta_iva_uc).startswith("5.2.03."):
+                raise ValueError(
+                    "Configuración inválida de IVA de uso común: revise la cuenta contable asignada."
                 )
-            )
+            lineas_normales.append((cuenta_iva_uc, iva_uso_comun, 0.0))
 
         # ----------------------------------------------------
         # CUADRATURA AUTOMÁTICA
