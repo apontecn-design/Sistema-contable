@@ -3522,8 +3522,8 @@ def estado_cuenta_proveedor(
             c.tipo_doc,
             c.folio,
             c.glosa,
-            c.monto_total AS cargo,
-            0 AS abono
+            CASE WHEN c.tipo_doc IN (60,61) THEN 0 ELSE ABS(COALESCE(c.monto_total,0)) END AS cargo,
+            CASE WHEN c.tipo_doc IN (60,61) THEN ABS(COALESCE(c.monto_total,0)) ELSE 0 END AS abono
         FROM compras c
         WHERE c.proveedor_id = ?
         {filtro}
@@ -3686,7 +3686,9 @@ def conciliacion_proveedores(conn):
             ) AS proveedor,
             COALESCE(
                 (
-                    SELECT SUM(c.monto_total)
+                    SELECT SUM(CASE WHEN c.tipo_doc IN (60,61)
+                                    THEN -ABS(COALESCE(c.monto_total,0))
+                                    ELSE ABS(COALESCE(c.monto_total,0)) END)
                     FROM compras c
                     WHERE c.proveedor_id = p.id
                 ),
@@ -5339,6 +5341,7 @@ def documentos_pendientes_proveedor(conn, proveedor_id):
                MAX(ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0),0) AS pendiente
         FROM compras c
         WHERE c.proveedor_id=?
+          AND (c.tipo_doc IS NULL OR c.tipo_doc NOT IN (60,61))
           AND ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0) > 0.01
         ORDER BY c.fecha, c.id
     """, conn, params=[int(proveedor_id)])
