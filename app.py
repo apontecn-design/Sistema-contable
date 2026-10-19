@@ -3565,7 +3565,21 @@ def estado_cuenta_proveedor(
         params=params
     )
 
-    df = pd.concat([compras, pagos], ignore_index=True)
+    sgci_crear_devoluciones_proveedor(conn)
+    filtros_dev = ['d.proveedor_id=?']
+    parametros_dev = [proveedor_id]
+    if desde:
+        filtros_dev.append('d.fecha >= ?')
+        parametros_dev.append(desde)
+    if hasta:
+        filtros_dev.append('d.fecha <= ?')
+        parametros_dev.append(hasta)
+    devoluciones = pd.read_sql_query(f"""SELECT d.fecha, NULL AS tipo_doc, NULL AS folio,
+        d.glosa, d.monto AS cargo, 0 AS abono
+        FROM sgci_devoluciones_proveedor d
+        WHERE {' AND '.join(filtros_dev)} ORDER BY d.fecha,d.id""",
+        conn, params=parametros_dev)
+    df = pd.concat([compras, pagos, devoluciones], ignore_index=True)
 
     if df.empty:
         return df
@@ -5411,6 +5425,106 @@ def aplicar_pago_auxiliar_proveedor(conn, proveedor_id, pago_id, compra_ids):
         f"Proveedor {proveedor_id}, pago {pago_id}, aplicado {sum(x[1] for x in aplicaciones)}, saldo pago {restante}"
     )
     return aplicaciones,restante
+
+
+def sgci_crear_devoluciones_proveedor(conn):
+    """Auxiliar para vincular reembolsos de proveedores con NC y factura sin duplicar el RCV."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_devoluciones_proveedor (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        movimiento_id INTEGER NOT NULL UNIQUE,
+        proveedor_id INTEGER NOT NULL,
+        nota_credito_id INTEGER NOT NULL,
+        factura_id INTEGER NOT NULL,
+        monto REAL NOT NULL CHECK(monto > 0),
+        asiento_id INTEGER NOT NULL,
+        lote_id TEXT NOT NULL,
+        fecha TEXT NOT NULL,
+        glosa TEXT NOT NULL
+    )""")
+    conn.commit()
+
+
+def sgci_contabilizar_devolucion_proveedor(conn, movimiento_id, proveedor_id,
+                                            nota_credito_id, factura_id, glosa=""):
+    """Un asiento Banco Debe / Proveedores Haber y una línea en el auxiliar del proveedor.
+
+    No genera una nueva compra ni altera el asiento de la nota de crédito.
+    """
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    sgci_crear_devoluciones_proveedor(conn)
+    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+    if not mov or int(mov['conciliado'] or 0):
+        raise ValueError('El movimiento bancario no existe o ya está conciliado.')
+    monto = clp_round(float(mov['abono'] or 0))
+    if monto <= 0 or float(mov['cargo'] or 0) > 0:
+        raise ValueError('La devolución debe ser un abono bancario.')
+    if periodo_cerrado(conn, mov['fecha']):
+        raise ValueError('El período contable está cerrado.')
+    banco = conn.execute('SELECT * FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
+    if not banco or not banco['cuenta_contable']:
+        raise ValueError('La cuenta bancaria no tiene cuenta contable configurada.')
+    proveedor = conn.execute('SELECT * FROM proveedores WHERE id=?', (int(proveedor_id),)).fetchone()
+    if not proveedor:
+        raise ValueError('Proveedor no encontrado.')
+    nc = conn.execute('SELECT * FROM compras WHERE id=? AND proveedor_id=? AND tipo_doc IN (60,61)',
+                      (int(nota_credito_id), int(proveedor_id))).fetchone()
+    factura = conn.execute('SELECT * FROM compras WHERE id=? AND proveedor_id=? AND tipo_doc NOT IN (60,61)',
+                           (int(factura_id), int(proveedor_id))).fetchone()
+    if not nc or not factura or int(nc['id']) == int(factura['id']):
+        raise ValueError('Selecciona una nota de crédito y una factura válidas del mismo proveedor.')
+    roles = cargar_roles(conn)
+    rol_prov = roles.get('proveedores')
+    if not rol_prov:
+        raise ValueError('La cuenta contable de Proveedores no está configurada.')
+    codigo_prov, codigo_banco = rol_prov[0], banco['cuenta_contable']
+    if codigo_prov == codigo_banco:
+        raise ValueError('La cuenta de Banco no puede ser la misma que Proveedores.')
+    # La diferencia NC - factura es la base del reembolso. No permitir aplicarla dos veces.
+    disponible = clp_round(abs(float(nc['monto_total'] or 0)) - abs(float(factura['monto_total'] or 0)))
+    aplicado = conn.execute("""SELECT COALESCE(SUM(monto),0) FROM sgci_devoluciones_proveedor
+                              WHERE nota_credito_id=? AND factura_id=?""",
+                           (int(nota_credito_id), int(factura_id))).fetchone()[0]
+    restante = clp_round(disponible - float(aplicado or 0))
+    if disponible <= 0 or monto > restante:
+        raise ValueError(f'La diferencia disponible NC/factura es {money(max(0,restante))}; '
+                         f'no alcanza para el abono de {money(monto)}. Revisa los documentos.')
+    if conn.execute('SELECT 1 FROM sgci_devoluciones_proveedor WHERE movimiento_id=?',
+                    (int(movimiento_id),)).fetchone():
+        raise ValueError('Este abono ya tiene una devolución vinculada.')
+    nombre = limpiar_texto(proveedor['razon_social'] or proveedor['nombre'] or 'Proveedor')
+    detalle = limpiar_texto(glosa) or f'Devolución {nombre} - NC {nc["folio"]} / Factura {factura["folio"]}'
+    asiento = siguiente_asiento(conn) + 1
+    lote = 'DEV-PROV-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+    plan = Plan(conn)
+    try:
+        conn.execute("""INSERT INTO libro_diario
+            (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (mov['fecha'], plan.todos.get(codigo_banco,codigo_banco), monto, 0,
+             detalle, codigo_banco, asiento, lote, 'DEVOLUCION_PROVEEDOR'))
+        conn.execute("""INSERT INTO libro_diario
+            (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (mov['fecha'], plan.todos.get(codigo_prov,codigo_prov), 0, monto,
+             detalle, codigo_prov, asiento, lote, 'DEVOLUCION_PROVEEDOR'))
+        conn.execute("""INSERT INTO sgci_devoluciones_proveedor
+            (movimiento_id,proveedor_id,nota_credito_id,factura_id,monto,asiento_id,lote_id,fecha,glosa)
+            VALUES (?,?,?,?,?,?,?,?,?)""",
+            (int(movimiento_id),int(proveedor_id),int(nota_credito_id),int(factura_id),
+             monto,asiento,lote,mov['fecha'],detalle))
+        cur = conn.execute("""UPDATE cartola_bancaria
+            SET conciliado=1,observacion=?,asiento_id=?,match_tipo='DEVOLUCION_PROVEEDOR',
+                match_id=?,match_confianza=100 WHERE id=? AND conciliado=0""",
+            (detalle,asiento,int(proveedor_id),int(movimiento_id)))
+        if cur.rowcount != 1:
+            raise ValueError('El movimiento dejó de estar pendiente; no se registró el asiento.')
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    registrar_auditoria(conn, 'DEVOLUCION PROVEEDOR',
+                        f'Movimiento {movimiento_id}, proveedor {proveedor_id}, NC {nota_credito_id}, factura {factura_id}, asiento {asiento}')
+    return asiento
 
 
 def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id, compra_ids,
@@ -7664,7 +7778,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.error(f"No se pudo corregir: {e}")
                 es_cargo = float(mov_sel["cargo"] or 0) > 0
                 es_abono = float(mov_sel["abono"] or 0) > 0
-                metodos = (["💼 Tesorería", "👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente"] if es_abono else []) + ["✏️ Una cuenta", "🧩 Varias cuentas"]
+                metodos = (["💼 Tesorería", "👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente", "↩️ Devolución de proveedor"] if es_abono else []) + ["✏️ Una cuenta", "🧩 Varias cuentas"]
                 metodo_conc = st.radio("¿Cómo quieres conciliar este movimiento?", metodos, horizontal=True, key=f"metodo_conc_{movimiento_id}")
                 if es_cargo and metodo_conc == '💼 Tesorería':
                     st.divider()
@@ -7813,6 +7927,55 @@ elif menu == "🏦 Bancos y Cartolas":
                                     st.rerun()
                                 except Exception as e:
                                     st.error(f"No se pudo contabilizar el pago: {e}")
+
+                if es_abono and metodo_conc == "↩️ Devolución de proveedor":
+                    st.divider()
+                    st.subheader('↩️ Devolución de proveedor')
+                    st.caption('Reembolso de una nota de crédito que excede una factura del mismo proveedor. Un solo asiento Banco / Proveedores, auxiliar actualizado y movimiento conciliado.')
+                    sgci_crear_devoluciones_proveedor(conn)
+                    proveedores_dev = pd.read_sql_query('''SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) AS nombre
+                        FROM proveedores WHERE activo=1 ORDER BY nombre''', conn)
+                    if proveedores_dev.empty:
+                        st.info('No hay proveedores activos.')
+                    else:
+                        etiquetas_dev = {f'{int(r.id)} | {r.rut} | {r.nombre}':int(r.id) for r in proveedores_dev.itertuples()}
+                        etiqueta_dev = st.selectbox('Proveedor que realizó el reembolso',list(etiquetas_dev),key=f'dev_prov_{movimiento_id}')
+                        prov_dev = etiquetas_dev[etiqueta_dev]
+                        documentos_dev = pd.read_sql_query('''SELECT id,fecha,folio,tipo_doc,monto_total FROM compras
+                            WHERE proveedor_id=? ORDER BY fecha DESC,id DESC''',conn,params=[prov_dev])
+                        notas_dev = documentos_dev[documentos_dev['tipo_doc'].isin([60,61])]
+                        facturas_dev = documentos_dev[~documentos_dev['tipo_doc'].isin([60,61])]
+                        if notas_dev.empty or facturas_dev.empty:
+                            st.warning('El proveedor debe tener una nota de crédito y una factura registradas en compras.')
+                        else:
+                            mapa_nc_dev = {f'NC {r.folio} | {r.fecha} | {money(abs(float(r.monto_total)))}':int(r.id) for r in notas_dev.itertuples()}
+                            mapa_fac_dev = {f'Factura {r.folio} | {r.fecha} | {money(abs(float(r.monto_total)))}':int(r.id) for r in facturas_dev.itertuples()}
+                            etiqueta_nc = st.selectbox('Nota de crédito que originó el saldo a favor',list(mapa_nc_dev),key=f'dev_nc_{movimiento_id}')
+                            etiqueta_fac = st.selectbox('Factura que se compensa con la nota de crédito',list(mapa_fac_dev),key=f'dev_fac_{movimiento_id}')
+                            id_nc,id_fac = mapa_nc_dev[etiqueta_nc],mapa_fac_dev[etiqueta_fac]
+                            total_nc = abs(float(notas_dev.loc[notas_dev['id']==id_nc,'monto_total'].iloc[0]))
+                            total_fac = abs(float(facturas_dev.loc[facturas_dev['id']==id_fac,'monto_total'].iloc[0]))
+                            aplicado_dev = conn.execute('''SELECT COALESCE(SUM(monto),0) FROM sgci_devoluciones_proveedor
+                                WHERE nota_credito_id=? AND factura_id=?''',(id_nc,id_fac)).fetchone()[0]
+                            saldo_dev = clp_round(total_nc-total_fac-float(aplicado_dev or 0))
+                            abono_dev = clp_round(float(mov_sel['abono'] or 0))
+                            c1,c2,c3=st.columns(3)
+                            c1.metric('Diferencia NC menos factura',money(total_nc-total_fac))
+                            c2.metric('Abono bancario',money(abono_dev))
+                            c3.metric('Diferencia por devolver restante',money(saldo_dev-abono_dev))
+                            st.info('Se contabilizará Banco al Debe y Proveedores al Haber. No se volverán a registrar la factura, la nota de crédito ni el IVA.')
+                            glosa_dev = st.text_input('Glosa',value=f'Devolución proveedor - NC {notas_dev.loc[notas_dev["id"]==id_nc,"folio"].iloc[0]} / Factura {facturas_dev.loc[facturas_dev["id"]==id_fac,"folio"].iloc[0]}',key=f'dev_glosa_{movimiento_id}')
+                            confirma_dev = st.checkbox('Confirmo que el abono corresponde a la diferencia de estos documentos y que no fue contabilizado anteriormente.',key=f'dev_confirm_{movimiento_id}')
+                            valido_dev = saldo_dev > 0 and abono_dev <= saldo_dev
+                            if not valido_dev:
+                                st.error('La diferencia disponible no alcanza para este abono. Verifica los documentos y reembolsos anteriores.')
+                            if st.button('↩️ Contabilizar y conciliar devolución',type='primary',disabled=not (confirma_dev and valido_dev),key=f'dev_btn_{movimiento_id}'):
+                                try:
+                                    asiento_dev=sgci_contabilizar_devolucion_proveedor(conn,movimiento_id,prov_dev,id_nc,id_fac,glosa_dev)
+                                    sgci_exito(f'Devolución conciliada. Asiento N.º {asiento_dev}. Auxiliar del proveedor actualizado sin duplicar IVA.')
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f'No se pudo contabilizar la devolución: {exc}')
 
                 if es_abono and metodo_conc == "👥 Cliente":
                     st.divider()
