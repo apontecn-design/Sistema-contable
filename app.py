@@ -4184,6 +4184,104 @@ def estado_resultados(conn, hasta=None, desde=None):
     return df[df["tipo"].isin(["Ingresos","Gastos"])].copy()
 
 
+
+# Conciliación N:1: una línea del Libro Diario se utiliza como máximo una vez.
+def sgci_crear_vinculos_bancarios(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_conciliacion_lineas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cartola_id INTEGER NOT NULL,
+        diario_id INTEGER NOT NULL UNIQUE,
+        monto REAL NOT NULL,
+        creado_en TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(cartola_id) REFERENCES cartola_bancaria(id),
+        FOREIGN KEY(diario_id) REFERENCES libro_diario(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sgci_vinculos_cartola ON sgci_conciliacion_lineas(cartola_id)")
+    conn.commit()
+
+
+def sgci_lineas_bancarias_disponibles(conn, movimiento_id):
+    sgci_crear_vinculos_bancarios(conn)
+    mov=conn.execute("""SELECT cb.*,b.cuenta_contable FROM cartola_bancaria cb
+        JOIN bancos b ON b.id=cb.banco_id WHERE cb.id=?""",(int(movimiento_id),)).fetchone()
+    if not mov or int(mov['conciliado'] or 0):
+        return pd.DataFrame()
+    cuenta=str(mov['cuenta_contable'] or '').strip()
+    if not cuenta:
+        return pd.DataFrame()
+    cargo=float(mov['cargo'] or 0)>0
+    # Una salida de banco se acredita (Haber); un abono se debita (Debe).
+    columna='haber' if cargo else 'debe'
+    contraria='debe' if cargo else 'haber'
+    return pd.read_sql_query(f"""SELECT ld.id,ld.fecha,ld.asiento_id,ld.glosa,ld.origen,
+        ld.codigo_cuenta,ld.{columna} AS monto
+        FROM libro_diario ld
+        WHERE ld.codigo_cuenta=? AND ld.{columna}>0 AND COALESCE(ld.{contraria},0)=0
+        AND NOT EXISTS(SELECT 1 FROM sgci_conciliacion_lineas x WHERE x.diario_id=ld.id)
+        AND NOT EXISTS(SELECT 1 FROM cartola_bancaria cb
+            WHERE cb.conciliado=1 AND cb.asiento_id=ld.asiento_id
+            AND COALESCE(cb.match_tipo,'')<>'ASIENTOS_EXISTENTES')
+        ORDER BY ld.fecha DESC,ld.id DESC LIMIT 1000""",conn,params=(cuenta,))
+
+
+def sgci_conciliar_lineas_existentes(conn,movimiento_id,diario_ids):
+    ids=[int(x) for x in diario_ids]
+    if not ids or len(ids)!=len(set(ids)):
+        raise ValueError('Selecciona líneas bancarias distintas.')
+    sgci_crear_vinculos_bancarios(conn)
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        mov=conn.execute("""SELECT cb.*,b.cuenta_contable FROM cartola_bancaria cb
+            JOIN bancos b ON b.id=cb.banco_id WHERE cb.id=?""",(int(movimiento_id),)).fetchone()
+        if not mov or int(mov['conciliado'] or 0):
+            raise ValueError('El movimiento ya fue conciliado o no existe.')
+        cuenta=str(mov['cuenta_contable'] or '').strip()
+        if not cuenta:
+            raise ValueError('La cuenta bancaria no tiene cuenta contable configurada.')
+        cargo=float(mov['cargo'] or 0)>0
+        objetivo=float(mov['cargo'] if cargo else mov['abono'] or 0)
+        if objetivo<=0 or (float(mov['abono'] or 0)>0 and cargo):
+            raise ValueError('El movimiento no tiene una naturaleza bancaria válida.')
+        marks=','.join('?' for _ in ids)
+        lineas=conn.execute(f'SELECT * FROM libro_diario WHERE id IN ({marks})',ids).fetchall()
+        if len(lineas)!=len(ids):
+            raise ValueError('Alguna línea contable ya no existe.')
+        total=0
+        for l in lineas:
+            if str(l['codigo_cuenta'] or '')!=cuenta:
+                raise ValueError('Una línea pertenece a otra cuenta bancaria.')
+            monto=float(l['haber'] if cargo else l['debe'] or 0)
+            opuesto=float(l['debe'] if cargo else l['haber'] or 0)
+            if monto<=0 or opuesto!=0:
+                raise ValueError('La naturaleza de una línea no coincide con la cartola.')
+            if conn.execute('SELECT 1 FROM sgci_conciliacion_lineas WHERE diario_id=?',(l['id'],)).fetchone():
+                raise ValueError('Una línea ya fue conciliada en otro movimiento.')
+            if conn.execute("""SELECT 1 FROM cartola_bancaria
+                WHERE conciliado=1 AND asiento_id=? AND COALESCE(match_tipo,'')<>'ASIENTOS_EXISTENTES'""",(l['asiento_id'],)).fetchone():
+                raise ValueError('Un asiento ya está asociado a otra conciliación.')
+            total+=monto
+        if abs(total-objetivo)>0.005:
+            raise ValueError(f'Las líneas suman {total:,.0f} y el movimiento {objetivo:,.0f}.')
+        for l in lineas:
+            monto=float(l['haber'] if cargo else l['debe'])
+            conn.execute('INSERT INTO sgci_conciliacion_lineas(cartola_id,diario_id,monto) VALUES(?,?,?)',
+                         (int(movimiento_id),int(l['id']),monto))
+        asiento_referencia=int(lineas[0]['asiento_id']) if len({l['asiento_id'] for l in lineas})==1 else None
+        cur=conn.execute("""UPDATE cartola_bancaria SET conciliado=1,
+            match_tipo='ASIENTOS_EXISTENTES',match_id=NULL,match_confianza=100,
+            asiento_id=?,observacion=? WHERE id=? AND conciliado=0""",
+            (asiento_referencia,f'Conciliación sin asiento nuevo: {len(ids)} líneas del Libro Diario',int(movimiento_id)))
+        if cur.rowcount!=1:
+            raise ValueError('El movimiento cambió durante la operación.')
+        conn.execute("""INSERT INTO auditoria(fecha_hora,usuario,accion,detalle)
+            VALUES(CURRENT_TIMESTAMP,'SGCI','CONCILIACION ASIENTOS EXISTENTES',?)""",
+            (f'Cartola {movimiento_id}; líneas {ids}; monto {objetivo:.0f}; sin asiento nuevo',))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return len(ids)
+
 def conciliacion_banco(conn, banco_id):
     banco=conn.execute("SELECT * FROM bancos WHERE id=?",(banco_id,)).fetchone()
     if not banco: return None
@@ -7778,8 +7876,37 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.error(f"No se pudo corregir: {e}")
                 es_cargo = float(mov_sel["cargo"] or 0) > 0
                 es_abono = float(mov_sel["abono"] or 0) > 0
-                metodos = (["💼 Tesorería", "👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente", "↩️ Devolución de proveedor"] if es_abono else []) + ["✏️ Una cuenta", "🧩 Varias cuentas"]
+                metodos = (["💼 Tesorería", "👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente", "↩️ Devolución de proveedor"] if es_abono else []) + ["🔗 Asientos existentes", "✏️ Una cuenta", "🧩 Varias cuentas"]
                 metodo_conc = st.radio("¿Cómo quieres conciliar este movimiento?", metodos, horizontal=True, key=f"metodo_conc_{movimiento_id}")
+                if metodo_conc == "🔗 Asientos existentes":
+                    st.divider()
+                    st.subheader('🔗 Conciliar asientos ya contabilizados')
+                    st.caption('Relaciona una o varias líneas de Banco del Libro Diario con este movimiento. No crea asientos, pagos ni descuentos nuevos.')
+                    lineas_disp=sgci_lineas_bancarias_disponibles(conn,movimiento_id)
+                    if lineas_disp.empty:
+                        st.warning('No hay líneas bancarias disponibles para la cuenta de este banco y naturaleza del movimiento. Verifica que los pagos estén contabilizados y que el banco tenga cuenta contable asignada.')
+                    else:
+                        etiquetas={f"Línea {int(r.id)} · Asiento {int(r.asiento_id)} · {r.fecha} · {money(r.monto)} · {str(r.glosa or '')[:85]}":int(r.id)
+                                   for r in lineas_disp.itertuples(index=False)}
+                        elegidas=st.multiselect('Selecciona las líneas bancarias ya registradas',list(etiquetas),key=f'lineas_existentes_{movimiento_id}')
+                        ids_elegidos=[etiquetas[x] for x in elegidas]
+                        suma=float(lineas_disp[lineas_disp['id'].isin(ids_elegidos)]['monto'].sum())
+                        objetivo=float(mov_sel['cargo'] if es_cargo else mov_sel['abono'])
+                        c1,c2,c3=st.columns(3)
+                        c1.metric('Cartola',money(objetivo)); c2.metric('Líneas seleccionadas',money(suma)); c3.metric('Diferencia',money(objetivo-suma))
+                        if ids_elegidos:
+                            st.dataframe(lineas_disp[lineas_disp['id'].isin(ids_elegidos)],use_container_width=True,hide_index=True)
+                        correcto=bool(ids_elegidos) and abs(suma-objetivo)<0.005
+                        if not correcto:
+                            st.info('Selecciona únicamente las líneas bancarias cuya suma coincida exactamente con la cartola.')
+                        confirmar=st.checkbox('Confirmo que estas líneas corresponden a esta misma operación bancaria y que no debo generar otro asiento.',key=f'conf_lineas_existentes_{movimiento_id}')
+                        if st.button('🔗 Conciliar sin contabilizar nuevamente',type='primary',disabled=not (correcto and confirmar),key=f'btn_lineas_existentes_{movimiento_id}'):
+                            try:
+                                n=sgci_conciliar_lineas_existentes(conn,movimiento_id,ids_elegidos)
+                                sgci_exito(f'Movimiento {movimiento_id} conciliado con {n} líneas existentes. Sin asiento adicional.')
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f'No se pudo conciliar: {exc}')
                 if es_cargo and metodo_conc == '💼 Tesorería':
                     st.divider()
                     st.subheader('💼 Conciliar pago ya contabilizado en Tesorería')
