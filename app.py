@@ -1061,6 +1061,15 @@ def crear_esquema(conn):
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS nomina_prestamo_cuotas_programadas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prestamo_id INTEGER NOT NULL,
+            fecha TEXT NOT NULL,
+            monto REAL NOT NULL,
+            UNIQUE(prestamo_id,fecha)
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS nomina_liquidaciones (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             periodo TEXT NOT NULL,
@@ -7439,10 +7448,51 @@ elif menu == "👥 Nómina":
             with c2:
                 st.markdown('#### Préstamo al trabajador')
                 quienp=st.selectbox('Trabajador',list(mapa),key='pre_trab'); tp=mapa[quienp]
-                fecha_p=st.date_input('Fecha préstamo',date.today(),key='pre_fecha'); monto_p=st.number_input('Monto original',min_value=0.0,value=0.0,step=10000.0,format='%.0f',key='pre_monto'); cuotas=st.number_input('N° cuotas',min_value=1,max_value=120,value=1,key='pre_cuotas'); cuota=st.number_input('Cuota mensual',min_value=0.0,value=0.0,step=1000.0,format='%.0f',key='pre_cuota'); primera=st.text_input('Primera cuota (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='pre_primera'); obs_p=st.text_input('Observación',key='pre_obs')
+                fecha_p=st.date_input('Fecha préstamo',date.today(),key='pre_fecha')
+                monto_p=st.number_input('Monto original',min_value=0.0,value=0.0,step=10000.0,format='%.0f',key='pre_monto')
+                modalidad=st.radio('Calendario de descuentos',['Mensual (actual)','Fechas específicas / quincenal'],horizontal=True,key='pre_modalidad')
+                obs_p=st.text_input('Observación',key='pre_obs')
+                fechas_cuotas=[]
+                if modalidad=='Mensual (actual)':
+                    cuotas=st.number_input('N° cuotas',min_value=1,max_value=120,value=1,key='pre_cuotas')
+                    cuota=st.number_input('Cuota mensual',min_value=0.0,value=0.0,step=1000.0,format='%.0f',key='pre_cuota')
+                    primera=st.text_input('Primera cuota (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='pre_primera')
+                else:
+                    cuotas=st.number_input('Número de descuentos',min_value=1,max_value=48,value=4,key='pre_cuotas_fechas')
+                    importe_base=int(round(monto_p))//int(cuotas) if cuotas else 0
+                    restante=int(round(monto_p))
+                    for ix in range(int(cuotas)):
+                        colf,colm=st.columns(2)
+                        sugerida=date(2026,9,30) if ix==0 else (date(2026,10,15) if ix==1 else (date(2026,10,30) if ix==2 else date(2026,11,15)+timedelta(days=15*(ix-3))))
+                        fecha_c=colf.date_input(f'Fecha descuento {ix+1}',value=sugerida,key=f'pre_fecha_c_{ix}')
+                        valor_sug=importe_base if ix<int(cuotas)-1 else restante
+                        valor_c=colm.number_input(f'Monto descuento {ix+1}',min_value=0,value=max(0,valor_sug),step=1000,key=f'pre_monto_c_{ix}')
+                        fechas_cuotas.append((fecha_c.isoformat(),int(valor_c)))
+                        restante-=int(valor_c)
+                    st.caption(f'Total programado: {money(sum(x[1] for x in fechas_cuotas))} / Préstamo: {money(monto_p)}')
                 if st.button('Registrar préstamo',key='pre_save'):
-                    cuota_final=cuota or (monto_p/cuotas if cuotas else monto_p)
-                    conn.execute("INSERT INTO nomina_prestamos(trabajador_id,fecha,monto_original,numero_cuotas,cuota,primera_cuota,saldo,observacion) VALUES(?,?,?,?,?,?,?,?)",(tp.id,fecha_p.isoformat(),monto_p,int(cuotas),cuota_final,primera,monto_p,obs_p)); conn.commit(); sgci_exito('Préstamo registrado.'); st.rerun()
+                    if monto_p<=0:
+                        st.error('El préstamo debe ser mayor que cero.')
+                    elif modalidad=='Fechas específicas / quincenal' and (sum(x[1] for x in fechas_cuotas)!=int(round(monto_p)) or any(x[1]<=0 for x in fechas_cuotas) or len(set(x[0] for x in fechas_cuotas))!=len(fechas_cuotas) or any(x[0]<fecha_p.isoformat() for x in fechas_cuotas)):
+                        st.error('Las cuotas deben sumar exactamente el préstamo, tener fechas distintas posteriores a la entrega y montos positivos.')
+                    elif modalidad=='Mensual (actual)' and not re.fullmatch(r'\\d{4}-(0[1-9]|1[0-2])',primera):
+                        st.error('Primera cuota debe tener formato AAAA-MM.')
+                    else:
+                        if modalidad=='Mensual (actual)':
+                            cuota_final=cuota or (monto_p/cuotas if cuotas else monto_p)
+                            primera_final=primera
+                        else:
+                            cuota_final=0
+                            primera_final=min(f[:7] for f,_ in fechas_cuotas)
+                        try:
+                            cursor=conn.execute("INSERT INTO nomina_prestamos(trabajador_id,fecha,monto_original,numero_cuotas,cuota,primera_cuota,saldo,observacion) VALUES(?,?,?,?,?,?,?,?)",(tp.id,fecha_p.isoformat(),monto_p,int(cuotas),cuota_final,primera_final,monto_p,obs_p))
+                            if modalidad=='Fechas específicas / quincenal':
+                                conn.executemany("INSERT INTO nomina_prestamo_cuotas_programadas(prestamo_id,fecha,monto) VALUES(?,?,?)",[(cursor.lastrowid,f,v) for f,v in fechas_cuotas])
+                            conn.commit()
+                            sgci_exito('Préstamo y calendario registrados.'); st.rerun()
+                        except Exception:
+                            conn.rollback()
+                            raise
             st.divider(); st.markdown('#### Movimientos registrados')
             ants=pd.read_sql_query("SELECT a.id,t.nombre,a.periodo,a.fecha,a.monto,a.contabilizado,a.asiento_id FROM nomina_anticipos a JOIN nomina_trabajadores t ON t.id=a.trabajador_id WHERE COALESCE(a.anulado,0)=0 ORDER BY a.id DESC",conn)
             pres=pd.read_sql_query("SELECT p.id,t.nombre,p.fecha,p.monto_original,p.numero_cuotas,p.cuota,p.saldo,p.estado,p.contabilizado,p.asiento_id FROM nomina_prestamos p JOIN nomina_trabajadores t ON t.id=p.trabajador_id ORDER BY p.id DESC",conn)
@@ -7503,7 +7553,16 @@ elif menu == "👥 Nómina":
             if salud_tipo_vig=='Isapre' and mod=='Plan en UF': d2.caption(f'Plan: {sval:.2f} UF · equivalente {money(plan_salud)} · UF usada {uf_valor:,.2f}')
             afc=d3.number_input('AFC trabajador',min_value=0.0,value=float(ex.get('afc_descuento',0)),step=1000.0,format='%.0f',help='Editable para cuadrar con Previred.')
             impuesto=d1.number_input('Impuesto Único',min_value=0.0,value=float(ex.get('impuesto_unico',0)),step=1000.0,format='%.0f')
-            prestamos=pd.read_sql_query("SELECT * FROM nomina_prestamos WHERE trabajador_id=? AND estado='VIGENTE' AND saldo>0 AND primera_cuota<=?",conn,params=(tr.id,periodo)); pre_sug=float(prestamos['cuota'].sum()) if not prestamos.empty else 0
+            prestamos=pd.read_sql_query("SELECT * FROM nomina_prestamos WHERE trabajador_id=? AND estado='VIGENTE' AND saldo>0 AND primera_cuota<=?",conn,params=(tr.id,periodo))
+            pre_sug=0.0
+            for pp in prestamos.itertuples():
+                programadas=conn.execute("SELECT COUNT(*) FROM nomina_prestamo_cuotas_programadas WHERE prestamo_id=?",(pp.id,)).fetchone()[0]
+                if programadas:
+                    pre_sug+=float(conn.execute("SELECT COALESCE(SUM(monto),0) FROM nomina_prestamo_cuotas_programadas WHERE prestamo_id=? AND substr(fecha,1,7)=?",(pp.id,periodo)).fetchone()[0])
+                else:
+                    pre_sug+=float(pp.cuota or 0)
+            if not prestamos.empty:
+                st.caption('Cuotas programadas del mes: '+money(pre_sug)+'. Las fechas quincenales se consolidan en la liquidación mensual; no se registran descuentos bancarios separados automáticamente.')
             pre_desc=d2.number_input('Descuento préstamos',min_value=0.0,value=float(ex.get('prestamo_descuento',pre_sug)),step=1000.0,format='%.0f')
             otros_desc=d3.number_input('Otros descuentos',min_value=0.0,value=float(ex.get('otros_descuentos',0)),step=1000.0,format='%.0f')
             ant=conn.execute("SELECT COALESCE(SUM(monto),0) FROM nomina_anticipos WHERE trabajador_id=? AND periodo=? AND COALESCE(anulado,0)=0",(tr.id,periodo)).fetchone()[0] or 0
