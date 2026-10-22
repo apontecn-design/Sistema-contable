@@ -59,6 +59,9 @@ st.markdown("""
 [data-testid="stSidebar"] div[role="radiogroup"] label {border-radius:11px;padding:.42rem .5rem;transition:background .15s;}
 [data-testid="stSidebar"] div[role="radiogroup"] label:hover {background:#617151;}
 [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {background:#78866B;box-shadow:inset 3px 0 #D1B57A;}
+/* Menú principal: mayor legibilidad sin afectar controles internos. */
+[data-testid="stSidebar"] div[role="radiogroup"] label p {font-size:16px!important;font-weight:650!important;line-height:1.35!important;}
+[data-testid="stSidebar"] div[role="radiogroup"] label {padding:.48rem .5rem;}
 .stButton>button,.stDownloadButton>button {border-radius:11px;border:1px solid #C8D2C1;transition:all .15s;}
 .stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"] {background:#46543A!important;color:white!important;border-color:#46543A!important;}
 .stButton>button[kind="primary"]:hover,.stFormSubmitButton>button[kind="primary"]:hover {background:#303D2A!important;}
@@ -979,6 +982,50 @@ def crear_esquema(conn):
             fecha_creacion TEXT
         )
     """)
+
+    # Recursos Humanos: extensiones independientes; no alteran asientos ni liquidaciones.
+    conn.execute("""CREATE TABLE IF NOT EXISTS rrhh_documentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trabajador_id INTEGER NOT NULL,
+        tipo TEXT NOT NULL,
+        nombre_archivo TEXT NOT NULL,
+        fecha_documento TEXT,
+        observacion TEXT,
+        contenido BLOB NOT NULL,
+        sha256 TEXT NOT NULL,
+        creado_en TEXT NOT NULL,
+        activo INTEGER NOT NULL DEFAULT 1,
+        FOREIGN KEY(trabajador_id) REFERENCES nomina_trabajadores(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS rrhh_vacaciones_movimientos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trabajador_id INTEGER NOT NULL,
+        fecha TEXT NOT NULL,
+        tipo TEXT NOT NULL CHECK(tipo IN ('ASIGNACION','DESCUENTO','AJUSTE')),
+        dias REAL NOT NULL CHECK(dias > 0),
+        observacion TEXT,
+        creado_en TEXT NOT NULL,
+        FOREIGN KEY(trabajador_id) REFERENCES nomina_trabajadores(id)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS rrhh_vacaciones_solicitudes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trabajador_id INTEGER NOT NULL,
+        fecha_solicitud TEXT NOT NULL,
+        desde TEXT NOT NULL,
+        hasta TEXT NOT NULL,
+        dias_solicitados REAL NOT NULL CHECK(dias_solicitados > 0),
+        estado TEXT NOT NULL DEFAULT 'PENDIENTE',
+        observacion TEXT,
+        revisado_por TEXT,
+        fecha_revision TEXT,
+        observacion_revision TEXT,
+        creado_en TEXT NOT NULL,
+        FOREIGN KEY(trabajador_id) REFERENCES nomina_trabajadores(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rrhh_doc_trab ON rrhh_documentos(trabajador_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rrhh_vac_trab ON rrhh_vacaciones_movimientos(trabajador_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rrhh_sol_trab ON rrhh_vacaciones_solicitudes(trabajador_id)")
+
     conn.execute("""
         CREATE TABLE IF NOT EXISTS nomina_parametros_afp (
             afp TEXT PRIMARY KEY,
@@ -5957,7 +6004,7 @@ def nomina_pdf(titulo, subtitulo, columnas, filas, totales=None):
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.enums import TA_LEFT, TA_RIGHT
         from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepInFrame
     except Exception as e:
         raise RuntimeError("ReportLab no está disponible para generar el PDF.") from e
 
@@ -6015,6 +6062,84 @@ def nomina_pdf(titulo, subtitulo, columnas, filas, totales=None):
     doc.build(story)
     buf.seek(0)
     return buf.getvalue()
+
+
+def rrhh_pdf_liquidacion(conn, r):
+    """Formato de Asimex: solo presentación; no recalcula ni contabiliza."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepInFrame
+    from reportlab.lib.units import cm
+    from calendar import month_abbr
+    from html import escape
+    emp=conn.execute("SELECT razon_social,rut FROM empresa ORDER BY id LIMIT 1").fetchone()
+    nombre_emp=str(emp['razon_social'] or 'Empresa') if emp else 'Empresa'
+    rut_emp=str(emp['rut'] or '') if emp else ''
+    trab=conn.execute("SELECT fecha_ingreso,tipo_contrato FROM nomina_trabajadores WHERE id=?",(r.trabajador_id,)).fetchone()
+    contrato=trab['tipo_contrato'] if trab else ''
+    ingreso=trab['fecha_ingreso'] if trab else ''
+    try: ingreso=datetime.strptime(str(ingreso)[:10],'%Y-%m-%d').strftime('%d-%m-%Y')
+    except (ValueError,TypeError): ingreso=str(ingreso or '')
+    try:
+        year,month=map(int,str(r.periodo).split('-')[:2])
+        meses=['','ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic']
+        mes=f'{meses[month]}-{year%100:02d}'
+        fecha_emision=f'{__import__("calendar").monthrange(year,month)[1]:02d}-{month:02d}-{year}'
+    except (ValueError,IndexError): mes=str(r.periodo);fecha_emision=''
+    style=ParagraphStyle('liquidacion_asimex',fontName='Helvetica',fontSize=8.4,leading=12)
+    bold=ParagraphStyle('liquidacion_asimex_bold',parent=style,fontName='Helvetica-Bold')
+    def P(x,b=False): return Paragraph(escape(str(x or '')),bold if b else style)
+    def m(v): return money(v)
+    def row(*xs): return [P(x) for x in xs]
+    story=[]
+    story.append(Table([[P('LIQUIDACIÓN DE REMUNERACIONES',True)]],colWidths=[17.1*cm],style=TableStyle([
+        ('BOX',(0,0),(-1,-1),1,colors.black),('ALIGN',(0,0),(-1,-1),'CENTER'),('LEFTPADDING',(0,0),(-1,-1),10),('TOPPADDING',(0,0),(-1,-1),10),('BOTTOMPADDING',(0,0),(-1,-1),10)])))
+    meta=[[P('SUCURSAL'),P(':'),P(''),P('MES'),P(':'),P(mes)],
+          [P('EMPRESA'),P(':'),P(nombre_emp),P(''),P(''),P('')],
+          [P('R.U.T.'),P(':'),P(rut_emp),P(''),P(''),P('')],
+          [P(''),P(''),P(''),P(''),P(''),P('')],
+          [P('TRABAJADOR'),P(':'),P(r.nombre),P('CONTRATO'),P(':'),P(contrato)],
+          [P('R.U.T.'),P(':'),P(r.rut),P('CENTRO DE COSTOS'),P(':'),P('')],
+          [P('FECHA CONTRATO'),P(':'),P(ingreso),P(''),P(''),P('')],
+          [P('CARGO'),P(':'),P(r.cargo),P(''),P(''),P('')],
+          [P('DÍAS TRABAJADOS'),P(':'),P(r.dias_trabajados),P(''),P(''),P('')]]
+    t=Table(meta,colWidths=[2.8*cm,.65*cm,6.0*cm,3.5*cm,.65*cm,3.5*cm],rowHeights=[None,None,None,1.2*cm,None,None,None,None,None])
+    t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.8,colors.black),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]));story.append(t)
+    def section(label,items):
+        data=[[P(label,True),'','']]
+        for name,detail,value in items:
+            data.append([P(name),P(detail),P(m(value))])
+        t=Table(data,colWidths=[6.4*cm,6.5*cm,4.2*cm])
+        t.setStyle(TableStyle([('SPAN',(0,0),(-1,0)),('ALIGN',(0,0),(-1,0),'CENTER'),('LINEABOVE',(0,0),(-1,0),.8,colors.black),('LINEBELOW',(0,0),(-1,0),.8,colors.black),('ALIGN',(2,1),(2,-1),'RIGHT'),('VALIGN',(0,0),(-1,-1),'MIDDLE'),('TOPPADDING',(0,0),(-1,0),10),('BOTTOMPADDING',(0,0),(-1,0),10),('TOPPADDING',(0,1),(-1,-1),5),('BOTTOMPADDING',(0,1),(-1,-1),5)]))
+        story.append(t)
+    hab=[('SUELDO BASE','',r.sueldo_periodo),('GRATIFICACIÓN','',r.gratificacion)]
+    for label,field in [('HORAS EXTRAS','horas_extras'),('BONOS IMPONIBLES','bonos_imponibles'),('OTROS IMPONIBLES','otros_imponibles')]:
+        if float(getattr(r,field,0) or 0): hab.append((label,'',getattr(r,field)))
+    hab.append(('TOTAL IMPONIBLE','',r.total_imponible))
+    for label,field in [('BONO NO IMPONIBLE','bono_no_imponible'),('VIÁTICOS Y MOVILIZACIÓN / ASIGNACIONES','asignacion_no_imponible'),('OTROS NO IMPONIBLES','otros_no_imponibles')]:
+        if float(getattr(r,field,0) or 0): hab.append((label,'',getattr(r,field)))
+    hab.extend([('TOTAL HABERES NO IMPONIBLES','',r.total_no_imponible),('TOTAL HABERES','',r.total_haberes)])
+    section('HABERES',hab)
+    afp_det=str(r.afp_nombre or '')
+    if float(getattr(r,'afp_comision',0) or 0): afp_det+=f' · {10+float(r.afp_comision):.2f}%'
+    salud_det=str(r.salud_tipo or '')
+    if str(r.salud_tipo or '').lower()=='isapre' and getattr(r,'salud_modalidad',None): salud_det+=' · '+str(r.salud_modalidad)
+    descuentos=[('A.F.P.',afp_det,r.afp_descuento),('SALUD',salud_det,r.salud_descuento),('AFC','',r.afc_descuento),('IMPTO. ÚNICO','',r.impuesto_unico)]
+    if float(r.prestamo_descuento or 0): descuentos.append(('PRÉSTAMOS','',r.prestamo_descuento))
+    if float(r.otros_descuentos or 0): descuentos.append(('OTROS DESCUENTOS','',r.otros_descuentos))
+    descuentos.append(('TOTAL DESCUENTOS','',r.total_descuentos))
+    section('DESCUENTOS',descuentos)
+    story.append(Spacer(1,.6*cm))
+    section('RESUMEN',[('ALCANCE LÍQUIDO','',r.liquido_periodo),('TOTAL ANTICIPOS','',r.anticipo),('TOTAL A PAGAR','',r.saldo_pagar)])
+    story.append(Spacer(1,1.2*cm))
+    story.append(Paragraph('Certifico que he recibido de '+escape(nombre_emp)+' el saldo indicado en la presente liquidación.',style))
+    story.append(Spacer(1,.9*cm))
+    story.append(Table([[P('FECHA EMISIÓN: '+fecha_emision),P('____________________________')],[P(''),P('RECIBÍ CONFORME')]],colWidths=[10*cm,7.1*cm],style=TableStyle([('ALIGN',(1,0),(1,-1),'CENTER')])) )
+    out=io.BytesIO();doc=SimpleDocTemplate(out,pagesize=A4,leftMargin=1.95*cm,rightMargin=1.95*cm,topMargin=1.2*cm,bottomMargin=1.2*cm)
+    # Ajuste proporcional del contenido para mantener la liquidación en una sola hoja A4.
+    doc.build([KeepInFrame(16.85*cm, 25.0*cm, story, mode="shrink", hAlign="CENTER", vAlign="TOP")])
+    return out.getvalue()
 
 
 def pdf_desde_dataframe(titulo, subtitulo, df, columnas_monetarias=None, totales=None):
@@ -7035,8 +7160,8 @@ def pantalla_tesoreria(conn):
 # ============================================================
 SGCI_MODULOS = {
     "inicio": "Inicio", "banco": "Banco", "tesoreria": "Tesorería",
-    "cxc": "Cuentas por Cobrar", "cxp": "Cuentas por Pagar",
-    "dte": "Facturación y DTE", "nomina": "Nómina",
+    "cxc": "Ventas/clientes", "cxp": "Compras/proveedores",
+    "dte": "Facturación y DTE", "nomina": "Recursos Humanos",
     "contabilidad": "Contabilidad", "administracion": "Administración",
 }
 SGCI_ACCIONES = ("ver", "crear", "editar", "aprobar", "contabilizar", "conciliar", "eliminar", "exportar")
@@ -7199,8 +7324,8 @@ st.sidebar.markdown("---")
 
 sgci_nav_modulos = [
     ("🏠 Inicio","inicio"), ("🏦 Banco","banco"), ("💼 Tesorería","tesoreria"),
-    ("💰 Cuentas por Cobrar","cxc"), ("💳 Cuentas por Pagar","cxp"),
-    ("🧾 Facturación y DTE","dte"), ("👥 Nómina","nomina"),
+    ("💰 Ventas/clientes","cxc"), ("💳 Compras/proveedores","cxp"),
+    ("🧾 Facturación y DTE","dte"), ("👥 Recursos Humanos","nomina"),
     ("📚 Contabilidad","contabilidad"), ("⚙️ Administración","administracion")
 ]
 sgci_nav_permitidos = [etiqueta for etiqueta,codigo in sgci_nav_modulos if sgci_puede(conn,codigo,'ver')]
@@ -7218,22 +7343,18 @@ nav_context = None
 if modulo_principal == "🏠 Inicio":
     menu = "🏠 Inicio"
 elif modulo_principal == "🏦 Banco":
-    st.sidebar.caption("BANCO")
-    st.sidebar.info("Cuentas bancarias · Cartolas · Movimientos · Conciliación bancaria")
     menu = "🏦 Bancos y Cartolas"
 elif modulo_principal == "💼 Tesorería":
     menu = "💼 Tesorería"
-elif modulo_principal == "💰 Cuentas por Cobrar":
-    st.sidebar.caption("CUENTAS POR COBRAR")
-    sub = st.sidebar.radio("Sección", ["Clientes y estados de cuenta", "Pagos de clientes", "RCV Ventas", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxc")
+elif modulo_principal == "💰 Ventas/clientes":
+    sub = st.selectbox("Sección de Cuentas por Cobrar", ["Clientes y estados de cuenta", "Pagos de clientes", "RCV Ventas", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxc")
     if sub == "Clientes y estados de cuenta": menu = "👥 Clientes"
     elif sub == "Pagos de clientes": menu = "💵 Pagos"; nav_context = "clientes"
     elif sub == "RCV Ventas": menu = "📤 RCV Ventas"
     elif sub == "Antigüedad de saldos": menu = "📌 Cuentas por Cobrar/Pagar"; nav_context = "clientes"
     else: menu = "📊 Conciliación"; nav_context = "clientes"
-elif modulo_principal == "💳 Cuentas por Pagar":
-    st.sidebar.caption("CUENTAS POR PAGAR")
-    sub = st.sidebar.radio("Sección", ["Proveedores y estados de cuenta", "Pagos de proveedores", "RCV Compras", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxp")
+elif modulo_principal == "💳 Compras/proveedores":
+    sub = st.selectbox("Sección de Cuentas por Pagar", ["Proveedores y estados de cuenta", "Pagos de proveedores", "RCV Compras", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxp")
     if sub == "Proveedores y estados de cuenta": menu = "🏢 Proveedores"
     elif sub == "Pagos de proveedores": menu = "💵 Pagos"; nav_context = "proveedores"
     elif sub == "RCV Compras": menu = "📥 RCV Compras"
@@ -7241,21 +7362,17 @@ elif modulo_principal == "💳 Cuentas por Pagar":
     else: menu = "📊 Conciliación"; nav_context = "proveedores"
 elif modulo_principal == "🧾 Facturación y DTE":
     menu = "🧾 Facturación y DTE"
-elif modulo_principal == "👥 Nómina":
-    st.sidebar.caption("NÓMINA")
-    st.sidebar.info("Trabajadores · Anticipos · Préstamos · Liquidación · Reportes · Contabilización")
-    menu = "👥 Nómina"
+elif modulo_principal == "👥 Recursos Humanos":
+    menu = "👥 Recursos Humanos"
 elif modulo_principal == "📚 Contabilidad":
-    st.sidebar.caption("CONTABILIDAD")
-    sub = st.sidebar.radio("Sección", ["Asientos y Saldos", "Plan de Cuentas", "Libro Diario", "Libro Mayor", "Balance de Comprobación", "Estados Financieros"], key="nav_conta")
+    sub = st.selectbox("Sección de Contabilidad", ["Asientos y Saldos", "Plan de Cuentas", "Libro Diario", "Libro Mayor", "Balance de Comprobación", "Estados Financieros"], key="nav_conta")
     menu = {
         "Asientos y Saldos":"✍️ Asientos y Saldos", "Plan de Cuentas":"📋 Plan de Cuentas",
         "Libro Diario":"📒 Libro Diario", "Libro Mayor":"📚 Mayor",
         "Balance de Comprobación":"⚖️ Balance de Comprobación", "Estados Financieros":"📊 Estados Financieros"
     }[sub]
 else:
-    st.sidebar.caption("ADMINISTRACIÓN")
-    sub = st.sidebar.radio("Sección", (["Usuarios y permisos"] if sgci_es_propietario() else []) + ["Cierre Mensual", "Reglas Contables", "Lotes", "Matriz Contable"], key="nav_admin")
+    sub = st.selectbox("Sección de Administración", (["Usuarios y permisos"] if sgci_es_propietario() else []) + ["Cierre Mensual", "Reglas Contables", "Lotes", "Matriz Contable"], key="nav_admin")
     menu = {"Usuarios y permisos":"🛡️ Usuarios y permisos", "Cierre Mensual":"🔒 Cierre Mensual", "Reglas Contables":"⚙️ Reglas Contables", "Lotes":"📦 Lotes", "Matriz Contable":"🧰 Matriz Contable"}[sub]
 
 st.sidebar.divider()
@@ -7365,15 +7482,15 @@ elif menu == "🏠 Inicio":
 # MÓDULO NÓMINA
 # ============================================================
 
-elif menu == "👥 Nómina":
-    st.title("👥 Nómina")
-    st.caption("Gestión simple de remuneraciones: trabajadores, anticipos quincenales, préstamos, liquidaciones, reportes y contabilización.")
+elif menu == "👥 Recursos Humanos":
+    st.title("👥 Recursos Humanos")
+    st.caption("Expedientes laborales, documentos, vacaciones y remuneraciones, con la contabilización original de SGCI.")
     # Navegación persistente: evita que las actualizaciones de Streamlit devuelvan
     # al usuario a la primera pestaña al cambiar trabajadores u otros controles.
-    nomina_opciones = ["Trabajadores", "Anticipos y préstamos", "Liquidación mensual",
+    nomina_opciones = ["Trabajadores", "Vacaciones", "Anticipos y préstamos", "Liquidación mensual",
                       "Resumen y reportes", "Parámetros", "Contabilización"]
-    nomina_seccion = st.radio("Sección de Nómina", nomina_opciones,
-                              horizontal=True, key="sgci_nomina_seccion")
+    nomina_seccion = st.selectbox("Sección de Recursos Humanos", nomina_opciones,
+                                  key="sgci_nomina_seccion")
 
     if nomina_seccion == 'Trabajadores':
         st.subheader("Ficha del trabajador")
@@ -7381,7 +7498,67 @@ elif menu == "👥 Nómina":
         if not trabajadores.empty:
             vista=trabajadores[['rut','nombre','cargo','fecha_ingreso','sueldo_base','afp','salud_tipo','banco','activo']].copy(); vista['sueldo_base']=vista['sueldo_base'].map(lambda x: money(x)); vista['activo']=vista['activo'].map({1:'Activo',0:'Inactivo'})
             st.dataframe(vista.rename(columns={'rut':'RUT','nombre':'Nombre','cargo':'Cargo','fecha_ingreso':'Ingreso','sueldo_base':'Sueldo base','afp':'AFP','salud_tipo':'Salud','banco':'Banco','activo':'Estado'}),use_container_width=True,hide_index=True)
-        modo_trab=st.radio("Acción",["Nuevo trabajador","Editar trabajador"],horizontal=True,key='nom_modo_trab')
+        if not trabajadores.empty:
+            st.markdown("### Expediente del trabajador · Vista completa")
+            opciones_exp={f"{r.rut} · {r.nombre}":int(r.id) for r in trabajadores.itertuples()}
+            sel_exp=st.selectbox("Consultar expediente",list(opciones_exp),key="rrhh_exp_trab")
+            exp=conn.execute("SELECT * FROM nomina_trabajadores WHERE id=?",(opciones_exp[sel_exp],)).fetchone()
+            with st.container(border=True):
+                st.subheader(exp["nombre"])
+                a,b,c=st.columns(3)
+                a.metric("Sueldo base",money(exp["sueldo_base"]))
+                b.metric("Estado","Activo" if exp["activo"] else "Inactivo")
+                c.metric("Fecha de ingreso",exp["fecha_ingreso"] or "—")
+                campos=[("RUT","rut"),("Cargo","cargo"),("Tipo de contrato","tipo_contrato"),
+                        ("Gratificación","gratificacion_tipo"),("Valor gratificación","gratificacion_valor"),
+                        ("AFP","afp"),("Salud","salud_tipo"),("Isapre","isapre"),
+                        ("Modalidad salud","salud_modalidad"),("Valor salud","salud_valor"),
+                        ("AFC","afc"),("Anticipo quincenal","anticipo_quincenal"),
+                        ("Porcentaje anticipo","anticipo_porcentaje"),("Banco","banco"),
+                        ("Tipo de cuenta","tipo_cuenta"),("Número de cuenta","numero_cuenta")]
+                for ix in range(0,len(campos),3):
+                    columnas=st.columns(3)
+                    for col,(etiqueta,campo) in zip(columnas,campos[ix:ix+3]):
+                        valor=exp[campo]
+                        if campo in ("afc","anticipo_quincenal"): valor="Sí" if valor else "No"
+                        elif campo=="gratificacion_valor": valor=money(valor)
+                        col.text_input(etiqueta,value=str(valor if valor is not None else "—"),disabled=True,key=f"rrhh_exp_{campo}_{exp['id']}")
+                st.markdown("#### Contratos y anexos")
+                docs=pd.read_sql_query("SELECT id,tipo,nombre_archivo,fecha_documento,observacion,creado_en FROM rrhh_documentos WHERE trabajador_id=? AND activo=1 ORDER BY id DESC",conn,params=(exp["id"],))
+                if not docs.empty:
+                    st.dataframe(docs,hide_index=True,use_container_width=True)
+                    for dr in docs.itertuples():
+                        with st.expander(f"{dr.tipo} · {dr.nombre_archivo} · #{dr.id}"):
+                            doc=conn.execute("SELECT contenido FROM rrhh_documentos WHERE id=? AND trabajador_id=? AND activo=1",(dr.id,exp["id"])).fetchone()
+                            if doc:
+                                st.download_button("Descargar PDF",bytes(doc["contenido"]),file_name=dr.nombre_archivo,mime="application/pdf",key=f"rrhh_desc_doc_{dr.id}")
+                            st.caption(dr.observacion or "Sin observaciones")
+                with st.expander("➕ Adjuntar contrato o anexo",expanded=False):
+                    with st.form(f"rrhh_form_doc_{exp['id']}",clear_on_submit=True):
+                        tipo_doc=st.selectbox("Tipo de documento",["Contrato de trabajo","Anexo de contrato","Otro documento laboral"])
+                        fecha_doc=st.date_input("Fecha del documento",value=date.today(),key=f"rrhh_doc_fecha_{exp['id']}")
+                        archivo=st.file_uploader("Adjuntar PDF (máximo 8 MB)",type=["pdf"],key=f"rrhh_upload_{exp['id']}")
+                        obs_doc=st.text_area("Observaciones",key=f"rrhh_doc_obs_{exp['id']}")
+                        guardar_doc=st.form_submit_button("Guardar documento")
+                    if guardar_doc:
+                        if archivo is None:
+                            st.error("Selecciona un PDF.")
+                        else:
+                            contenido=archivo.getvalue()
+                            if len(contenido)>8*1024*1024 or not contenido.startswith(b"%PDF-"):
+                                st.error("El archivo debe ser un PDF válido de hasta 8 MB.")
+                            else:
+                                conn.execute("""INSERT INTO rrhh_documentos
+                                    (trabajador_id,tipo,nombre_archivo,fecha_documento,observacion,contenido,sha256,creado_en)
+                                    VALUES(?,?,?,?,?,?,?,?)""",
+                                    (exp["id"],tipo_doc,os.path.basename(archivo.name),fecha_doc.isoformat(),obs_doc,sqlite3.Binary(contenido),sha256(contenido).hexdigest(),datetime.now().isoformat(timespec="seconds")))
+                                conn.commit()
+                                sgci_exito("Documento incorporado al expediente.");st.rerun()
+                st.markdown("#### Últimas liquidaciones")
+                hist_exp=pd.read_sql_query("SELECT periodo,total_haberes,total_descuentos,saldo_pagar,estado FROM nomina_liquidaciones WHERE trabajador_id=? ORDER BY periodo DESC LIMIT 12",conn,params=(exp["id"],))
+                if not hist_exp.empty: st.dataframe(formatear_montos_df(hist_exp),use_container_width=True,hide_index=True)
+
+        modo_trab=st.selectbox("Acción",["Nuevo trabajador","Editar trabajador"],key='nom_modo_trab')
         edit_row=None
         if modo_trab=='Editar trabajador' and not trabajadores.empty:
             labels={f"{r.id} - {r.rut} - {r.nombre}":r for r in trabajadores.itertuples()}; sel=st.selectbox('Trabajador',list(labels)); edit_row=labels[sel]
@@ -7429,6 +7606,83 @@ elif menu == "👥 Nómina":
                 st.dataframe(hc_show,use_container_width=True,hide_index=True)
                 pdf_ficha=nomina_pdf('Ficha e historial del trabajador',f'{edit_row.nombre} · RUT {edit_row.rut}',['Vigente desde','Sueldo','AFP','Salud','Isapre','Modalidad','Valor'],[[r.vigente_desde,money(r.sueldo_base),r.afp,r.salud_tipo,r.isapre or '',r.salud_modalidad,r.salud_valor] for r in hc.itertuples()])
                 st.download_button('🖨️ PDF ficha / historial',pdf_ficha,f'ficha_{edit_row.rut}.pdf','application/pdf',key='pdf_ficha_nom')
+
+    if nomina_seccion == 'Vacaciones':
+        st.subheader("Vacaciones · Control manual")
+        st.caption("Los días se asignan y descuentan manualmente. Las solicitudes y sus aprobaciones NO generan descuentos automáticos ni asientos contables.")
+        tdf=pd.read_sql_query("SELECT id,rut,nombre FROM nomina_trabajadores ORDER BY activo DESC,nombre",conn)
+        if tdf.empty:
+            st.info("Primero registra trabajadores.")
+        else:
+            tm={f"{r.rut} · {r.nombre}":int(r.id) for r in tdf.itertuples()}
+            elegido=st.selectbox("Trabajador",list(tm),key="rrhh_vac_trab")
+            tid=tm[elegido]
+            registros=pd.read_sql_query("SELECT id,fecha,tipo,dias,observacion FROM rrhh_vacaciones_movimientos WHERE trabajador_id=? ORDER BY fecha DESC,id DESC",conn,params=(tid,))
+            asignados=float(registros.loc[registros.tipo=="ASIGNACION","dias"].sum()) if not registros.empty else 0
+            ajustes=float(registros.loc[registros.tipo=="AJUSTE","dias"].sum()) if not registros.empty else 0
+            usados=float(registros.loc[registros.tipo=="DESCUENTO","dias"].sum()) if not registros.empty else 0
+            c1,c2,c3=st.columns(3)
+            c1.metric("Días asignados / ajustes",f"{asignados+ajustes:g}")
+            c2.metric("Días descontados",f"{usados:g}")
+            c3.metric("Saldo disponible",f"{asignados+ajustes-usados:g}")
+            with st.expander("Registrar asignación o descuento manual",expanded=False):
+                with st.form("rrhh_vac_mov_form",clear_on_submit=True):
+                    a,b,c=st.columns(3)
+                    tipo_mov=a.selectbox("Movimiento",["ASIGNACION","DESCUENTO","AJUSTE"],format_func=lambda x:{"ASIGNACION":"Asignar días","DESCUENTO":"Descontar días","AJUSTE":"Ajuste positivo"}[x])
+                    fecha_mov=b.date_input("Fecha del movimiento",value=date.today())
+                    dias_mov=c.number_input("Cantidad de días",min_value=0.5,value=1.0,step=0.5)
+                    obs_mov=st.text_input("Motivo / referencia")
+                    confirmar_mov=st.form_submit_button("Guardar movimiento")
+                if confirmar_mov:
+                    if tipo_mov=="DESCUENTO" and dias_mov>asignados+ajustes-usados:
+                        st.error("El descuento supera el saldo disponible.")
+                    else:
+                        conn.execute("INSERT INTO rrhh_vacaciones_movimientos(trabajador_id,fecha,tipo,dias,observacion,creado_en) VALUES(?,?,?,?,?,?)",
+                                     (tid,fecha_mov.isoformat(),tipo_mov,float(dias_mov),obs_mov,datetime.now().isoformat(timespec="seconds")))
+                        conn.commit();sgci_exito("Movimiento de vacaciones registrado.");st.rerun()
+            st.markdown("#### Solicitudes")
+            with st.expander("➕ Nueva solicitud",expanded=False):
+                with st.form("rrhh_vac_sol_form",clear_on_submit=True):
+                    a,b=st.columns(2)
+                    desde=a.date_input("Desde",value=date.today())
+                    hasta=b.date_input("Hasta",value=date.today())
+                    dias_sol=st.number_input("Días solicitados (ingreso manual)",min_value=0.5,value=1.0,step=0.5)
+                    obs_sol=st.text_area("Observación")
+                    crear_sol=st.form_submit_button("Registrar solicitud")
+                if crear_sol:
+                    if hasta<desde:
+                        st.error("La fecha final no puede ser anterior a la inicial.")
+                    else:
+                        conn.execute("""INSERT INTO rrhh_vacaciones_solicitudes
+                            (trabajador_id,fecha_solicitud,desde,hasta,dias_solicitados,estado,observacion,creado_en)
+                            VALUES(?,?,?,?,?,'PENDIENTE',?,?)""",
+                            (tid,date.today().isoformat(),desde.isoformat(),hasta.isoformat(),float(dias_sol),obs_sol,datetime.now().isoformat(timespec="seconds")))
+                        conn.commit();sgci_exito("Solicitud registrada como pendiente.");st.rerun()
+            solicitudes=pd.read_sql_query("SELECT id,fecha_solicitud,desde,hasta,dias_solicitados,estado,observacion,revisado_por,fecha_revision FROM rrhh_vacaciones_solicitudes WHERE trabajador_id=? ORDER BY id DESC",conn,params=(tid,))
+            if not solicitudes.empty:
+                st.dataframe(solicitudes,use_container_width=True,hide_index=True)
+                pendientes=solicitudes[solicitudes.estado=="PENDIENTE"]
+                if not pendientes.empty:
+                    with st.expander("Resolver solicitud pendiente"):
+                        opciones={f"#{r.id} · {r.desde} al {r.hasta} · {r.dias_solicitados:g} días":int(r.id) for r in pendientes.itertuples()}
+                        elegida=st.selectbox("Solicitud",list(opciones),key="rrhh_vac_sel_sol")
+                        decision=st.selectbox("Decisión",["APROBADA","RECHAZADA","ANULADA"])
+                        responsable=st.text_input("Responsable de la decisión")
+                        obs_revision=st.text_input("Observación de revisión")
+                        if st.button("Guardar decisión",key="rrhh_vac_resolver"):
+                            if not responsable.strip(): st.error("Indica quién resuelve.")
+                            else:
+                                cur=conn.execute("""UPDATE rrhh_vacaciones_solicitudes SET estado=?,revisado_por=?,fecha_revision=?,observacion_revision=?
+                                    WHERE id=? AND trabajador_id=? AND estado='PENDIENTE'""",
+                                    (decision,responsable.strip(),datetime.now().isoformat(timespec="seconds"),obs_revision,opciones[elegida],tid))
+                                conn.commit()
+                                if cur.rowcount: sgci_exito("Estado actualizado. Si se utilizaron días, regístralos manualmente como descuento.");st.rerun()
+                                else: st.warning("La solicitud ya no está pendiente.")
+            st.markdown("#### Historial de días")
+            if not registros.empty:
+                st.dataframe(registros,use_container_width=True,hide_index=True)
+                st.download_button("Exportar historial CSV",registros.to_csv(index=False,sep=";").encode("utf-8-sig"),file_name=f"vacaciones_{tid}.csv",mime="text/csv")
+            else: st.info("Aún no hay movimientos de días registrados.")
 
     if nomina_seccion == 'Anticipos y préstamos':
         trab=pd.read_sql_query("SELECT id,rut,nombre,sueldo_base,anticipo_porcentaje FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",conn)
@@ -7595,7 +7849,7 @@ elif menu == "👥 Nómina":
             st.markdown('#### Liquidación individual imprimible')
             lm={f"{r.rut} - {r.nombre}":r for r in df.itertuples()}; ls=st.selectbox('Trabajador para reporte',list(lm),key='rep_trab'); rr=lm[ls]
             detalle=[['Sueldo período',money(rr.sueldo_periodo)],['Gratificación',money(rr.gratificacion)],['Horas extras',money(rr.horas_extras)],['Bonos imponibles',money(rr.bonos_imponibles)],['Bono no imponible',money(getattr(rr,'bono_no_imponible',0))],['Otras asignaciones no imponibles',money(rr.asignacion_no_imponible)],['Otros no imponibles',money(rr.otros_no_imponibles)],['Total imponible',money(rr.total_imponible)],['Total no imponible',money(rr.total_no_imponible)],['AFP',money(rr.afp_descuento)],['Salud 7% legal',money(clp_round(rr.total_imponible*0.07))],['Adicional Isapre',money(max(0,clp_round(rr.salud_descuento)-clp_round(rr.total_imponible*0.07)) if rr.salud_tipo=='Isapre' else 0)],['Total Salud',money(rr.salud_descuento)],['Plan salud equivalente',money(getattr(rr,'salud_plan_pesos',0))],['UF utilizada',f"{float(getattr(rr,'uf_valor',0) or 0):,.2f}"],['AFC',money(rr.afc_descuento)],['Impuesto Único',money(rr.impuesto_unico)],['Préstamo',money(rr.prestamo_descuento)],['Otros descuentos',money(rr.otros_descuentos)],['Líquido período',money(rr.liquido_periodo)],['Anticipo quincenal',money(rr.anticipo)],['SALDO A PAGAR',money(rr.saldo_pagar)]]
-            pdfi=nomina_pdf(f'Liquidación de Remuneraciones - {per}',f'{rr.nombre} · RUT {rr.rut} · {rr.cargo}', ['Concepto','Monto'],detalle)
+            pdfi=rrhh_pdf_liquidacion(conn,rr)
             st.download_button('🖨️ PDF liquidación individual',pdfi,f'liquidacion_{rr.rut}_{per}.pdf','application/pdf')
             st.markdown('#### Historial del trabajador')
             hist=pd.read_sql_query("SELECT periodo,total_haberes,total_descuentos,liquido_periodo,anticipo,saldo_pagar,estado FROM nomina_liquidaciones WHERE trabajador_id=? ORDER BY periodo DESC",conn,params=(rr.trabajador_id,)); st.dataframe(formatear_montos_df(hist),use_container_width=True,hide_index=True)
@@ -7709,8 +7963,8 @@ elif menu == "🏦 Bancos y Cartolas":
     banco_secciones = ["Cuentas bancarias", "Cargar cartola", "Movimiento manual", "Conciliación", "Operaciones manuales", "Movimientos"]
     if st.session_state.get("sgci_banco_seccion") not in banco_secciones:
         st.session_state["sgci_banco_seccion"] = "Conciliación"
-    banco_seccion = st.radio(
-        "Sección bancaria", banco_secciones, horizontal=True,
+    banco_seccion = st.selectbox(
+        "Sección bancaria", banco_secciones,
         key="sgci_banco_seccion", label_visibility="collapsed"
     )
 
