@@ -5025,13 +5025,16 @@ def contabilizar_imputacion_multiple_bancaria(conn, movimiento_id, distribucione
     return asiento_id
 
 def documentos_pendientes_cliente(conn, cliente_id):
+    sgci_conc_esquema(conn)
     return pd.read_sql_query("""
         SELECT v.id,v.fecha,v.folio,v.tipo_doc,v.monto_total total,
                COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0) aplicado,
-               MAX(ABS(v.monto_total)-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0),0) pendiente
+               MAX(ABS(v.monto_total)-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0)
+                   -COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x WHERE x.modulo='VENTAS' AND x.documento_factura_id=v.id AND x.anulada=0),0),0) pendiente
         FROM ventas v
-        WHERE v.cliente_id=?
-          AND ABS(v.monto_total)-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0) > 0.01
+        WHERE v.cliente_id=? AND (v.tipo_doc IS NULL OR v.tipo_doc NOT IN (60,61,52))
+          AND ABS(v.monto_total)-COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.venta_id=v.id),0)
+             -COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x WHERE x.modulo='VENTAS' AND x.documento_factura_id=v.id AND x.anulada=0),0) > 0.01
         ORDER BY v.fecha,v.id
     """, conn, params=(int(cliente_id),))
 
@@ -5392,9 +5395,163 @@ def recuperar_anticipos_historicos_cliente(conn, cliente_id):
     return creados
 
 
+# ============================================================
+# SGCI: CONCILIACIÓN DOCUMENTAL Y SALDOS DE OTROS EJERCICIOS
+# Estas operaciones NO crean asientos, ni modifican RCV.
+# ============================================================
+
+def sgci_conc_esquema(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_compensaciones_documentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        modulo TEXT NOT NULL CHECK(modulo IN ('VENTAS','COMPRAS')),
+        tercero_id INTEGER NOT NULL,
+        documento_credito_id INTEGER NOT NULL,
+        documento_factura_id INTEGER NOT NULL,
+        monto INTEGER NOT NULL CHECK(monto>0),
+        fecha TEXT NOT NULL,
+        observacion TEXT,
+        usuario TEXT,
+        anulada INTEGER NOT NULL DEFAULT 0,
+        anulada_en TEXT,
+        motivo_anulacion TEXT
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_saldos_ejercicios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        modulo TEXT NOT NULL CHECK(modulo IN ('VENTAS','COMPRAS')),
+        tercero_id INTEGER NOT NULL,
+        ejercicio INTEGER NOT NULL,
+        referencia TEXT NOT NULL,
+        monto INTEGER NOT NULL CHECK(monto>0),
+        fecha TEXT NOT NULL,
+        observacion TEXT,
+        UNIQUE(modulo,tercero_id,ejercicio,referencia)
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_aplicaciones_ejercicios (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        saldo_id INTEGER NOT NULL,
+        pago_id INTEGER NOT NULL,
+        monto INTEGER NOT NULL CHECK(monto>0),
+        fecha TEXT NOT NULL,
+        observacion TEXT,
+        UNIQUE(saldo_id,pago_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_sgci_comp_doc ON sgci_compensaciones_documentos(modulo,tercero_id,anulada)")
+    conn.commit()
+
+def sgci_nc_disponibles(conn, modulo, tercero_id):
+    sgci_conc_esquema(conn)
+    tabla, tercero = ('ventas','cliente_id') if modulo=='VENTAS' else ('compras','proveedor_id')
+    return pd.read_sql_query(f"""SELECT d.id,d.fecha,d.tipo_doc,d.folio,ABS(d.monto_total) total,
+       COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x
+          WHERE x.modulo=? AND x.documento_credito_id=d.id AND x.anulada=0),0) aplicado,
+       MAX(0,ABS(d.monto_total)-COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x
+          WHERE x.modulo=? AND x.documento_credito_id=d.id AND x.anulada=0),0)) disponible
+       FROM {tabla} d WHERE d.{tercero}=? AND d.tipo_doc IN (60,61)
+       AND ABS(d.monto_total)>COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x
+          WHERE x.modulo=? AND x.documento_credito_id=d.id AND x.anulada=0),0)
+       ORDER BY d.fecha,d.id""",conn,params=(modulo,modulo,int(tercero_id),modulo))
+
+def sgci_facturas_compensables(conn, modulo, tercero_id):
+    sgci_conc_esquema(conn)
+    tabla, tercero, apps, docid = ('ventas','cliente_id','aplicaciones_clientes','venta_id') if modulo=='VENTAS' else ('compras','proveedor_id','aplicaciones_proveedores','compra_id')
+    return pd.read_sql_query(f"""SELECT d.id,d.fecha,d.tipo_doc,d.folio,ABS(d.monto_total) total,
+       COALESCE((SELECT SUM(ABS(a.monto)) FROM {apps} a WHERE a.{docid}=d.id),0) pagado,
+       COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x WHERE x.modulo=?
+          AND x.documento_factura_id=d.id AND x.anulada=0),0) compensado,
+       MAX(0,ABS(d.monto_total)-COALESCE((SELECT SUM(ABS(a.monto)) FROM {apps} a WHERE a.{docid}=d.id),0)
+          -COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x WHERE x.modulo=?
+          AND x.documento_factura_id=d.id AND x.anulada=0),0)) pendiente
+       FROM {tabla} d WHERE d.{tercero}=? AND (d.tipo_doc IS NULL OR d.tipo_doc NOT IN (60,61,52))
+       AND ABS(d.monto_total)-COALESCE((SELECT SUM(ABS(a.monto)) FROM {apps} a WHERE a.{docid}=d.id),0)
+          -COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x WHERE x.modulo=?
+          AND x.documento_factura_id=d.id AND x.anulada=0),0)>0
+       ORDER BY d.fecha,d.id""",conn,params=(modulo,modulo,int(tercero_id),modulo))
+
+def sgci_compensar_nc(conn,modulo,tercero_id,nc_id,factura_id,monto,observacion=''):
+    sgci_conc_esquema(conn)
+    if modulo not in ('VENTAS','COMPRAS'): raise ValueError('Módulo inválido.')
+    monto=int(monto)
+    if monto<=0: raise ValueError('El monto debe ser positivo.')
+    if int(nc_id)==int(factura_id): raise ValueError('Los documentos deben ser diferentes.')
+    with conn:
+        nc=sgci_nc_disponibles(conn,modulo,tercero_id)
+        fac=sgci_facturas_compensables(conn,modulo,tercero_id)
+        nc=nc[nc.id==int(nc_id)];fac=fac[fac.id==int(factura_id)]
+        if nc.empty or fac.empty: raise ValueError('Documento inexistente, de otro tercero o sin saldo.')
+        if monto>int(nc.iloc[0].disponible) or monto>int(fac.iloc[0].pendiente):
+            raise ValueError('La compensación supera el saldo de alguno de los documentos.')
+        fecha=date.today().isoformat()
+        if periodo_cerrado(conn,fecha): raise ValueError('El período actual está cerrado.')
+        conn.execute("""INSERT INTO sgci_compensaciones_documentos
+            (modulo,tercero_id,documento_credito_id,documento_factura_id,monto,fecha,observacion)
+            VALUES(?,?,?,?,?,?,?)""",(modulo,int(tercero_id),int(nc_id),int(factura_id),monto,fecha,observacion.strip()))
+    registrar_auditoria(conn,'COMPENSACION DOCUMENTAL',f'{modulo} tercero {tercero_id}: NC {nc_id} -> factura {factura_id} por {monto}')
+
+def sgci_anular_compensacion(conn,identificador,motivo):
+    sgci_conc_esquema(conn)
+    if not motivo.strip(): raise ValueError('Indica el motivo de reversión.')
+    with conn:
+        fila=conn.execute('SELECT * FROM sgci_compensaciones_documentos WHERE id=? AND anulada=0',(int(identificador),)).fetchone()
+        if not fila: raise ValueError('Compensación inexistente o ya anulada.')
+        if periodo_cerrado(conn,date.today().isoformat()): raise ValueError('Período actual cerrado.')
+        conn.execute('UPDATE sgci_compensaciones_documentos SET anulada=1,anulada_en=?,motivo_anulacion=? WHERE id=?',
+                     (datetime.now().isoformat(timespec='seconds'),motivo.strip(),int(identificador)))
+    registrar_auditoria(conn,'REVERSO COMPENSACION',f'ID {identificador}: {motivo.strip()}')
+
+def sgci_saldos_ejercicio_disponibles(conn,modulo,tercero_id):
+    sgci_conc_esquema(conn)
+    return pd.read_sql_query("""SELECT s.id,s.ejercicio,s.referencia,s.monto,
+        COALESCE((SELECT SUM(a.monto) FROM sgci_aplicaciones_ejercicios a WHERE a.saldo_id=s.id),0) aplicado,
+        s.monto-COALESCE((SELECT SUM(a.monto) FROM sgci_aplicaciones_ejercicios a WHERE a.saldo_id=s.id),0) disponible
+        FROM sgci_saldos_ejercicios s WHERE s.modulo=? AND s.tercero_id=?
+        AND s.monto>COALESCE((SELECT SUM(a.monto) FROM sgci_aplicaciones_ejercicios a WHERE a.saldo_id=s.id),0)
+        ORDER BY s.ejercicio,s.id""",conn,params=(modulo,int(tercero_id)))
+
+def sgci_registrar_saldo_ejercicio(conn,modulo,tercero_id,ejercicio,referencia,monto):
+    sgci_conc_esquema(conn)
+    if modulo not in ('VENTAS','COMPRAS') or not referencia.strip() or int(monto)<=0:
+        raise ValueError('Completa un ejercicio, referencia y monto válido.')
+    if int(ejercicio)>=date.today().year: raise ValueError('El ejercicio debe ser anterior al actual.')
+    # El asiento de apertura debe existir previamente: esta tabla no crea contabilidad.
+    with conn:
+        conn.execute("""INSERT INTO sgci_saldos_ejercicios(modulo,tercero_id,ejercicio,referencia,monto,fecha)
+                        VALUES(?,?,?,?,?,?)""",(modulo,int(tercero_id),int(ejercicio),referencia.strip(),int(monto),date.today().isoformat()))
+    registrar_auditoria(conn,'SALDO EJERCICIO',f'{modulo} tercero {tercero_id}, {ejercicio}, {referencia}, {monto}')
+
+def sgci_aplicar_pago_ejercicio(conn,modulo,tercero_id,saldo_id,pago_id,monto):
+    sgci_conc_esquema(conn)
+    monto=int(monto)
+    if monto<=0: raise ValueError('El monto debe ser positivo.')
+    with conn:
+        saldo=sgci_saldos_ejercicio_disponibles(conn,modulo,tercero_id)
+        saldo=saldo[saldo.id==int(saldo_id)]
+        if saldo.empty or monto>int(saldo.iloc[0].disponible): raise ValueError('Saldo histórico insuficiente.')
+        tabla='pagos_clientes' if modulo=='VENTAS' else 'pagos_proveedores'
+        tercero='cliente_id' if modulo=='VENTAS' else 'proveedor_id'
+        pago=conn.execute(f'SELECT * FROM {tabla} WHERE id=? AND {tercero}=?',(int(pago_id),int(tercero_id))).fetchone()
+        if not pago: raise ValueError('Pago inexistente o de otro tercero.')
+        if modulo=='VENTAS':
+            if pago['cuenta_anticipo']: raise ValueError('Un anticipo contabilizado como pasivo requiere reclasificación contable; no se puede consumir aquí.')
+            recibido=clp_round(pago['monto_recibido'] or pago['monto'] or 0)
+            aplicado=conn.execute('SELECT COALESCE(SUM(monto),0) FROM aplicaciones_clientes WHERE pago_id=?',(int(pago_id),)).fetchone()[0]
+            aplicado_apertura=conn.execute('SELECT COALESCE(SUM(monto),0) FROM sgci_aplicaciones_apertura_clientes WHERE pago_id=?',(int(pago_id),)).fetchone()[0] if tabla_existe(conn,'sgci_aplicaciones_apertura_clientes') else 0
+        else:
+            recibido=clp_round(pago['monto'] or 0)
+            aplicado=conn.execute('SELECT COALESCE(SUM(ABS(monto)),0) FROM aplicaciones_proveedores WHERE pago_id=?',(int(pago_id),)).fetchone()[0]
+            aplicado_apertura=0
+        historico=conn.execute('SELECT COALESCE(SUM(a.monto),0) FROM sgci_aplicaciones_ejercicios a JOIN sgci_saldos_ejercicios s ON s.id=a.saldo_id WHERE a.pago_id=? AND s.modulo=?',(int(pago_id),modulo)).fetchone()[0]
+        if monto>clp_round(recibido-aplicado-aplicado_apertura-historico):
+            raise ValueError('El pago no tiene disponibilidad suficiente.')
+        if periodo_cerrado(conn,date.today().isoformat()): raise ValueError('Período actual cerrado.')
+        conn.execute('INSERT INTO sgci_aplicaciones_ejercicios(saldo_id,pago_id,monto,fecha) VALUES(?,?,?,?)',
+                     (int(saldo_id),int(pago_id),monto,date.today().isoformat()))
+    registrar_auditoria(conn,'APLICACION EJERCICIO',f'{modulo} saldo {saldo_id}, pago {pago_id}, {monto}')
+
 def abonos_disponibles_cliente(conn, cliente_id):
     """Anticipos/cobros recibidos todavía disponibles para aplicar a facturas."""
     recuperar_anticipos_historicos_cliente(conn,cliente_id)
+    sgci_saldos_apertura_clientes(conn)
+    sgci_conc_esquema(conn)
     return pd.read_sql_query("""
         SELECT p.id,p.fecha,
                CASE WHEN COALESCE(p.monto_recibido,0)>0 THEN p.monto_recibido ELSE p.monto END AS monto,
@@ -5402,12 +5559,16 @@ def abonos_disponibles_cliente(conn, cliente_id):
                COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0) aplicado,
                MAX(
                  (CASE WHEN COALESCE(p.monto_recibido,0)>0 THEN p.monto_recibido ELSE p.monto END)
-                 - COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0),0
+                 - COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0)
+                 - COALESCE((SELECT SUM(x.monto) FROM sgci_aplicaciones_apertura_clientes x WHERE x.pago_id=p.id),0)
+                 - COALESCE((SELECT SUM(x.monto) FROM sgci_aplicaciones_ejercicios x JOIN sgci_saldos_ejercicios h ON h.id=x.saldo_id WHERE x.pago_id=p.id AND h.modulo='VENTAS'),0),0
                ) disponible
         FROM pagos_clientes p
         WHERE p.cliente_id=?
           AND (CASE WHEN COALESCE(p.monto_recibido,0)>0 THEN p.monto_recibido ELSE p.monto END)
-              - COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0) > 0.01
+              - COALESCE((SELECT SUM(a.monto) FROM aplicaciones_clientes a WHERE a.pago_id=p.id),0)
+              - COALESCE((SELECT SUM(x.monto) FROM sgci_aplicaciones_apertura_clientes x WHERE x.pago_id=p.id),0)
+              - COALESCE((SELECT SUM(x.monto) FROM sgci_aplicaciones_ejercicios x JOIN sgci_saldos_ejercicios h ON h.id=x.saldo_id WHERE x.pago_id=p.id AND h.modulo='VENTAS'),0) > 0.01
         ORDER BY p.fecha,p.id
     """,conn,params=(int(cliente_id),))
 
@@ -5424,7 +5585,11 @@ def aplicar_abono_auxiliar_cliente(conn, cliente_id, pago_id, venta_ids):
         "SELECT COALESCE(SUM(monto),0) FROM aplicaciones_clientes WHERE pago_id=?",
         (int(pago_id),)
     ).fetchone()[0]
-    disponible=clp_round(total_recibido-float(aplicado_previo or 0))
+    sgci_saldos_apertura_clientes(conn)
+    sgci_conc_esquema(conn)
+    apertura=conn.execute('SELECT COALESCE(SUM(monto),0) FROM sgci_aplicaciones_apertura_clientes WHERE pago_id=?',(int(pago_id),)).fetchone()[0]
+    historico=conn.execute('SELECT COALESCE(SUM(a.monto),0) FROM sgci_aplicaciones_ejercicios a JOIN sgci_saldos_ejercicios s ON s.id=a.saldo_id WHERE a.pago_id=? AND s.modulo="VENTAS"',(int(pago_id),)).fetchone()[0]
+    disponible=clp_round(total_recibido-float(aplicado_previo or 0)-float(apertura or 0)-float(historico or 0))
     if disponible<=0:
         raise ValueError("Este abono ya no tiene saldo disponible.")
 
@@ -5503,28 +5668,34 @@ def aplicar_abono_auxiliar_cliente(conn, cliente_id, pago_id, venta_ids):
 
 def documentos_pendientes_proveedor(conn, proveedor_id):
     """Devuelve documentos de compra con saldo pendiente para un proveedor."""
+    sgci_conc_esquema(conn)
     return pd.read_sql_query("""
         SELECT c.id, c.fecha, c.folio, c.tipo_doc, ABS(COALESCE(c.monto_total,0)) AS total,
                COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0) AS aplicado,
-               MAX(ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0),0) AS pendiente
+               MAX(ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0)
+                  -COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x WHERE x.modulo='COMPRAS' AND x.documento_factura_id=c.id AND x.anulada=0),0),0) AS pendiente
         FROM compras c
         WHERE c.proveedor_id=?
           AND (c.tipo_doc IS NULL OR c.tipo_doc NOT IN (60,61))
-          AND ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0) > 0.01
+          AND ABS(COALESCE(c.monto_total,0)) - COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0)
+              -COALESCE((SELECT SUM(x.monto) FROM sgci_compensaciones_documentos x WHERE x.modulo='COMPRAS' AND x.documento_factura_id=c.id AND x.anulada=0),0) > 0.01
         ORDER BY c.fecha, c.id
     """, conn, params=[int(proveedor_id)])
 
 
 def pagos_disponibles_proveedor(conn, proveedor_id):
     """Pagos ya contabilizados al proveedor que todavía tienen saldo disponible para aplicar."""
+    sgci_conc_esquema(conn)
     return pd.read_sql_query("""
         SELECT p.id,p.fecha,p.monto,
                COALESCE(p.glosa,'Pago a proveedor') glosa,
                COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.pago_id=p.id),0) aplicado,
-               MAX(p.monto-COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.pago_id=p.id),0),0) disponible
+               MAX(p.monto-COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.pago_id=p.id),0)
+                   -COALESCE((SELECT SUM(a.monto) FROM sgci_aplicaciones_ejercicios a JOIN sgci_saldos_ejercicios s ON s.id=a.saldo_id WHERE s.modulo='COMPRAS' AND a.pago_id=p.id),0),0) disponible
         FROM pagos_proveedores p
         WHERE p.proveedor_id=?
-          AND p.monto-COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.pago_id=p.id),0) > 0.01
+          AND p.monto-COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.pago_id=p.id),0)
+              -COALESCE((SELECT SUM(a.monto) FROM sgci_aplicaciones_ejercicios a JOIN sgci_saldos_ejercicios s ON s.id=a.saldo_id WHERE s.modulo='COMPRAS' AND a.pago_id=p.id),0) > 0.01
         ORDER BY p.fecha,p.id
     """,conn,params=(int(proveedor_id),))
 
@@ -10333,6 +10504,81 @@ elif menu == "📊 Conciliación":
     st.title("📊 Conciliación de auxiliares")
 
     pestañas = st.tabs(["Clientes", "Proveedores"])
+
+    sgci_conc_esquema(conn)
+    with st.expander("🧩 Compensar notas de crédito contra facturas (compras y ventas)", expanded=False):
+        modulo_doc=st.radio("Auxiliar",["VENTAS","COMPRAS"],horizontal=True,key="sgci_modulo_nc")
+        tabla_tercero='clientes' if modulo_doc=='VENTAS' else 'proveedores'
+        terceros=pd.read_sql_query(f"SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM {tabla_tercero} ORDER BY nombre",conn)
+        if terceros.empty:
+            st.info("No existen terceros registrados.")
+        else:
+            mapa={f"{r.rut} | {r.nombre}":int(r.id) for r in terceros.itertuples()}
+            tercero=mapa[st.selectbox("Cliente o proveedor",list(mapa),key="sgci_tercero_nc")]
+            ncs=sgci_nc_disponibles(conn,modulo_doc,tercero)
+            facturas=sgci_facturas_compensables(conn,modulo_doc,tercero)
+            a,b=st.columns(2)
+            a.metric("NC disponibles",money(ncs.disponible.sum() if not ncs.empty else 0))
+            b.metric("Facturas pendientes",money(facturas.pendiente.sum() if not facturas.empty else 0))
+            if ncs.empty or facturas.empty:
+                st.info("Se requiere una nota de crédito y una factura con saldo disponible.")
+            else:
+                mapa_nc={f"NC {r.folio} ({r.fecha}) | {money(r.disponible)}":int(r.id) for r in ncs.itertuples()}
+                mapa_f={f"Factura {r.folio} ({r.fecha}) | {money(r.pendiente)}":int(r.id) for r in facturas.itertuples()}
+                nc_id=mapa_nc[st.selectbox("Nota de crédito",list(mapa_nc),key="sgci_nc_sel")]
+                fac_id=mapa_f[st.selectbox("Factura a compensar",list(mapa_f),key="sgci_fac_sel")]
+                disponible_nc=int(ncs.loc[ncs.id==nc_id,'disponible'].iloc[0]);pendiente_fac=int(facturas.loc[facturas.id==fac_id,'pendiente'].iloc[0])
+                importe=st.number_input("Monto a compensar (CLP)",min_value=1,max_value=max(1,min(disponible_nc,pendiente_fac)),value=max(1,min(disponible_nc,pendiente_fac)),step=1,key="sgci_nc_monto")
+                obs=st.text_input("Referencia / observación",key="sgci_nc_obs")
+                conf=st.checkbox("Confirmo que los documentos corresponden a la misma operación y que su efecto contable ya está registrado.",key="sgci_nc_conf")
+                if st.button("🔗 Compensar documentos",disabled=not conf,type="primary",key="sgci_nc_aplicar"):
+                    try:
+                        sgci_compensar_nc(conn,modulo_doc,tercero,nc_id,fac_id,importe,obs)
+                        sgci_exito("Compensación auxiliar registrada sin generar asientos.");st.rerun()
+                    except Exception as exc: st.error(str(exc))
+            historial=pd.read_sql_query("SELECT id,fecha,documento_credito_id NC_ID,documento_factura_id Factura_ID,monto,observacion FROM sgci_compensaciones_documentos WHERE modulo=? AND tercero_id=? AND anulada=0 ORDER BY id DESC",conn,params=(modulo_doc,tercero))
+            if not historial.empty:
+                st.dataframe(formatear_montos_df(historial),hide_index=True,use_container_width=True)
+                with st.expander("Revertir una compensación"):
+                    cid=st.selectbox("Registro",historial.id.astype(int).tolist(),key="sgci_rev_id")
+                    motivo=st.text_input("Motivo obligatorio",key="sgci_rev_motivo")
+                    if st.button("Revertir",disabled=not motivo.strip(),key="sgci_rev_btn"):
+                        try: sgci_anular_compensacion(conn,cid,motivo);st.rerun()
+                        except Exception as exc: st.error(str(exc))
+
+    with st.expander("📘 Aplicar cobros o pagos a saldos de ejercicios anteriores", expanded=False):
+        modulo_ant=st.radio("Auxiliar histórico",["VENTAS","COMPRAS"],horizontal=True,key="sgci_modulo_ant")
+        tabla_t='clientes' if modulo_ant=='VENTAS' else 'proveedores'
+        tabla_p='pagos_clientes' if modulo_ant=='VENTAS' else 'pagos_proveedores'
+        campo_t='cliente_id' if modulo_ant=='VENTAS' else 'proveedor_id'
+        terceros=pd.read_sql_query(f"SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM {tabla_t} ORDER BY nombre",conn)
+        if not terceros.empty:
+            mapa={f"{r.rut} | {r.nombre}":int(r.id) for r in terceros.itertuples()}
+            tercero=mapa[st.selectbox("Tercero",list(mapa),key="sgci_tercero_ant")]
+            st.caption("Registra solo saldos que YA existen en el asiento de apertura. No crea saldos contables.")
+            with st.form("sgci_nuevo_saldo_ant"):
+                ej=st.number_input("Ejercicio de origen",min_value=2000,max_value=date.today().year-1,value=date.today().year-1,step=1)
+                ref=st.text_input("Folio / referencia del saldo anterior")
+                monto=st.number_input("Saldo histórico (CLP)",min_value=1,step=1,value=1)
+                guardar=st.form_submit_button("Registrar saldo histórico")
+            if guardar:
+                try: sgci_registrar_saldo_ejercicio(conn,modulo_ant,tercero,ej,ref,monto);st.rerun()
+                except Exception as exc: st.error(str(exc))
+            saldos=sgci_saldos_ejercicio_disponibles(conn,modulo_ant,tercero)
+            if not saldos.empty:
+                st.dataframe(formatear_montos_df(saldos),hide_index=True,use_container_width=True)
+                pagos=pd.read_sql_query(f"SELECT id,fecha,monto,COALESCE(glosa,'') glosa FROM {tabla_p} WHERE {campo_t}=? ORDER BY fecha DESC,id DESC",conn,params=(tercero,))
+                if not pagos.empty:
+                    mapa_s={f"{r.ejercicio} | {r.referencia} | {money(r.disponible)}":int(r.id) for r in saldos.itertuples()}
+                    sid=mapa_s[st.selectbox("Saldo anterior",list(mapa_s),key="sgci_saldo_ant_sel")]
+                    mapa_p={f"#{int(r.id)} | {r.fecha} | {money(r.monto)} | {r.glosa}":int(r.id) for r in pagos.itertuples()}
+                    pid=mapa_p[st.selectbox("Cobro / pago ya contabilizado",list(mapa_p),key="sgci_pago_ant_sel")]
+                    limite=int(saldos.loc[saldos.id==sid,'disponible'].iloc[0])
+                    imp=st.number_input("Importe a aplicar",min_value=1,max_value=max(1,limite),value=max(1,limite),step=1,key="sgci_imp_ant")
+                    conf=st.checkbox("Verifiqué que el pago corresponde al saldo histórico y que no se aplicó anteriormente.",key="sgci_conf_ant")
+                    if st.button("Aplicar a ejercicio anterior",disabled=not conf,key="sgci_aplicar_ant"):
+                        try: sgci_aplicar_pago_ejercicio(conn,modulo_ant,tercero,sid,pid,imp);st.rerun()
+                        except Exception as exc: st.error(str(exc))
 
     with pestañas[0]:
         st.subheader("Aplicar abonos de clientes")
