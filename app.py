@@ -6047,6 +6047,104 @@ def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id)
     return asiento_id
 
 
+def revertir_abono_cliente_cartola(conn, movimiento_id):
+    """Reversión conservadora y atómica de conciliación de cliente.
+
+    Conserva el asiento original, crea reverso y elimina únicamente el registro
+    auxiliar originado por esta conciliación. Nunca deshace aplicaciones posteriores.
+    """
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    mov = conn.execute('SELECT * FROM cartola_bancaria WHERE id=?', (int(movimiento_id),)).fetchone()
+    if not mov or int(mov['conciliado'] or 0) != 1 or mov['match_tipo'] not in ('CLIENTE_ANTICIPO', 'CLIENTE'):
+        raise ValueError('Selecciona un abono de cliente conciliado.')
+    if float(mov['abono'] or 0) <= 0 or float(mov['cargo'] or 0) > 0:
+        raise ValueError('El movimiento no es un abono bancario válido.')
+    if not mov['asiento_id'] or periodo_cerrado(conn, mov['fecha']):
+        raise ValueError('No existe asiento vinculado o el período original está cerrado.')
+    lineas = conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id', (mov['asiento_id'],)).fetchall()
+    if not lineas or abs(sum(float(l['debe'] or 0)-float(l['haber'] or 0) for l in lineas)) > 0.01:
+        raise ValueError('El asiento original no existe o no está cuadrado.')
+    lotes = {l['lote_id'] for l in lineas}
+    if len(lotes) != 1 or not next(iter(lotes)):
+        raise ValueError('El asiento original no tiene lote único; requiere revisión manual.')
+    lote = next(iter(lotes))
+    origenes = {l['origen'] for l in lineas}
+    permitidos = {'CONCILIACION_ANTICIPO_CLIENTE', 'CONCILIACION_COBRO_CLIENTE',
+                  'CONCILIACION_DIFERENCIA_CLIENTE'}
+    if not origenes.issubset(permitidos):
+        raise ValueError('El asiento contiene orígenes no compatibles con la reversión automática.')
+    if conn.execute('SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?',
+                    (mov['asiento_id'], int(movimiento_id))).fetchone():
+        raise ValueError('El asiento pertenece a más de un movimiento bancario.')
+    if conn.execute('SELECT 1 FROM libro_diario WHERE lote_id=? AND asiento_id<>?',
+                    (lote, mov['asiento_id'])).fetchone():
+        raise ValueError('El lote original aparece en otros asientos.')
+    pagos = conn.execute('''SELECT * FROM pagos_clientes WHERE cartola_id=? OR lote_id=?
+                          ORDER BY id''', (int(movimiento_id), lote)).fetchall()
+    if len(pagos) != 1:
+        raise ValueError('No se identificó un único abono del auxiliar; no se modificó nada.')
+    pago = pagos[0]
+    if pago['cliente_id'] is None or int(pago['cliente_id']) != int(mov['match_id'] or -1):
+        raise ValueError('El cliente del auxiliar no coincide con la conciliación.')
+    if pago['lote_id'] != lote:
+        raise ValueError('El abono auxiliar no pertenece al lote contable original.')
+    if pago['cartola_id'] is not None and int(pago['cartola_id']) != int(movimiento_id):
+        raise ValueError('El abono está enlazado a otra cartola.')
+    if conn.execute('SELECT 1 FROM aplicaciones_clientes WHERE pago_id=? LIMIT 1', (pago['id'],)).fetchone():
+        raise ValueError('El abono ya tiene aplicaciones a facturas; reviértelas por su procedimiento específico.')
+    if tabla_existe(conn, 'sgci_aplicaciones_apertura_clientes'):
+        if conn.execute('SELECT 1 FROM sgci_aplicaciones_apertura_clientes WHERE pago_id=? OR movimiento_id=? LIMIT 1',
+                        (pago['id'], int(movimiento_id))).fetchone():
+            raise ValueError('El abono tiene aplicaciones a apertura; no puede revertirse automáticamente.')
+    # No revertir cobros parcialmente aplicados ni con distribución documental.
+    if mov['match_tipo'] == 'CLIENTE':
+        raise ValueError('Los cobros aplicados a facturas requieren reversión documental; esta función solo revierte anticipos sin aplicar.')
+    if origenes != {'CONCILIACION_ANTICIPO_CLIENTE'}:
+        raise ValueError('El asiento no corresponde exclusivamente a un anticipo de cliente.')
+    if abs(float(pago['monto_recibido'] or 0) - float(mov['abono'] or 0)) > 0.01:
+        raise ValueError('El importe del auxiliar no coincide con el abono bancario.')
+    if abs(float(pago['monto'] or 0)) > 0.01:
+        raise ValueError('El anticipo ya tiene movimientos auxiliares; requiere revisión.')
+    banco = conn.execute('SELECT cuenta_contable FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
+    if not banco or not banco['cuenta_contable']:
+        raise ValueError('Banco sin cuenta contable configurada.')
+    debe_banco = sum(float(l['debe'] or 0) for l in lineas if l['codigo_cuenta'] == banco['cuenta_contable'])
+    if abs(debe_banco - float(mov['abono'] or 0)) > 0.01:
+        raise ValueError('El asiento no coincide con el ingreso bancario.')
+    # Transacción única: reverso + auxiliar + liberación de cartola + auditoría.
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        nuevo = siguiente_asiento(conn) + 1
+        rev_lote = 'REV-CLI-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        for l in lineas:
+            conn.execute('''INSERT INTO libro_diario
+                (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                (mov['fecha'], l['cuenta'], float(l['haber'] or 0), float(l['debe'] or 0),
+                 f"Reverso anticipo cliente, cartola {movimiento_id}, asiento {mov['asiento_id']} - {l['glosa'] or ''}",
+                 l['centro_costo'], l['codigo_cuenta'], nuevo, rev_lote, 'REVERSO_CONCILIACION_CLIENTE'))
+        eliminado = conn.execute('DELETE FROM pagos_clientes WHERE id=?', (pago['id'],))
+        if eliminado.rowcount != 1:
+            raise ValueError('No se pudo retirar el abono auxiliar.')
+        actualizado = conn.execute('''UPDATE cartola_bancaria
+            SET conciliado=0, observacion=NULL, asiento_id=NULL, match_tipo=NULL,
+                match_id=NULL, match_confianza=NULL
+            WHERE id=? AND conciliado=1 AND asiento_id=?''',
+            (int(movimiento_id), mov['asiento_id']))
+        if actualizado.rowcount != 1:
+            raise ValueError('La cartola cambió durante la operación.')
+        conn.execute('''INSERT INTO auditoria(fecha_hora,usuario,accion,detalle)
+                        VALUES(?,?,?,?)''',
+                     (datetime.now().isoformat(timespec='seconds'), 'SGCI',
+                      'REVERSO ANTICIPO CLIENTE',
+                      f"Cartola {movimiento_id}; abono auxiliar {pago['id']}; asiento original {mov['asiento_id']}; reverso {nuevo}"))
+        conn.commit()
+        return nuevo
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def revertir_pago_proveedor_cartola(conn, movimiento_id):
     """Reversión atómica de pago bancario a proveedor, con comprobaciones de trazabilidad."""
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
@@ -8996,6 +9094,33 @@ elif menu == "🏦 Bancos y Cartolas":
                     try:
                         nuevo=revertir_pago_proveedor_cartola(conn,opciones[opcion])
                         sgci_exito(f'Asiento reverso {nuevo} creado. Movimiento pendiente para conciliar nuevamente.')
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f'No se realizaron cambios: {e}')
+
+            abonos_cliente_reversibles = pd.read_sql_query("""SELECT cb.id,cb.fecha,cb.descripcion,cb.referencia,
+                    cb.abono,cb.asiento_id,c.razon_social AS cliente
+                    FROM cartola_bancaria cb
+                    LEFT JOIN clientes c ON c.id=cb.match_id
+                    WHERE cb.banco_id=? AND cb.conciliado=1
+                      AND cb.match_tipo='CLIENTE_ANTICIPO' AND COALESCE(cb.abono,0)>0
+                    ORDER BY cb.fecha DESC,cb.id DESC""", conn,
+                    params=[int(label.split(' - ')[0])])
+            if not abonos_cliente_reversibles.empty:
+                st.divider()
+                st.subheader('Revertir conciliación de abonos de clientes')
+                st.caption('Solo anticipos sin aplicaciones. Crea asiento reverso, retira el abono del auxiliar y reabre la cartola. No borra el asiento original.')
+                mapa_rev_cli = {
+                    f"Cartola {r.id} | {r.fecha} | {money(r.abono)} | {r.cliente or 'Cliente'} | asiento {r.asiento_id} | {r.descripcion}": int(r.id)
+                    for r in abonos_cliente_reversibles.itertuples()
+                }
+                sel_rev_cli = st.selectbox('Abono conciliado para revertir', list(mapa_rev_cli), key='sgci_rev_cli_sel')
+                conf_rev_cli = st.checkbox('Confirmo que este anticipo NO ha sido aplicado y deseo revertir su conciliación.', key='sgci_rev_cli_conf')
+                if st.button('↩️ Revertir abono de cliente y reabrir movimiento',
+                             disabled=not conf_rev_cli, key='sgci_rev_cli_btn'):
+                    try:
+                        rev_cli = revertir_abono_cliente_cartola(conn, mapa_rev_cli[sel_rev_cli])
+                        sgci_exito(f'Asiento reverso {rev_cli} registrado. Abono retirado del auxiliar y cartola pendiente para conciliar nuevamente.')
                         st.rerun()
                     except Exception as e:
                         st.error(f'No se realizaron cambios: {e}')
