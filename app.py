@@ -3476,8 +3476,8 @@ def estado_cuenta_cliente(
             v.tipo_doc,
             v.folio,
             v.glosa,
-            v.monto_total AS cargo,
-            0 AS abono
+            CASE WHEN v.tipo_doc IN (60,61) THEN 0 ELSE ABS(COALESCE(v.monto_total,0)) END AS cargo,
+            CASE WHEN v.tipo_doc IN (60,61) THEN ABS(COALESCE(v.monto_total,0)) ELSE 0 END AS abono
         FROM ventas v
         WHERE v.cliente_id = ?
         {filtro}
@@ -6282,7 +6282,7 @@ def nomina_pdf(titulo, subtitulo, columnas, filas, totales=None):
         return html.escape("" if v is None else str(v)).replace("\n", "<br/>")
 
     n=max(len(columnas),1)
-    page=landscape(A4)
+    page=A4
     usable=page[0]-2*cm
     # Peso por contenido: las columnas narrativas reciben más ancho que códigos/montos.
     pesos=[]
@@ -6294,15 +6294,24 @@ def nomina_pdf(titulo, subtitulo, columnas, filas, totales=None):
             largo=max(largo,28)
         if any(k in nombre for k in ("debe","haber","saldo","cargo","abono","monto","total","imponible","descuento")):
             largo=min(max(largo,11),16)
-        pesos.append(min(max(largo,8),42))
+        if any(k in nombre for k in ("descripción", "servicio", "glosa")):
+            pesos.append(48)
+        elif any(k in nombre for k in ("referencia",)):
+            pesos.append(23)
+        elif any(k in nombre for k in ("monto", "aplicado", "pendiente", "saldo")):
+            pesos.append(16)
+        elif nombre in ("días", "estado", "fecha", "vence", "factura"):
+            pesos.append(11 if nombre != "días" else 7)
+        else:
+            pesos.append(min(max(largo,8),30))
     total_p=sum(pesos)
     widths=[usable*w/total_p for w in pesos]
 
     buf=io.BytesIO()
-    doc=SimpleDocTemplate(buf,pagesize=page,rightMargin=1*cm,leftMargin=1*cm,topMargin=.8*cm,bottomMargin=.8*cm)
+    doc=SimpleDocTemplate(buf,pagesize=page,rightMargin=1*cm,leftMargin=1*cm,topMargin=3.6*cm,bottomMargin=.8*cm)
     styles=getSampleStyleSheet()
-    cell=ParagraphStyle("SGCICell",parent=styles["Normal"],fontName="Helvetica",fontSize=6.5,leading=8,alignment=TA_LEFT,spaceAfter=0,spaceBefore=0)
-    head=ParagraphStyle("SGCIHead",parent=cell,fontName="Helvetica-Bold",textColor=colors.white,fontSize=6.5,leading=8)
+    cell=ParagraphStyle("SGCICell",parent=styles["Normal"],fontName="Helvetica",fontSize=(5.2 if n>=9 else 6.2),leading=(6.6 if n>=9 else 8),wordWrap="CJK",alignment=TA_LEFT,spaceAfter=0,spaceBefore=0)
+    head=ParagraphStyle("SGCIHead",parent=cell,fontName="Helvetica-Bold",textColor=colors.white,fontSize=(5.2 if n>=9 else 6.2),leading=(6.6 if n>=9 else 8))
     story=[Paragraph(esc(titulo),styles["Title"])]
     if subtitulo:
         story += [Paragraph(esc(subtitulo),styles["Normal"]),Spacer(1,8)]
@@ -6320,7 +6329,7 @@ def nomina_pdf(titulo, subtitulo, columnas, filas, totales=None):
         ("GRID",(0,0),(-1,-1),0.30,colors.HexColor("#DCE8E3")),
         ("VALIGN",(0,0),(-1,-1),"TOP"),
         ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F3F7F5")]),
-        ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),
+        ("LEFTPADDING",(0,0),(-1,-1),2),("RIGHTPADDING",(0,0),(-1,-1),2),
         ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
     ]
     if totales:
@@ -6328,7 +6337,7 @@ def nomina_pdf(titulo, subtitulo, columnas, filas, totales=None):
                    ("BACKGROUND",(0,-1),(-1,-1),colors.HexColor("#EAF5F0"))]
     t.setStyle(TableStyle(estilo))
     story.append(t)
-    doc.build(story)
+    doc.build(story,onFirstPage=sgci_membrete_pdf,onLaterPages=sgci_membrete_pdf)
     buf.seek(0)
     return buf.getvalue()
 
@@ -6343,8 +6352,11 @@ def rrhh_pdf_liquidacion(conn, r):
     from calendar import month_abbr
     from html import escape
     emp=conn.execute("SELECT razon_social,rut FROM empresa ORDER BY id LIMIT 1").fetchone()
-    nombre_emp=str(emp['razon_social'] or 'Empresa') if emp else 'Empresa'
-    rut_emp=str(emp['rut'] or '') if emp else ''
+    perfil_liq=sgci_perfil(conn)
+    nombre_emp=str(perfil_liq.get('razon_social') or (emp['razon_social'] if emp else '') or 'Empresa')
+    rut_emp=str(perfil_liq.get('rut') or (emp['rut'] if emp else '') or '')
+    direccion_emp=', '.join(str(perfil_liq.get(c) or '') for c in ('direccion','comuna','ciudad') if perfil_liq.get(c))
+    giro_emp=str(perfil_liq.get('giro') or '')
     trab=conn.execute("SELECT fecha_ingreso,tipo_contrato FROM nomina_trabajadores WHERE id=?",(r.trabajador_id,)).fetchone()
     contrato=trab['tipo_contrato'] if trab else ''
     ingreso=trab['fecha_ingreso'] if trab else ''
@@ -6367,13 +6379,14 @@ def rrhh_pdf_liquidacion(conn, r):
     meta=[[P('SUCURSAL'),P(':'),P(''),P('MES'),P(':'),P(mes)],
           [P('EMPRESA'),P(':'),P(nombre_emp),P(''),P(''),P('')],
           [P('R.U.T.'),P(':'),P(rut_emp),P(''),P(''),P('')],
-          [P(''),P(''),P(''),P(''),P(''),P('')],
+          [P('GIRO'),P(':'),P(giro_emp),P(''),P(''),P('')],
+          [P('DIRECCIÓN'),P(':'),P(direccion_emp),P(''),P(''),P('')],
           [P('TRABAJADOR'),P(':'),P(r.nombre),P('CONTRATO'),P(':'),P(contrato)],
           [P('R.U.T.'),P(':'),P(r.rut),P('CENTRO DE COSTOS'),P(':'),P('')],
           [P('FECHA CONTRATO'),P(':'),P(ingreso),P(''),P(''),P('')],
           [P('CARGO'),P(':'),P(r.cargo),P(''),P(''),P('')],
           [P('DÍAS TRABAJADOS'),P(':'),P(r.dias_trabajados),P(''),P(''),P('')]]
-    t=Table(meta,colWidths=[2.8*cm,.65*cm,6.0*cm,3.5*cm,.65*cm,3.5*cm],rowHeights=[None,None,None,1.2*cm,None,None,None,None,None])
+    t=Table(meta,colWidths=[2.8*cm,.65*cm,6.0*cm,3.5*cm,.65*cm,3.5*cm],rowHeights=[None]*10)
     t.setStyle(TableStyle([('BOX',(0,0),(-1,-1),.8,colors.black),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),5),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]));story.append(t)
     def section(label,items):
         data=[[P(label,True),'','']]
@@ -6897,9 +6910,9 @@ def dte_reporte_pdf(titulo, df, filtros=''):
     from reportlab.lib.units import mm
     from xml.sax.saxutils import escape
     buffer=io.BytesIO()
-    doc=SimpleDocTemplate(buffer,pagesize=landscape(A4),rightMargin=12*mm,leftMargin=12*mm,topMargin=12*mm,bottomMargin=12*mm)
+    doc=SimpleDocTemplate(buffer,pagesize=A4,rightMargin=12*mm,leftMargin=12*mm,topMargin=37*mm,bottomMargin=12*mm)
     styles=getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='DTECell',fontName='Helvetica',fontSize=7.5,leading=10,alignment=TA_LEFT,wordWrap='CJK'))
+    styles.add(ParagraphStyle(name='DTECell',fontName='Helvetica',fontSize=6,leading=7.5,alignment=TA_LEFT,wordWrap='CJK'))
     styles.add(ParagraphStyle(name='DTEHeader',parent=styles['DTECell'],fontName='Helvetica-Bold',textColor=colors.white))
     story=[Paragraph(escape('SGCI | '+titulo),styles['Heading2']),Paragraph(escape(filtros),styles['Normal']),Spacer(1,6*mm)]
     if df.empty:
@@ -6912,17 +6925,17 @@ def dte_reporte_pdf(titulo, df, filtros=''):
         if 'descripcion' in df.columns:
             anchos[df.columns.get_loc('descripcion')]=48
         total=sum(anchos)
-        disponible=landscape(A4)[0]-24*mm
+        disponible=A4[0]-24*mm
         anchos=[disponible*a/total for a in anchos]
         t=Table(tabla,colWidths=anchos,repeatRows=1,hAlign='LEFT')
         t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#176B55')),
             ('VALIGN',(0,0),(-1,-1),'TOP'),('GRID',(0,0),(-1,-1),.25,colors.HexColor('#DCE8E3')),
             ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F2F7F4')]),
-            ('LEFTPADDING',(0,0),(-1,-1),5),('RIGHTPADDING',(0,0),(-1,-1),5),
+            ('LEFTPADDING',(0,0),(-1,-1),2),('RIGHTPADDING',(0,0),(-1,-1),2),
             ('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]))
         story.append(t)
     story.extend([Spacer(1,6*mm),Paragraph('Reporte documental; no representa contabilización ni conciliación con RCV.',styles['Normal'])])
-    doc.build(story)
+    doc.build(story,onFirstPage=sgci_membrete_pdf,onLaterPages=sgci_membrete_pdf)
     return buffer.getvalue()
 
 
@@ -7113,19 +7126,20 @@ def tes_reporte_imprimible(titulo, datos):
     from reportlab.lib.enums import TA_CENTER
     import io as _io
     buffer=_io.BytesIO()
-    doc=SimpleDocTemplate(buffer,pagesize=landscape(A4),leftMargin=25,rightMargin=25,topMargin=30,bottomMargin=30)
+    doc=SimpleDocTemplate(buffer,pagesize=A4,leftMargin=25,rightMargin=25,topMargin=105,bottomMargin=30)
     styles=getSampleStyleSheet()
     styles['Title'].textColor=colors.HexColor('#46543A')
     story=[Paragraph('SGCI | '+str(titulo),styles['Title']),Spacer(1,12)]
     if datos is not None and not datos.empty:
         d=datos.copy().fillna('')
         # Ancho adaptable y texto ajustado para no cortar las columnas.
-        ancho=landscape(A4)[0]-50
+        ancho=A4[0]-50
         n=len(d.columns)
         celda=ancho/max(n,1)
         estilo=styles['BodyText'].clone('tescelda')
-        estilo.fontSize=7
-        estilo.leading=9
+        estilo.fontSize=6
+        estilo.leading=7.5
+        estilo.wordWrap="CJK"
         filas=[[Paragraph(str(x),estilo) for x in d.columns]]
         for row in d.astype(str).itertuples(index=False,name=None):
             filas.append([Paragraph(__import__('html').escape(str(x)),estilo) for x in row])
@@ -7137,7 +7151,7 @@ def tes_reporte_imprimible(titulo, datos):
         story.append(t)
     else:
         story.append(Paragraph('Sin registros para mostrar.',styles['Normal']))
-    doc.build(story)
+    doc.build(story,onFirstPage=sgci_membrete_pdf,onLaterPages=sgci_membrete_pdf)
     return buffer.getvalue()
 
 
@@ -7740,6 +7754,114 @@ def sgci_pantalla_permisos(conn):
 
 
 # ============================================================
+# PERFIL DE EMPRESA / MEMBRETE DE REPORTES (SGCI)
+# ============================================================
+def sgci_empresa_esquema(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS sgci_perfil_empresa (
+        id INTEGER PRIMARY KEY CHECK (id=1), razon_social TEXT NOT NULL DEFAULT '',
+        rut TEXT DEFAULT '', giro TEXT DEFAULT '', direccion TEXT DEFAULT '',
+        comuna TEXT DEFAULT '', ciudad TEXT DEFAULT '', telefono TEXT DEFAULT '',
+        correo TEXT DEFAULT '', sitio_web TEXT DEFAULT '', logo BLOB,
+        logo_mime TEXT DEFAULT '', actualizado TEXT DEFAULT '')""")
+    conn.commit()
+
+def sgci_perfil(conn):
+    sgci_empresa_esquema(conn)
+    fila=conn.execute('SELECT * FROM sgci_perfil_empresa WHERE id=1').fetchone()
+    return dict(fila) if fila else {}
+
+def sgci_membrete_pdf(canvas, doc):
+    """Encabezado de empresa en cada página de los PDF ReportLab SGCI."""
+    from reportlab.lib.utils import ImageReader
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    perfil=sgci_perfil(conn)
+    w,h=doc.pagesize
+    x=doc.leftMargin
+    y=h-11*mm
+    logo=perfil.get('logo')
+    if logo:
+        try:
+            from PIL import Image as PILImage
+            pic=PILImage.open(io.BytesIO(logo))
+            pic.thumbnail((260,130))
+            canvas.drawImage(ImageReader(pic),x,y-17*mm,width=27*mm,height=17*mm,preserveAspectRatio=True,anchor='c',mask='auto')
+            x+=31*mm
+        except Exception:
+            pass
+    nombre=str(perfil.get('razon_social') or 'Empresa sin configurar')[:110]
+    canvas.setFont('Helvetica-Bold',10)
+    canvas.setFillColor(colors.HexColor('#35432D'))
+    canvas.drawString(x,y,nombre)
+    canvas.setFont('Helvetica',7.5)
+    canvas.setFillColor(colors.HexColor('#5C6459'))
+    linea='RUT: '+str(perfil.get('rut') or 'Sin RUT')
+    if perfil.get('giro'): linea+='  |  '+str(perfil['giro'])
+    canvas.drawString(x,y-10,linea[:140])
+    ubicacion=', '.join(filter(None,[perfil.get('direccion'),perfil.get('comuna'),perfil.get('ciudad')]))
+    contacto=' | '.join(filter(None,[ubicacion,perfil.get('telefono'),perfil.get('correo')]))
+    canvas.drawString(x,y-20,contacto[:155])
+    canvas.setStrokeColor(colors.HexColor('#A8B6A0'))
+    canvas.line(doc.leftMargin,h-31*mm,w-doc.rightMargin,h-31*mm)
+    canvas.setFont('Helvetica',7)
+    canvas.drawRightString(w-doc.rightMargin,9*mm,f'Página {doc.page}')
+
+def sgci_pantalla_empresa(conn):
+    sgci_exigir_permiso(conn,'administracion','ver')
+    if not sgci_es_propietario():
+        st.error('La configuración de empresa requiere acceso del administrador principal.')
+        return
+    st.title('🏢 Datos de la empresa y logo')
+    st.caption('Estos datos se utilizarán en el membrete de los reportes PDF compatibles. No altera asientos ni documentos.')
+    actual=sgci_perfil(conn)
+    with st.form('sgci_form_empresa'):
+        razon=st.text_input('Razón social *',value=actual.get('razon_social') or '')
+        rut=st.text_input('RUT',value=actual.get('rut') or '')
+        giro=st.text_input('Giro',value=actual.get('giro') or '')
+        direccion=st.text_input('Dirección',value=actual.get('direccion') or '')
+        a,b=st.columns(2)
+        comuna=a.text_input('Comuna',value=actual.get('comuna') or '')
+        ciudad=b.text_input('Ciudad',value=actual.get('ciudad') or '')
+        telefono=st.text_input('Teléfono',value=actual.get('telefono') or '')
+        correo=st.text_input('Correo electrónico',value=actual.get('correo') or '')
+        web=st.text_input('Sitio web',value=actual.get('sitio_web') or '')
+        logo=st.file_uploader('Logo PNG o JPG (máximo 2 MB)',type=['png','jpg','jpeg'],key='sgci_logo_empresa')
+        quitar=st.checkbox('Eliminar logo guardado')
+        guardar=st.form_submit_button('Guardar datos de empresa',type='primary')
+    if actual.get('logo'):
+        st.image(bytes(actual['logo']),width=180,caption='Logo guardado actualmente')
+    if guardar:
+        if not razon.strip():
+            st.error('La razón social es obligatoria.')
+            return
+        imagen=None if quitar else actual.get('logo')
+        mime='' if quitar else (actual.get('logo_mime') or '')
+        if logo is not None:
+            datos=logo.getvalue()
+            if len(datos)>2*1024*1024:
+                st.error('El logo supera 2 MB.');return
+            from PIL import Image as PILImage
+            try:
+                pic=PILImage.open(io.BytesIO(datos));pic.verify()
+                if pic.format not in ('PNG','JPEG'): raise ValueError('Formato no permitido')
+            except Exception:
+                st.error('El archivo no es una imagen PNG/JPG válida.');return
+            imagen=datos;mime=logo.type
+        conn.execute("""INSERT INTO sgci_perfil_empresa
+            (id,razon_social,rut,giro,direccion,comuna,ciudad,telefono,correo,sitio_web,logo,logo_mime,actualizado)
+            VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+            razon_social=excluded.razon_social,rut=excluded.rut,giro=excluded.giro,
+            direccion=excluded.direccion,comuna=excluded.comuna,ciudad=excluded.ciudad,
+            telefono=excluded.telefono,correo=excluded.correo,sitio_web=excluded.sitio_web,
+            logo=excluded.logo,logo_mime=excluded.logo_mime,actualizado=excluded.actualizado""",
+            (razon.strip(),rut.strip(),giro.strip(),direccion.strip(),comuna.strip(),ciudad.strip(),
+             telefono.strip(),correo.strip(),web.strip(),imagen,mime,datetime.now().isoformat(timespec='seconds')))
+        conn.commit()
+        st.success('Datos de empresa guardados. Se aplicarán a los nuevos PDF generados.')
+
+# ============================================================
 # INICIALIZACIÓN
 # ============================================================
 
@@ -7748,6 +7870,7 @@ conn = conectar()
 crear_esquema(conn)
 sgci_crear_seguridad(conn)
 dte_crear_tablas(conn)
+sgci_empresa_esquema(conn)
 reorganizar_plan_2026_seguro(conn)
 instalar_cuentas_nomina(conn)
 
@@ -7815,8 +7938,8 @@ elif modulo_principal == "📚 Contabilidad":
         "Balance de Comprobación":"⚖️ Balance de Comprobación", "Estados Financieros":"📊 Estados Financieros"
     }[sub]
 else:
-    sub = st.selectbox("Sección de Administración", (["Usuarios y permisos"] if sgci_es_propietario() else []) + ["Cierre Mensual", "Reglas Contables", "Lotes", "Matriz Contable"], key="nav_admin")
-    menu = {"Usuarios y permisos":"🛡️ Usuarios y permisos", "Cierre Mensual":"🔒 Cierre Mensual", "Reglas Contables":"⚙️ Reglas Contables", "Lotes":"📦 Lotes", "Matriz Contable":"🧰 Matriz Contable"}[sub]
+    sub = st.selectbox("Sección de Administración", (["Usuarios y permisos"] if sgci_es_propietario() else []) + ["Datos de la empresa", "Cierre Mensual", "Reglas Contables", "Lotes", "Matriz Contable"], key="nav_admin")
+    menu = {"Datos de la empresa":"🏢 Datos de la empresa", "Usuarios y permisos":"🛡️ Usuarios y permisos", "Cierre Mensual":"🔒 Cierre Mensual", "Reglas Contables":"⚙️ Reglas Contables", "Lotes":"📦 Lotes", "Matriz Contable":"🧰 Matriz Contable"}[sub]
 
 st.sidebar.divider()
 st.sidebar.caption("Respaldo de Datos")
@@ -7842,7 +7965,122 @@ if st.sidebar.button("🚪 Cerrar sesión"):
 # INICIO
 # ============================================================
 
-if menu == "🛡️ Usuarios y permisos":
+# ============================================================
+# SGCI: REPORTES DE PARTIDAS ABIERTAS (solo lectura)
+# ============================================================
+
+def sgci_reporte_partidas_abiertas(conn, modulo, tercero_id):
+    """Separa deuda documental y créditos no aplicados sin netear dos veces."""
+    if modulo not in ('VENTAS', 'COMPRAS'):
+        raise ValueError('Auxiliar no permitido')
+    sgci_conc_esquema(conn)
+    documentos = sgci_facturas_compensables(conn, modulo, tercero_id).copy()
+    nc = sgci_nc_disponibles(conn, modulo, tercero_id).copy()
+    pagos = (abonos_disponibles_cliente(conn, tercero_id) if modulo == 'VENTAS'
+             else pagos_disponibles_proveedor(conn, tercero_id)).copy()
+    filas = []
+    for r in documentos.itertuples(index=False):
+        filas.append({'Fecha':r.fecha,'Documento':f'Factura / ND {r.folio or r.id}',
+                      'Clase':'Documento por cobrar' if modulo=='VENTAS' else 'Documento por pagar',
+                      'Monto original':clp_round(r.total),'Aplicado':clp_round(r.total-r.pendiente),
+                      'Saldo pendiente':clp_round(r.pendiente)})
+    for r in nc.itertuples(index=False):
+        filas.append({'Fecha':r.fecha,'Documento':f'Nota de crédito {r.folio or r.id}',
+                      'Clase':'Crédito disponible','Monto original':clp_round(r.total),
+                      'Aplicado':clp_round(r.aplicado),'Saldo pendiente':-clp_round(r.disponible)})
+    for r in pagos.itertuples(index=False):
+        filas.append({'Fecha':r.fecha,'Documento':f'Pago / anticipo #{r.id}',
+                      'Clase':'Pago o anticipo disponible','Monto original':clp_round(r.monto),
+                      'Aplicado':clp_round(r.monto-r.disponible),'Saldo pendiente':-clp_round(r.disponible)})
+    df = pd.DataFrame(filas,columns=['Fecha','Documento','Clase','Monto original','Aplicado','Saldo pendiente'])
+    if not df.empty:
+        df = df.sort_values(['Fecha','Documento'],kind='stable').reset_index(drop=True)
+    return df
+
+
+def sgci_mostrar_partidas_abiertas(conn, modulo, tercero_id, etiqueta):
+    df = sgci_reporte_partidas_abiertas(conn, modulo, tercero_id)
+    if df.empty:
+        st.info('No hay partidas abiertas para este tercero.')
+        return
+    deuda = clp_round(df.loc[df['Saldo pendiente']>0,'Saldo pendiente'].sum())
+    creditos = -clp_round(df.loc[df['Saldo pendiente']<0,'Saldo pendiente'].sum())
+    a,b,c=st.columns(3)
+    a.metric('Documentos pendientes',money(deuda))
+    b.metric('NC y pagos / anticipos disponibles',money(creditos))
+    c.metric('Posición neta',money(deuda-creditos))
+    st.caption('La posición neta es informativa: los créditos disponibles no se consideran aplicados a una factura hasta compensarlos. No se descuentan dos veces los pagos ya aplicados.')
+    st.dataframe(formatear_montos_df(df),use_container_width=True,hide_index=True)
+    st.download_button('⬇️ Exportar partidas abiertas (CSV)',df.to_csv(index=False).encode('utf-8-sig'),
+                       f'partidas_abiertas_{modulo.lower()}_{tercero_id}.csv','text/csv',
+                       key=f'sgci_abiertas_csv_{modulo}_{tercero_id}')
+    if modulo=='COMPRAS':
+        # Estado de cuenta de deuda documental; créditos disponibles por separado.
+        docs=df[df['Saldo pendiente']>0].copy()
+        creditos_df=df[df['Saldo pendiente']<0].copy()
+        filas_prov=[]
+        for _,r in docs.iterrows():
+            filas_prov.append([str(r['Fecha']),str(r['Documento']),money(r['Monto original']),
+                               money(r['Aplicado']),money(r['Saldo pendiente'])])
+        filas_prov.append(['','TOTAL DOCUMENTOS','','',money(deuda)])
+        if not creditos_df.empty:
+            filas_prov.append(['','CRÉDITOS SIN APLICAR','','',''])
+            for _,r in creditos_df.iterrows():
+                filas_prov.append([str(r['Fecha']),str(r['Documento']),money(r['Monto original']),
+                                   money(r['Aplicado']),money(r['Saldo pendiente'])])
+        filas_prov.append(['','CRÉDITOS DISPONIBLES','','',money(creditos)])
+        filas_prov.append(['','POSICIÓN NETA INFORMATIVA','','',money(deuda-creditos)])
+        pdf_prov=nomina_pdf('Estado de cuenta de proveedor - partidas abiertas',etiqueta,
+                             ['Fecha','Documento','Monto original','Aplicado','Saldo pendiente'],filas_prov)
+        st.download_button('🖨️ Imprimir estado de cuenta de proveedor (PDF)',pdf_prov,
+                           f'estado_cuenta_pendiente_proveedor_{tercero_id}.pdf',
+                           'application/pdf',key=f'sgci_prov_abierto_pdf_{tercero_id}')
+        st.caption('El total por pagar corresponde a documentos pendientes; los créditos sin aplicar se informan por separado.')
+    if modulo=='VENTAS':
+        # Reporte de cobranza a partir de partidas abiertas; vencimiento configurable.
+        dias=st.number_input('Plazo de pago (días, si el XML no informa vencimiento)',
+                             min_value=0,max_value=365,value=30,step=1,key='sgci_plazo_cobranza')
+        corte=st.date_input('Fecha de corte para mora',date.today(),key='sgci_corte_cobranza')
+        venc=df[df['Saldo pendiente']>0].copy()
+        venc['Vencimiento']=pd.to_datetime(venc['Fecha'],errors='coerce')+pd.to_timedelta(dias,unit='D')
+        venc['Días vencidos']=venc['Vencimiento'].apply(lambda d:max(0,(corte-d.date()).days) if pd.notna(d) else 0)
+        venc['Estado']=venc['Días vencidos'].apply(lambda d:'VENCIDO' if d>0 else 'VIGENTE')
+        venc['Vencimiento']=venc['Vencimiento'].dt.strftime('%d-%m-%Y')
+        vencido=clp_round(venc.loc[venc['Estado']=='VENCIDO','Saldo pendiente'].sum())
+        st.metric('Saldo vencido de documentos',money(vencido))
+        st.caption('Vencimientos estimados usando el plazo indicado; validar condiciones contractuales. Las referencias y descripciones XML no se inventan si no están almacenadas.')
+        st.dataframe(formatear_montos_df(venc),use_container_width=True,hide_index=True)
+        # Enriquecimiento documental: el saldo procede del auxiliar; referencias/descripción del repositorio XML.
+        perfil=sgci_perfil(conn)
+        rut_cliente=conn.execute('SELECT rut FROM clientes WHERE id=?',(tercero_id,)).fetchone()
+        rut_cli=normalizar_rut(rut_cliente['rut']) if rut_cliente else ''
+        detalle=[]
+        for _,r in venc.iterrows():
+            folio=str(r['Documento']).split()[-1]
+            xml=conn.execute("""SELECT id FROM dte_documentos WHERE folio=? AND
+                REPLACE(REPLACE(UPPER(rut_receptor),'.',''),'-','')=?
+                AND tipo_doc IN (33,34,56) ORDER BY id DESC LIMIT 1""",
+                (folio,re.sub(r'[^0-9K]','',rut_cli.upper()))).fetchone()
+            refs='';descripcion=''
+            if xml:
+                rr=conn.execute('SELECT folio_ref,razon_ref FROM dte_referencias WHERE documento_id=? ORDER BY linea LIMIT 4',(xml['id'],)).fetchall()
+                refs='; '.join(' / '.join(filter(None,[str(x['folio_ref'] or ''),str(x['razon_ref'] or '')])) for x in rr)
+                items=conn.execute('SELECT nombre,descripcion FROM dte_items WHERE documento_id=? ORDER BY linea LIMIT 3',(xml['id'],)).fetchall()
+                descripcion='; '.join(' - '.join(filter(None,[str(x['nombre'] or ''),str(x['descripcion'] or '')])) for x in items)
+            detalle.append([str(r['Fecha']),folio,refs or '—',descripcion or '—',
+                money(r['Monto original']),money(r['Aplicado']),money(r['Saldo pendiente']),
+                str(r['Vencimiento']),str(r['Estado']),str(r['Días vencidos'])])
+        st.caption('Las referencias y conceptos se muestran cuando el folio y el RUT receptor coinciden con un XML almacenado. Un guion indica información documental no encontrada.')
+        pdf=nomina_pdf('Estado de cuenta detallado de cobranza',etiqueta,
+            ['Fecha','Factura','Referencia XML','Servicio / descripción XML','Monto','Aplicado','Pendiente','Vence','Estado','Días'],
+            detalle,['','TOTAL','','','', '',money(deuda),'','',''])
+        st.download_button('🖨️ PDF detallado de cobranza',pdf,f'cobranza_cliente_{tercero_id}.pdf',
+                           'application/pdf',key=f'sgci_cobranza_pdf_{tercero_id}')
+
+
+if menu == "🏢 Datos de la empresa":
+    sgci_pantalla_empresa(conn)
+elif menu == "🛡️ Usuarios y permisos":
     sgci_pantalla_permisos(conn)
 elif menu == "💼 Tesorería":
     pantalla_tesoreria(conn)
@@ -10164,9 +10402,11 @@ elif menu == "👥 Clientes":
 
     st.title("👥 Clientes")
 
-    pestañas = st.tabs(["Listado", "Estado de cuenta", "Nuevo cliente"])
+    # Radio conserva selección al ejecutar de nuevo Streamlit.
+    sgci_vista_cliente = st.radio('Sección', ['Listado','Estado de cuenta','Nuevo cliente'],
+                                horizontal=True,key='sgci_vista_cliente',label_visibility='collapsed')
 
-    with pestañas[0]:
+    if sgci_vista_cliente == "Listado":
         df = pd.read_sql_query(
             """
             SELECT
@@ -10186,7 +10426,7 @@ elif menu == "👥 Clientes":
         )
         st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
 
-    with pestañas[1]:
+    if sgci_vista_cliente == "Estado de cuenta":
         clientes = conn.execute(
             """
             SELECT
@@ -10206,11 +10446,15 @@ elif menu == "👥 Clientes":
             seleccionado = st.selectbox("Cliente", list(opciones.keys()))
             cliente_id = opciones[seleccionado]
 
-            df = estado_cuenta_cliente(conn, cliente_id)
+            modo_ec=st.radio('Modalidad del estado de cuenta',
+                             ['Partidas abiertas','Histórico'],horizontal=True,key='sgci_ec_cliente_modo')
+            if modo_ec=='Partidas abiertas':
+                sgci_mostrar_partidas_abiertas(conn,'VENTAS',cliente_id,seleccionado)
+            df = estado_cuenta_cliente(conn, cliente_id) if modo_ec=='Histórico' else pd.DataFrame()
 
-            if df.empty:
+            if df.empty and modo_ec=='Histórico':
                 st.info("El cliente no tiene movimientos.")
-            else:
+            elif not df.empty:
                 cargo = df["cargo"].sum()
                 abono = df["abono"].sum()
                 saldo = df.iloc[-1]["saldo"]
@@ -10245,7 +10489,7 @@ elif menu == "👥 Clientes":
                 pdf_ec=nomina_pdf("Estado de Cuenta de Cliente",seleccionado,["Fecha","Documento","Glosa","Cargo","Abono","Saldo"],filas_pdf,["","","TOTALES",money(cargo),money(abono),money(saldo)])
                 st.download_button("🖨️ Imprimir / PDF estado de cuenta",pdf_ec,f"estado_cuenta_cliente_{cliente_id}.pdf","application/pdf",key=f"pdf_cliente_{cliente_id}")
 
-    with pestañas[2]:
+    if sgci_vista_cliente == "Nuevo cliente":
         with st.form("nuevo_cliente"):
             rut = st.text_input("RUT")
             nombre = st.text_input("Razón social")
@@ -10296,9 +10540,11 @@ elif menu == "🏢 Proveedores":
 
     st.title("🏢 Proveedores")
 
-    pestañas = st.tabs(["Listado", "Estado de cuenta", "Nuevo proveedor"])
+    # Radio conserva selección al ejecutar de nuevo Streamlit.
+    sgci_vista_proveedor = st.radio('Sección', ['Listado','Estado de cuenta','Nuevo proveedor'],
+                                horizontal=True,key='sgci_vista_proveedor',label_visibility='collapsed')
 
-    with pestañas[0]:
+    if sgci_vista_proveedor == "Listado":
         df = pd.read_sql_query(
             """
             SELECT
@@ -10318,7 +10564,7 @@ elif menu == "🏢 Proveedores":
         )
         st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
 
-    with pestañas[1]:
+    if sgci_vista_proveedor == "Estado de cuenta":
         proveedores = conn.execute(
             """
             SELECT
@@ -10338,11 +10584,15 @@ elif menu == "🏢 Proveedores":
             seleccionado = st.selectbox("Proveedor", list(opciones.keys()))
             proveedor_id = opciones[seleccionado]
 
-            df = estado_cuenta_proveedor(conn, proveedor_id)
+            modo_ec=st.radio('Modalidad del estado de cuenta',
+                             ['Partidas abiertas','Histórico'],horizontal=True,key='sgci_ec_proveedor_modo')
+            if modo_ec=='Partidas abiertas':
+                sgci_mostrar_partidas_abiertas(conn,'COMPRAS',proveedor_id,seleccionado)
+            df = estado_cuenta_proveedor(conn, proveedor_id) if modo_ec=='Histórico' else pd.DataFrame()
 
-            if df.empty:
+            if df.empty and modo_ec=='Histórico':
                 st.info("El proveedor no tiene movimientos.")
-            else:
+            elif not df.empty:
                 cargo = df["cargo"].sum()
                 abono = df["abono"].sum()
                 saldo = df.iloc[-1]["saldo"]
@@ -10358,7 +10608,7 @@ elif menu == "🏢 Proveedores":
                 pdf_ec=nomina_pdf("Estado de Cuenta de Proveedor",seleccionado,["Fecha","Documento","Glosa","Cargo","Abono","Saldo"],filas_pdf,["","","TOTALES",money(cargo),money(abono),money(saldo)])
                 st.download_button("🖨️ Imprimir / PDF estado de cuenta",pdf_ec,f"estado_cuenta_proveedor_{proveedor_id}.pdf","application/pdf",key=f"pdf_proveedor_{proveedor_id}")
 
-    with pestañas[2]:
+    if sgci_vista_proveedor == "Nuevo proveedor":
         with st.form("nuevo_proveedor"):
             rut = st.text_input("RUT")
             nombre = st.text_input("Razón social")
@@ -10628,84 +10878,85 @@ elif menu == "📊 Conciliación":
 
     st.title("📊 Conciliación de auxiliares")
 
-    pestañas = st.tabs(["Clientes", "Proveedores"])
+    sgci_vista_conc = "Clientes" if nav_context == "clientes" else "Proveedores"
+    st.caption("Auxiliar activo: " + sgci_vista_conc)
 
     sgci_conc_esquema(conn)
-    with st.expander("🧩 Compensar notas de crédito contra facturas (compras y ventas)", expanded=False):
-        modulo_doc=st.radio("Auxiliar",["VENTAS","COMPRAS"],horizontal=True,key="sgci_modulo_nc")
-        tabla_tercero='clientes' if modulo_doc=='VENTAS' else 'proveedores'
-        terceros=pd.read_sql_query(f"SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM {tabla_tercero} ORDER BY nombre",conn)
-        if terceros.empty:
-            st.info("No existen terceros registrados.")
-        else:
-            mapa={f"{r.rut} | {r.nombre}":int(r.id) for r in terceros.itertuples()}
-            tercero=mapa[st.selectbox("Cliente o proveedor",list(mapa),key="sgci_tercero_nc")]
-            ncs=sgci_nc_disponibles(conn,modulo_doc,tercero)
-            facturas=sgci_facturas_compensables(conn,modulo_doc,tercero)
-            a,b=st.columns(2)
-            a.metric("NC disponibles",money(ncs.disponible.sum() if not ncs.empty else 0))
-            b.metric("Facturas pendientes",money(facturas.pendiente.sum() if not facturas.empty else 0))
-            if ncs.empty or facturas.empty:
-                st.info("Se requiere una nota de crédito y una factura con saldo disponible.")
+    if sgci_vista_conc == "Clientes":
+        with st.expander("🧩 Compensar notas de crédito contra facturas", expanded=False):
+            modulo_doc="VENTAS"
+            tabla_tercero='clientes' if modulo_doc=='VENTAS' else 'proveedores'
+            terceros=pd.read_sql_query(f"SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM {tabla_tercero} ORDER BY nombre",conn)
+            if terceros.empty:
+                st.info("No existen terceros registrados.")
             else:
-                mapa_nc={f"NC {r.folio} ({r.fecha}) | {money(r.disponible)}":int(r.id) for r in ncs.itertuples()}
-                mapa_f={f"Factura {r.folio} ({r.fecha}) | {money(r.pendiente)}":int(r.id) for r in facturas.itertuples()}
-                nc_id=mapa_nc[st.selectbox("Nota de crédito",list(mapa_nc),key="sgci_nc_sel")]
-                fac_id=mapa_f[st.selectbox("Factura a compensar",list(mapa_f),key="sgci_fac_sel")]
-                disponible_nc=int(ncs.loc[ncs.id==nc_id,'disponible'].iloc[0]);pendiente_fac=int(facturas.loc[facturas.id==fac_id,'pendiente'].iloc[0])
-                importe=st.number_input("Monto a compensar (CLP)",min_value=1,max_value=max(1,min(disponible_nc,pendiente_fac)),value=max(1,min(disponible_nc,pendiente_fac)),step=1,key="sgci_nc_monto")
-                obs=st.text_input("Referencia / observación",key="sgci_nc_obs")
-                conf=st.checkbox("Confirmo que los documentos corresponden a la misma operación y que su efecto contable ya está registrado.",key="sgci_nc_conf")
-                if st.button("🔗 Compensar documentos",disabled=not conf,type="primary",key="sgci_nc_aplicar"):
-                    try:
-                        sgci_compensar_nc(conn,modulo_doc,tercero,nc_id,fac_id,importe,obs)
-                        sgci_exito("Compensación auxiliar registrada sin generar asientos.");st.rerun()
+                mapa={f"{r.rut} | {r.nombre}":int(r.id) for r in terceros.itertuples()}
+                tercero=mapa[st.selectbox("Cliente" if modulo_doc=="VENTAS" else "Proveedor",list(mapa),key="sgci_ventas_tercero_nc")]
+                ncs=sgci_nc_disponibles(conn,modulo_doc,tercero)
+                facturas=sgci_facturas_compensables(conn,modulo_doc,tercero)
+                a,b=st.columns(2)
+                a.metric("NC disponibles",money(ncs.disponible.sum() if not ncs.empty else 0))
+                b.metric("Facturas pendientes",money(facturas.pendiente.sum() if not facturas.empty else 0))
+                if ncs.empty or facturas.empty:
+                    st.info("Se requiere una nota de crédito y una factura con saldo disponible.")
+                else:
+                    mapa_nc={f"NC {r.folio} ({r.fecha}) | {money(r.disponible)}":int(r.id) for r in ncs.itertuples()}
+                    mapa_f={f"Factura {r.folio} ({r.fecha}) | {money(r.pendiente)}":int(r.id) for r in facturas.itertuples()}
+                    nc_id=mapa_nc[st.selectbox("Nota de crédito",list(mapa_nc),key="sgci_ventas_nc_sel")]
+                    fac_id=mapa_f[st.selectbox("Factura a compensar",list(mapa_f),key="sgci_ventas_fac_sel")]
+                    disponible_nc=int(ncs.loc[ncs.id==nc_id,'disponible'].iloc[0]);pendiente_fac=int(facturas.loc[facturas.id==fac_id,'pendiente'].iloc[0])
+                    importe=st.number_input("Monto a compensar (CLP)",min_value=1,max_value=max(1,min(disponible_nc,pendiente_fac)),value=max(1,min(disponible_nc,pendiente_fac)),step=1,key="sgci_ventas_nc_monto")
+                    obs=st.text_input("Referencia / observación",key="sgci_ventas_nc_obs")
+                    conf=st.checkbox("Confirmo que los documentos corresponden a la misma operación y que su efecto contable ya está registrado.",key="sgci_ventas_nc_conf")
+                    if st.button("🔗 Compensar documentos",disabled=not conf,type="primary",key="sgci_ventas_nc_aplicar"):
+                        try:
+                            sgci_compensar_nc(conn,modulo_doc,tercero,nc_id,fac_id,importe,obs)
+                            sgci_exito("Compensación auxiliar registrada sin generar asientos.");st.rerun()
+                        except Exception as exc: st.error(str(exc))
+                historial=pd.read_sql_query("SELECT id,fecha,documento_credito_id NC_ID,documento_factura_id Factura_ID,monto,observacion FROM sgci_compensaciones_documentos WHERE modulo=? AND tercero_id=? AND anulada=0 ORDER BY id DESC",conn,params=(modulo_doc,tercero))
+                if not historial.empty:
+                    st.dataframe(formatear_montos_df(historial),hide_index=True,use_container_width=True)
+                    with st.expander("Revertir una compensación"):
+                        cid=st.selectbox("Registro",historial.id.astype(int).tolist(),key="sgci_ventas_rev_id")
+                        motivo=st.text_input("Motivo obligatorio",key="sgci_ventas_rev_motivo")
+                        if st.button("Revertir",disabled=not motivo.strip(),key="sgci_ventas_rev_btn"):
+                            try: sgci_anular_compensacion(conn,cid,motivo);st.rerun()
+                            except Exception as exc: st.error(str(exc))
+
+        with st.expander("📘 Aplicar cobros o pagos a saldos de ejercicios anteriores", expanded=False):
+            modulo_ant="VENTAS"
+            tabla_t='clientes' if modulo_ant=='VENTAS' else 'proveedores'
+            tabla_p='pagos_clientes' if modulo_ant=='VENTAS' else 'pagos_proveedores'
+            campo_t='cliente_id' if modulo_ant=='VENTAS' else 'proveedor_id'
+            terceros=pd.read_sql_query(f"SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM {tabla_t} ORDER BY nombre",conn)
+            if not terceros.empty:
+                mapa={f"{r.rut} | {r.nombre}":int(r.id) for r in terceros.itertuples()}
+                tercero=mapa[st.selectbox("Tercero",list(mapa),key="sgci_ventas_tercero_ant")]
+                st.caption("Registra solo saldos que YA existen en el asiento de apertura. No crea saldos contables.")
+                with st.form("sgci_ventas_nuevo_saldo_ant"):
+                    ej=st.number_input("Ejercicio de origen",min_value=2000,max_value=date.today().year-1,value=date.today().year-1,step=1)
+                    ref=st.text_input("Folio / referencia del saldo anterior")
+                    monto=st.number_input("Saldo histórico (CLP)",min_value=1,step=1,value=1)
+                    guardar=st.form_submit_button("Registrar saldo histórico")
+                if guardar:
+                    try: sgci_registrar_saldo_ejercicio(conn,modulo_ant,tercero,ej,ref,monto);st.rerun()
                     except Exception as exc: st.error(str(exc))
-            historial=pd.read_sql_query("SELECT id,fecha,documento_credito_id NC_ID,documento_factura_id Factura_ID,monto,observacion FROM sgci_compensaciones_documentos WHERE modulo=? AND tercero_id=? AND anulada=0 ORDER BY id DESC",conn,params=(modulo_doc,tercero))
-            if not historial.empty:
-                st.dataframe(formatear_montos_df(historial),hide_index=True,use_container_width=True)
-                with st.expander("Revertir una compensación"):
-                    cid=st.selectbox("Registro",historial.id.astype(int).tolist(),key="sgci_rev_id")
-                    motivo=st.text_input("Motivo obligatorio",key="sgci_rev_motivo")
-                    if st.button("Revertir",disabled=not motivo.strip(),key="sgci_rev_btn"):
-                        try: sgci_anular_compensacion(conn,cid,motivo);st.rerun()
-                        except Exception as exc: st.error(str(exc))
+                saldos=sgci_saldos_ejercicio_disponibles(conn,modulo_ant,tercero)
+                if not saldos.empty:
+                    st.dataframe(formatear_montos_df(saldos),hide_index=True,use_container_width=True)
+                    pagos=pd.read_sql_query(f"SELECT id,fecha,monto,COALESCE(glosa,'') glosa FROM {tabla_p} WHERE {campo_t}=? ORDER BY fecha DESC,id DESC",conn,params=(tercero,))
+                    if not pagos.empty:
+                        mapa_s={f"{r.ejercicio} | {r.referencia} | {money(r.disponible)}":int(r.id) for r in saldos.itertuples()}
+                        sid=mapa_s[st.selectbox("Saldo anterior",list(mapa_s),key="sgci_ventas_saldo_ant_sel")]
+                        mapa_p={f"#{int(r.id)} | {r.fecha} | {money(r.monto)} | {r.glosa}":int(r.id) for r in pagos.itertuples()}
+                        pid=mapa_p[st.selectbox("Cobro / pago ya contabilizado",list(mapa_p),key="sgci_ventas_pago_ant_sel")]
+                        limite=int(saldos.loc[saldos.id==sid,'disponible'].iloc[0])
+                        imp=st.number_input("Importe a aplicar",min_value=1,max_value=max(1,limite),value=max(1,limite),step=1,key="sgci_ventas_imp_ant")
+                        conf=st.checkbox("Verifiqué que el pago corresponde al saldo histórico y que no se aplicó anteriormente.",key="sgci_ventas_conf_ant")
+                        if st.button("Aplicar a ejercicio anterior",disabled=not conf,key="sgci_ventas_aplicar_ant"):
+                            try: sgci_aplicar_pago_ejercicio(conn,modulo_ant,tercero,sid,pid,imp);st.rerun()
+                            except Exception as exc: st.error(str(exc))
 
-    with st.expander("📘 Aplicar cobros o pagos a saldos de ejercicios anteriores", expanded=False):
-        modulo_ant=st.radio("Auxiliar histórico",["VENTAS","COMPRAS"],horizontal=True,key="sgci_modulo_ant")
-        tabla_t='clientes' if modulo_ant=='VENTAS' else 'proveedores'
-        tabla_p='pagos_clientes' if modulo_ant=='VENTAS' else 'pagos_proveedores'
-        campo_t='cliente_id' if modulo_ant=='VENTAS' else 'proveedor_id'
-        terceros=pd.read_sql_query(f"SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM {tabla_t} ORDER BY nombre",conn)
-        if not terceros.empty:
-            mapa={f"{r.rut} | {r.nombre}":int(r.id) for r in terceros.itertuples()}
-            tercero=mapa[st.selectbox("Tercero",list(mapa),key="sgci_tercero_ant")]
-            st.caption("Registra solo saldos que YA existen en el asiento de apertura. No crea saldos contables.")
-            with st.form("sgci_nuevo_saldo_ant"):
-                ej=st.number_input("Ejercicio de origen",min_value=2000,max_value=date.today().year-1,value=date.today().year-1,step=1)
-                ref=st.text_input("Folio / referencia del saldo anterior")
-                monto=st.number_input("Saldo histórico (CLP)",min_value=1,step=1,value=1)
-                guardar=st.form_submit_button("Registrar saldo histórico")
-            if guardar:
-                try: sgci_registrar_saldo_ejercicio(conn,modulo_ant,tercero,ej,ref,monto);st.rerun()
-                except Exception as exc: st.error(str(exc))
-            saldos=sgci_saldos_ejercicio_disponibles(conn,modulo_ant,tercero)
-            if not saldos.empty:
-                st.dataframe(formatear_montos_df(saldos),hide_index=True,use_container_width=True)
-                pagos=pd.read_sql_query(f"SELECT id,fecha,monto,COALESCE(glosa,'') glosa FROM {tabla_p} WHERE {campo_t}=? ORDER BY fecha DESC,id DESC",conn,params=(tercero,))
-                if not pagos.empty:
-                    mapa_s={f"{r.ejercicio} | {r.referencia} | {money(r.disponible)}":int(r.id) for r in saldos.itertuples()}
-                    sid=mapa_s[st.selectbox("Saldo anterior",list(mapa_s),key="sgci_saldo_ant_sel")]
-                    mapa_p={f"#{int(r.id)} | {r.fecha} | {money(r.monto)} | {r.glosa}":int(r.id) for r in pagos.itertuples()}
-                    pid=mapa_p[st.selectbox("Cobro / pago ya contabilizado",list(mapa_p),key="sgci_pago_ant_sel")]
-                    limite=int(saldos.loc[saldos.id==sid,'disponible'].iloc[0])
-                    imp=st.number_input("Importe a aplicar",min_value=1,max_value=max(1,limite),value=max(1,limite),step=1,key="sgci_imp_ant")
-                    conf=st.checkbox("Verifiqué que el pago corresponde al saldo histórico y que no se aplicó anteriormente.",key="sgci_conf_ant")
-                    if st.button("Aplicar a ejercicio anterior",disabled=not conf,key="sgci_aplicar_ant"):
-                        try: sgci_aplicar_pago_ejercicio(conn,modulo_ant,tercero,sid,pid,imp);st.rerun()
-                        except Exception as exc: st.error(str(exc))
-
-    with pestañas[0]:
         st.subheader("Aplicar abonos de clientes")
         st.caption("Relaciona abonos ya registrados con facturas pendientes. No vuelve a mover Banco. Si el saldo estaba contabilizado como anticipo de cliente, SGCI genera únicamente la reclasificación Anticipos → Clientes necesaria al aplicarlo.")
 
@@ -10821,7 +11072,81 @@ elif menu == "📊 Conciliación":
             else:
                 st.error(f"🔴 Diferencia: {money(diferencia)}")
 
-    with pestañas[1]:
+    if sgci_vista_conc == "Proveedores":
+        with st.expander("🧩 Compensar notas de crédito contra facturas", expanded=False):
+            modulo_doc="COMPRAS"
+            tabla_tercero='clientes' if modulo_doc=='VENTAS' else 'proveedores'
+            terceros=pd.read_sql_query(f"SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM {tabla_tercero} ORDER BY nombre",conn)
+            if terceros.empty:
+                st.info("No existen terceros registrados.")
+            else:
+                mapa={f"{r.rut} | {r.nombre}":int(r.id) for r in terceros.itertuples()}
+                tercero=mapa[st.selectbox("Cliente" if modulo_doc=="VENTAS" else "Proveedor",list(mapa),key="sgci_compras_tercero_nc")]
+                ncs=sgci_nc_disponibles(conn,modulo_doc,tercero)
+                facturas=sgci_facturas_compensables(conn,modulo_doc,tercero)
+                a,b=st.columns(2)
+                a.metric("NC disponibles",money(ncs.disponible.sum() if not ncs.empty else 0))
+                b.metric("Facturas pendientes",money(facturas.pendiente.sum() if not facturas.empty else 0))
+                if ncs.empty or facturas.empty:
+                    st.info("Se requiere una nota de crédito y una factura con saldo disponible.")
+                else:
+                    mapa_nc={f"NC {r.folio} ({r.fecha}) | {money(r.disponible)}":int(r.id) for r in ncs.itertuples()}
+                    mapa_f={f"Factura {r.folio} ({r.fecha}) | {money(r.pendiente)}":int(r.id) for r in facturas.itertuples()}
+                    nc_id=mapa_nc[st.selectbox("Nota de crédito",list(mapa_nc),key="sgci_compras_nc_sel")]
+                    fac_id=mapa_f[st.selectbox("Factura a compensar",list(mapa_f),key="sgci_compras_fac_sel")]
+                    disponible_nc=int(ncs.loc[ncs.id==nc_id,'disponible'].iloc[0]);pendiente_fac=int(facturas.loc[facturas.id==fac_id,'pendiente'].iloc[0])
+                    importe=st.number_input("Monto a compensar (CLP)",min_value=1,max_value=max(1,min(disponible_nc,pendiente_fac)),value=max(1,min(disponible_nc,pendiente_fac)),step=1,key="sgci_compras_nc_monto")
+                    obs=st.text_input("Referencia / observación",key="sgci_compras_nc_obs")
+                    conf=st.checkbox("Confirmo que los documentos corresponden a la misma operación y que su efecto contable ya está registrado.",key="sgci_compras_nc_conf")
+                    if st.button("🔗 Compensar documentos",disabled=not conf,type="primary",key="sgci_compras_nc_aplicar"):
+                        try:
+                            sgci_compensar_nc(conn,modulo_doc,tercero,nc_id,fac_id,importe,obs)
+                            sgci_exito("Compensación auxiliar registrada sin generar asientos.");st.rerun()
+                        except Exception as exc: st.error(str(exc))
+                historial=pd.read_sql_query("SELECT id,fecha,documento_credito_id NC_ID,documento_factura_id Factura_ID,monto,observacion FROM sgci_compensaciones_documentos WHERE modulo=? AND tercero_id=? AND anulada=0 ORDER BY id DESC",conn,params=(modulo_doc,tercero))
+                if not historial.empty:
+                    st.dataframe(formatear_montos_df(historial),hide_index=True,use_container_width=True)
+                    with st.expander("Revertir una compensación"):
+                        cid=st.selectbox("Registro",historial.id.astype(int).tolist(),key="sgci_compras_rev_id")
+                        motivo=st.text_input("Motivo obligatorio",key="sgci_compras_rev_motivo")
+                        if st.button("Revertir",disabled=not motivo.strip(),key="sgci_compras_rev_btn"):
+                            try: sgci_anular_compensacion(conn,cid,motivo);st.rerun()
+                            except Exception as exc: st.error(str(exc))
+
+        with st.expander("📘 Aplicar cobros o pagos a saldos de ejercicios anteriores", expanded=False):
+            modulo_ant="COMPRAS"
+            tabla_t='clientes' if modulo_ant=='VENTAS' else 'proveedores'
+            tabla_p='pagos_clientes' if modulo_ant=='VENTAS' else 'pagos_proveedores'
+            campo_t='cliente_id' if modulo_ant=='VENTAS' else 'proveedor_id'
+            terceros=pd.read_sql_query(f"SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM {tabla_t} ORDER BY nombre",conn)
+            if not terceros.empty:
+                mapa={f"{r.rut} | {r.nombre}":int(r.id) for r in terceros.itertuples()}
+                tercero=mapa[st.selectbox("Tercero",list(mapa),key="sgci_compras_tercero_ant")]
+                st.caption("Registra solo saldos que YA existen en el asiento de apertura. No crea saldos contables.")
+                with st.form("sgci_compras_nuevo_saldo_ant"):
+                    ej=st.number_input("Ejercicio de origen",min_value=2000,max_value=date.today().year-1,value=date.today().year-1,step=1)
+                    ref=st.text_input("Folio / referencia del saldo anterior")
+                    monto=st.number_input("Saldo histórico (CLP)",min_value=1,step=1,value=1)
+                    guardar=st.form_submit_button("Registrar saldo histórico")
+                if guardar:
+                    try: sgci_registrar_saldo_ejercicio(conn,modulo_ant,tercero,ej,ref,monto);st.rerun()
+                    except Exception as exc: st.error(str(exc))
+                saldos=sgci_saldos_ejercicio_disponibles(conn,modulo_ant,tercero)
+                if not saldos.empty:
+                    st.dataframe(formatear_montos_df(saldos),hide_index=True,use_container_width=True)
+                    pagos=pd.read_sql_query(f"SELECT id,fecha,monto,COALESCE(glosa,'') glosa FROM {tabla_p} WHERE {campo_t}=? ORDER BY fecha DESC,id DESC",conn,params=(tercero,))
+                    if not pagos.empty:
+                        mapa_s={f"{r.ejercicio} | {r.referencia} | {money(r.disponible)}":int(r.id) for r in saldos.itertuples()}
+                        sid=mapa_s[st.selectbox("Saldo anterior",list(mapa_s),key="sgci_compras_saldo_ant_sel")]
+                        mapa_p={f"#{int(r.id)} | {r.fecha} | {money(r.monto)} | {r.glosa}":int(r.id) for r in pagos.itertuples()}
+                        pid=mapa_p[st.selectbox("Cobro / pago ya contabilizado",list(mapa_p),key="sgci_compras_pago_ant_sel")]
+                        limite=int(saldos.loc[saldos.id==sid,'disponible'].iloc[0])
+                        imp=st.number_input("Importe a aplicar",min_value=1,max_value=max(1,limite),value=max(1,limite),step=1,key="sgci_compras_imp_ant")
+                        conf=st.checkbox("Verifiqué que el pago corresponde al saldo histórico y que no se aplicó anteriormente.",key="sgci_compras_conf_ant")
+                        if st.button("Aplicar a ejercicio anterior",disabled=not conf,key="sgci_compras_aplicar_ant"):
+                            try: sgci_aplicar_pago_ejercicio(conn,modulo_ant,tercero,sid,pid,imp);st.rerun()
+                            except Exception as exc: st.error(str(exc))
+
         st.subheader("Aplicar pagos de proveedores")
         st.caption("Relaciona pagos ya contabilizados con documentos pendientes. Esta operación solo concilia el auxiliar: no genera un nuevo asiento contable ni vuelve a mover Banco.")
 
