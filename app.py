@@ -42,9 +42,9 @@ st.set_page_config(
 # Identidad visual SGCI: verde sobrio, superficies claras y navegación compacta.
 st.markdown("""
 <style>
-:root {--olive:#214D3B;--olive-deep:#11283B;--olive-mid:#78866B;--sage:#B7C2A7;--cream:#F3F4EE;--gold:#D1B57A;--border:#E1E6DA;}
+:root {--olive:#2E694D;--olive-deep:#1F382B;--olive-mid:#78866B;--sage:#B7C2A7;--cream:#F7F9F7;--gold:#D1B57A;--border:#E1E6DA;}
 [data-testid="stAppViewContainer"] {background:var(--cream);color:#303D2A;}
-[data-testid="stSidebar"] {background:linear-gradient(175deg,#132B3C,#102333);border-right:1px solid #64715A;}
+[data-testid="stSidebar"] {background:linear-gradient(175deg,#264D36,#192E24);border-right:1px solid #3E654A;}
 [data-testid="stSidebar"] * {color:#F7F8F2!important;}
 [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {color:#F7F8F2!important;}
 /* Botones de respaldo y salida: texto legible en estado normal, hover y foco. */
@@ -57,21 +57,31 @@ st.markdown("""
 [data-testid="stSidebar"] [data-testid="stDownloadButton"] button:hover *,
 [data-testid="stSidebar"] [data-testid="stButton"] button:hover * {color:#24301F!important;}
 [data-testid="stSidebar"] div[role="radiogroup"] label {border-radius:11px;padding:.42rem .5rem;transition:background .15s;}
-[data-testid="stSidebar"] div[role="radiogroup"] label:hover {background:#617151;}
-[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {background:#78866B;box-shadow:inset 3px 0 #D1B57A;}
+[data-testid="stSidebar"] div[role="radiogroup"] label:hover {background:#426F4D;}
+[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {background:#477958;box-shadow:inset 3px 0 #D1B57A;}
 /* Menú principal: mayor legibilidad sin afectar controles internos. */
 [data-testid="stSidebar"] div[role="radiogroup"] label p {font-size:16px!important;font-weight:650!important;line-height:1.35!important;}
 [data-testid="stSidebar"] div[role="radiogroup"] label {padding:.48rem .5rem;}
 .stButton>button,.stDownloadButton>button {border-radius:11px;border:1px solid #C8D2C1;transition:all .15s;}
-.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"] {background:#214D3B!important;color:white!important;border-color:#46543A!important;}
-.stButton>button[kind="primary"]:hover,.stFormSubmitButton>button[kind="primary"]:hover {background:#173B2D!important;}
+.stButton>button[kind="primary"],.stFormSubmitButton>button[kind="primary"] {background:#2E694D!important;color:white!important;border-color:#46543A!important;}
+.stButton>button[kind="primary"]:hover,.stFormSubmitButton>button[kind="primary"]:hover {background:#24543C!important;}
 [data-testid="stMetric"] {background:#FFFFFF;border:1px solid var(--border);border-radius:16px;padding:16px;box-shadow:0 3px 14px rgba(48,61,42,.045);}
-[data-testid="stMetricValue"] {color:#214D3B;}
+[data-testid="stMetricValue"] {color:#2E694D;}
 [data-testid="stVerticalBlockBorderWrapper"]>div[data-testid="stVerticalBlock"] {border-radius:12px;}
 [data-testid="stDataFrame"], [data-testid="stTable"] {border-radius:13px;overflow:hidden;}
 [data-baseweb="tab-list"] {gap:.4rem;border-bottom:1px solid #D8DFD1;}
 button[data-baseweb="tab"] {border-radius:11px 11px 0 0;}
 h1,h2,h3 {letter-spacing:-.025em;color:#35432D;}
+/* SGCI Modelo 1: superficies claras, tarjetas de indicadores y paneles de trabajo. */
+[data-testid="stHeader"] {background:#FFFFFFE8;}
+[data-testid="stAppViewBlockContainer"] {max-width:1560px;padding-top:1.3rem;}
+[data-testid="stMetric"] {box-shadow:0 5px 18px rgba(35,67,43,.055);border-radius:17px;}
+[data-testid="stMetricLabel"] {font-weight:600;color:#59695D;}
+[data-testid="stMetricValue"] {font-size:1.65rem;font-weight:750;}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h2 {letter-spacing:.04em;}
+[data-testid="stDataFrame"] {border:1px solid #E1E9E1;}
+.stAlert {border-radius:12px;}
+
 hr {border-color:#DDE4D7!important;}
 </style>
 """, unsafe_allow_html=True)
@@ -8153,8 +8163,8 @@ elif menu == "💼 Tesorería":
 elif menu == "🧾 Facturación y DTE":
     pantalla_dte(conn)
 elif menu == "🏠 Inicio":
-    st.title('Inicio')
-    st.caption('Una vista rápida de lo más importante de la contabilidad.')
+    st.title('Panel de control contable')
+    st.caption('Indicadores, tareas prioritarias y accesos rápidos · información basada en los registros de SGCI')
     hoy=date.today().isoformat()
     mes=hoy[:7]
     def _sgci_valor(sql,params=()):
@@ -8162,51 +8172,85 @@ elif menu == "🏠 Inicio":
             return float(conn.execute(sql,params).fetchone()[0] or 0)
         except sqlite3.Error:
             return 0.0
-    ingresos=_sgci_valor("SELECT COALESCE(SUM(haber-debe),0) FROM libro_diario WHERE substr(fecha,1,7)=? AND (codigo_cuenta LIKE '4.%')",(mes,))
+    ingresos=_sgci_valor("SELECT COALESCE(SUM(haber-debe),0) FROM libro_diario WHERE substr(fecha,1,7)=? AND codigo_cuenta LIKE '4.%'",(mes,))
     gastos=_sgci_valor("SELECT COALESCE(SUM(debe-haber),0) FROM libro_diario WHERE substr(fecha,1,7)=? AND (codigo_cuenta LIKE '5.%' OR codigo_cuenta LIKE '6.%')",(mes,))
     saldo_banco=_sgci_valor("SELECT COALESCE(SUM(d.debe-d.haber),0) FROM libro_diario d WHERE d.codigo_cuenta IN (SELECT cuenta_contable FROM bancos WHERE activo=1)")
     c1,c2,c3,c4=st.columns(4)
-    c1.metric('Ingresos del mes',money(ingresos))
-    c2.metric('Gastos del mes',money(gastos))
-    c3.metric('Resultado del mes',money(ingresos-gastos))
-    c4.metric('Saldo contable en bancos',money(saldo_banco))
-    st.caption('Indicadores derivados del Libro Diario. El saldo bancario contable puede diferir de la cartola hasta conciliar.')
+    c1.metric('Saldo contable en bancos',money(saldo_banco))
+    c2.metric('Ingresos del mes',money(ingresos))
+    c3.metric('Gastos del mes',money(gastos))
+    c4.metric('Resultado del mes',money(ingresos-gastos))
+    st.caption('Montos del Libro Diario · período '+mes+' · el saldo bancario puede diferir de la cartola hasta su conciliación.')
+    st.write('')
+    col_tareas,col_flujo,col_gastos=st.columns([1.25,1.25,1])
+    with col_tareas:
+        st.subheader('✅ Tareas pendientes')
+        pendientes_pago=int(_sgci_valor("SELECT COUNT(*) FROM tes_solicitudes WHERE estado='PENDIENTE_CONTABILIZACION'"))
+        pendientes_tes=int(_sgci_valor("SELECT COUNT(*) FROM tes_solicitudes WHERE estado IN ('BORRADOR','ENVIADA','APROBADA')"))
+        pendientes_cartola=int(_sgci_valor('SELECT COUNT(*) FROM cartola_bancaria WHERE conciliado=0'))
+        if pendientes_pago: st.warning(f'💳 {pendientes_pago} pago(s) por contabilizar')
+        if pendientes_tes: st.info(f'📋 {pendientes_tes} solicitud(es) de Tesorería por gestionar')
+        if pendientes_cartola: st.info(f'🏦 {pendientes_cartola} movimiento(s) bancario(s) sin conciliar')
+        if not (pendientes_pago or pendientes_tes or pendientes_cartola): st.success('Sin tareas pendientes en los controles principales.')
+    with col_flujo:
+        st.subheader('📊 Ingresos y egresos · 6 meses')
+        try:
+            flujo=pd.read_sql_query('''SELECT substr(fecha,1,7) AS mes,
+                SUM(CASE WHEN codigo_cuenta LIKE '4.%' THEN haber-debe ELSE 0 END) AS Ingresos,
+                SUM(CASE WHEN codigo_cuenta LIKE '5.%' OR codigo_cuenta LIKE '6.%' THEN debe-haber ELSE 0 END) AS Egresos
+                FROM libro_diario WHERE fecha IS NOT NULL GROUP BY substr(fecha,1,7) ORDER BY mes DESC LIMIT 6''',conn)
+            if flujo.empty: st.info('Aún no hay movimientos para graficar.')
+            else:
+                flujo=flujo.sort_values('mes').set_index('mes')
+                st.bar_chart(flujo[['Ingresos','Egresos']],height=225,color=['#2E906A','#E2A25B'])
+        except (sqlite3.Error,ValueError): st.info('Gráfico disponible cuando existan movimientos contables.')
+    with col_gastos:
+        st.subheader('📌 Gastos del mes')
+        try:
+            categorias=pd.read_sql_query('''SELECT COALESCE(NULLIF(c.nombre,''),d.codigo_cuenta) AS Cuenta,
+                SUM(d.debe-d.haber) AS Monto FROM libro_diario d
+                LEFT JOIN plan_cuentas c ON c.codigo=d.codigo_cuenta
+                WHERE substr(d.fecha,1,7)=? AND (d.codigo_cuenta LIKE '5.%' OR d.codigo_cuenta LIKE '6.%')
+                GROUP BY d.codigo_cuenta HAVING ABS(SUM(d.debe-d.haber))>0 ORDER BY ABS(SUM(d.debe-d.haber)) DESC LIMIT 6''',conn,params=(mes,))
+            if categorias.empty: st.info('Sin gastos registrados en este período.')
+            else: st.dataframe(formatear_montos_df(categorias),hide_index=True,use_container_width=True,height=225)
+        except sqlite3.Error: st.info('Sin información disponible.')
+    st.divider()
+    st.subheader('Actividad y operaciones recientes')
     col_actividad,col_tes,col_pagar=st.columns(3)
     with col_actividad:
-        st.subheader('Actividad reciente')
-        actividad=pd.read_sql_query('SELECT fecha,cuenta,glosa,debe,haber FROM libro_diario ORDER BY id DESC LIMIT 8',conn)
+        st.markdown('**Actividad contable**')
+        actividad=pd.read_sql_query('SELECT fecha,cuenta,glosa,debe,haber FROM libro_diario ORDER BY id DESC LIMIT 7',conn)
         if actividad.empty: st.info('Sin movimientos contables registrados.')
-        else: st.dataframe(formatear_montos_df(actividad),hide_index=True,use_container_width=True)
+        else: st.dataframe(formatear_montos_df(actividad),hide_index=True,use_container_width=True,height=270)
     with col_tes:
-        st.subheader('Solicitudes de Tesorería')
+        st.markdown('**Solicitudes de Tesorería**')
         tes_crear_tablas(conn)
         tes_inicio=pd.read_sql_query('''SELECT s.id,s.beneficiario,s.estado,COALESCE(SUM(d.monto),0) AS monto
             FROM tes_solicitudes s LEFT JOIN tes_solicitud_detalle d ON d.solicitud_id=s.id
-            GROUP BY s.id ORDER BY s.id DESC LIMIT 8''',conn)
+            GROUP BY s.id ORDER BY s.id DESC LIMIT 7''',conn)
         if tes_inicio.empty: st.info('No hay solicitudes registradas.')
-        else: st.dataframe(formatear_montos_df(tes_inicio),hide_index=True,use_container_width=True)
+        else: st.dataframe(formatear_montos_df(tes_inicio),hide_index=True,use_container_width=True,height=270)
     with col_pagar:
-        st.subheader('Cuentas por pagar')
+        st.markdown('**Cuentas por pagar**')
         pendientes=pd.read_sql_query('''SELECT p.nombre AS proveedor,c.folio,c.fecha,
             ROUND(ABS(COALESCE(c.monto_total,0))-COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0)) AS saldo
             FROM compras c LEFT JOIN proveedores p ON p.id=c.proveedor_id
             WHERE c.tipo_doc NOT IN (60,61,52) OR c.tipo_doc IS NULL
             ORDER BY c.fecha DESC LIMIT 100''',conn)
-        pendientes=pendientes[pendientes.saldo>0].head(8) if not pendientes.empty else pendientes
+        pendientes=pendientes[pendientes.saldo>0].head(7) if not pendientes.empty else pendientes
         if pendientes.empty: st.info('No hay documentos pendientes en esta vista.')
-        else: st.dataframe(formatear_montos_df(pendientes),hide_index=True,use_container_width=True)
+        else: st.dataframe(formatear_montos_df(pendientes),hide_index=True,use_container_width=True,height=270)
     st.divider()
-    st.subheader('Tareas importantes')
-    tareas=[]
-    pendientes_pago=int(_sgci_valor("SELECT COUNT(*) FROM tes_solicitudes WHERE estado='PENDIENTE_CONTABILIZACION'"))
-    pendientes_tes=int(_sgci_valor("SELECT COUNT(*) FROM tes_solicitudes WHERE estado IN ('BORRADOR','ENVIADA','APROBADA')"))
-    pendientes_cartola=int(_sgci_valor('SELECT COUNT(*) FROM cartola_bancaria WHERE conciliado=0'))
-    if pendientes_pago: tareas.append(f'⚠️ {pendientes_pago} pago(s) de Tesorería por contabilizar')
-    if pendientes_tes: tareas.append(f'📋 {pendientes_tes} solicitud(es) de Tesorería por gestionar')
-    if pendientes_cartola: tareas.append(f'🏦 {pendientes_cartola} movimiento(s) bancario(s) sin conciliar')
-    if tareas:
-        for tarea in tareas: st.info(tarea)
-    else: st.success('No se detectaron tareas pendientes en los controles principales.')
+    st.subheader('⚡ Accesos rápidos')
+    accesos=[('💼 Tesorería','💼 Tesorería'),('🏦 Bancos','🏦 Banco'),('💰 Ventas','💰 Ventas/clientes'),('💳 Compras','💳 Compras/proveedores'),('📚 Contabilidad','📚 Contabilidad')]
+    cols=st.columns(5)
+    def _ir_inicio_sgci(destino):
+        st.session_state['nav_modulo_principal']=destino
+    for col,(nombre,destino) in zip(cols,accesos):
+        with col:
+            st.button(nombre,use_container_width=True,disabled=destino not in sgci_nav_permitidos,
+                      key='inicio_acceso_'+destino,on_click=_ir_inicio_sgci,args=(destino,))
 
 elif menu == "👥 Recursos Humanos":
     st.title("👥 Recursos Humanos")
