@@ -7978,7 +7978,28 @@ def sgci_reporte_partidas_abiertas(conn, modulo, tercero_id):
     nc = sgci_nc_disponibles(conn, modulo, tercero_id).copy()
     pagos = (abonos_disponibles_cliente(conn, tercero_id) if modulo == 'VENTAS'
              else pagos_disponibles_proveedor(conn, tercero_id)).copy()
+    # Los saldos de ejercicios anteriores son desglose auxiliar de la apertura,
+    # no nuevas ventas ni nuevos asientos contables.
+    historicos = pd.read_sql_query("""
+        SELECT s.ejercicio, s.referencia, s.fecha, s.monto,
+               COALESCE((SELECT SUM(a.monto)
+                         FROM sgci_aplicaciones_ejercicios a
+                         WHERE a.saldo_id=s.id),0) aplicado
+        FROM sgci_saldos_ejercicios s
+        WHERE s.modulo=? AND s.tercero_id=?
+        ORDER BY s.ejercicio,s.referencia
+    """, conn, params=(modulo,int(tercero_id)))
     filas = []
+    for r in historicos.itertuples(index=False):
+        pendiente=max(0,clp_round(r.monto)-clp_round(r.aplicado))
+        if pendiente<=0:
+            continue
+        filas.append({'Fecha':r.fecha,
+                      'Documento':f'Factura anterior {r.referencia} ({r.ejercicio})',
+                      'Clase':'Saldo histórico por cobrar' if modulo=='VENTAS' else 'Saldo histórico por pagar',
+                      'Monto original':clp_round(r.monto),
+                      'Aplicado':clp_round(r.aplicado),
+                      'Saldo pendiente':pendiente})
     for r in documentos.itertuples(index=False):
         filas.append({'Fecha':r.fecha,'Documento':f'Factura / ND {r.folio or r.id}',
                       'Clase':'Documento por cobrar' if modulo=='VENTAS' else 'Documento por pagar',
@@ -10451,6 +10472,25 @@ elif menu == "👥 Clientes":
             if modo_ec=='Partidas abiertas':
                 sgci_mostrar_partidas_abiertas(conn,'VENTAS',cliente_id,seleccionado)
             df = estado_cuenta_cliente(conn, cliente_id) if modo_ec=='Histórico' else pd.DataFrame()
+            if modo_ec=='Histórico':
+                sgci_conc_esquema(conn)
+                detalle_apertura=pd.read_sql_query("""
+                    SELECT s.ejercicio AS Ejercicio, s.referencia AS Factura,
+                           s.monto AS 'Monto original',
+                           COALESCE((SELECT SUM(a.monto) FROM sgci_aplicaciones_ejercicios a
+                                     WHERE a.saldo_id=s.id),0) AS Aplicado,
+                           MAX(0,s.monto-COALESCE((SELECT SUM(a.monto)
+                                     FROM sgci_aplicaciones_ejercicios a
+                                     WHERE a.saldo_id=s.id),0)) AS 'Saldo pendiente'
+                    FROM sgci_saldos_ejercicios s
+                    WHERE s.modulo='VENTAS' AND s.tercero_id=?
+                    ORDER BY s.ejercicio,s.referencia
+                """,conn,params=(int(cliente_id),))
+                if not detalle_apertura.empty:
+                    st.markdown('#### Facturas de ejercicios anteriores incluidas en la apertura')
+                    st.caption('Detalle auxiliar de saldos ya contabilizados en la apertura. No se suma otra vez al saldo contable del histórico.')
+                    st.dataframe(formatear_montos_df(detalle_apertura),use_container_width=True,hide_index=True)
+
 
             if df.empty and modo_ec=='Histórico':
                 st.info("El cliente no tiene movimientos.")
