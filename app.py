@@ -4569,7 +4569,7 @@ def leer_cartola_pdf(uploaded_file, password=""):
     # Cargos suelen venir CON documento:
     # 07-01-2026 ROSARIO N CHEQUE COBRADO POR CAJA 318411 24.990 293.073.865
     patron = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+([\d\.]+)\s+([\d\.]+)\s*$")
-    patron_doble = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s*$")
+    patron_doble = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(\d{1,3}(?:\.\d{3})+)\s+(\d{1,3}(?:\.\d{3})+)\s+(\d{1,3}(?:\.\d{3})+)\s*$")
 
     palabras_abono = (
         "ABONO", "DEPOSITO", "DEPÓSITO", "TRANSFERENCIA RECIBIDA",
@@ -4598,7 +4598,7 @@ def leer_cartola_pdf(uploaded_file, password=""):
         referencia = ""
         cuerpo = cuerpo_con_ref
         if not es_abono_desc:
-            mr = re.match(r"^(.*\D)\s+(\d{3,})$", cuerpo_con_ref)
+            mr = re.match(r"^(.*\D)\s+(\d{3,}|R)$", cuerpo_con_ref, re.I)
             if mr:
                 cuerpo = mr.group(1).strip()
                 referencia = mr.group(2)
