@@ -4569,6 +4569,7 @@ def leer_cartola_pdf(uploaded_file, password=""):
     # Cargos suelen venir CON documento:
     # 07-01-2026 ROSARIO N CHEQUE COBRADO POR CAJA 318411 24.990 293.073.865
     patron = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+([\d\.]+)\s+([\d\.]+)\s*$")
+    patron_doble = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+([\d\.]+)\s+([\d\.]+)\s+([\d\.]+)\s*$")
 
     palabras_abono = (
         "ABONO", "DEPOSITO", "DEPÓSITO", "TRANSFERENCIA RECIBIDA",
@@ -4577,11 +4578,17 @@ def leer_cartola_pdf(uploaded_file, password=""):
 
     for linea in texto.splitlines():
         linea = re.sub(r"\s+", " ", linea.strip())
-        m = patron.match(linea)
+        md = patron_doble.match(linea)
+        m = md or patron.match(linea)
         if not m:
             continue
 
-        fecha_txt, cuerpo_con_ref, monto_txt, saldo_txt = m.groups()
+        if md:
+            fecha_txt, cuerpo_con_ref, cargo_txt, abono_txt, saldo_txt = md.groups()
+            monto_txt = cargo_txt
+        else:
+            fecha_txt, cuerpo_con_ref, monto_txt, saldo_txt = m.groups()
+            cargo_txt = abono_txt = None
         cuerpo_con_ref = cuerpo_con_ref.strip()
         cuerpo_upper = cuerpo_con_ref.upper()
         es_abono_desc = any(x in cuerpo_upper for x in palabras_abono)
@@ -4604,6 +4611,8 @@ def leer_cartola_pdf(uploaded_file, password=""):
             "descripcion": cuerpo,
             "referencia": referencia,
             "monto_detectado": abs(monto),
+            "cargo_explicito": numero_cartola_clp(cargo_txt) if cargo_txt is not None else None,
+            "abono_explicito": numero_cartola_clp(abono_txt) if abono_txt is not None else None,
             "es_abono_desc": es_abono_desc,
             "tipo_incierto": not es_abono_desc and not any(x in cuerpo_upper for x in ("CHEQUE COBRADO", "TRASPASO FONDOS", "TRANSFERENCIA A", "PAGO REALIZADO", "GIRO", "COMISION", "COMISIÓN", "CARGO")),
             "saldo": saldo,
@@ -4623,14 +4632,16 @@ def leer_cartola_pdf(uploaded_file, password=""):
             delta = clp_round(mov["saldo"] - saldo_anterior)
             if abs(abs(delta) - monto) <= 1:
                 es_abono = delta > 0
+        cargo_final = mov["cargo_explicito"] if mov["cargo_explicito"] is not None else (0.0 if es_abono else monto)
+        abono_final = mov["abono_explicito"] if mov["abono_explicito"] is not None else (monto if es_abono else 0.0)
         salida.append({
             "fecha": mov["fecha"],
             "descripcion": mov["descripcion"],
             "referencia": mov["referencia"],
-            "cargo": 0.0 if es_abono else monto,
-            "abono": monto if es_abono else 0.0,
+            "cargo": cargo_final,
+            "abono": abono_final,
             "saldo": mov["saldo"],
-            "revision": "REVISAR SIGNO" if saldo_anterior is None and mov["tipo_incierto"] else "",
+            "revision": "CARGO Y ABONO: REVISAR" if cargo_final > 0 and abono_final > 0 else ("REVISAR SIGNO" if saldo_anterior is None and mov["tipo_incierto"] else ""),
         })
         saldo_anterior = mov["saldo"]
 
@@ -8809,10 +8820,14 @@ elif menu == "🏦 Bancos y Cartolas":
                             for idx, rr in dfc.iterrows():
                                 ca = numero_cartola_clp(rr["cargo"])
                                 ab = numero_cartola_clp(rr["abono"])
-                                if ca < 0 or ab < 0 or (ca > 0) == (ab > 0):
+                                if ca < 0 or ab < 0 or (ca <= 0 and ab <= 0):
                                     errores_signo.append(idx + 1)
                         if "revision" in dfc.columns and (dfc["revision"] == "REVISAR SIGNO").any():
                             st.warning("Hay un primer movimiento con signo no verificable por la descripción. Comprueba su naturaleza contra la cartola original.")
+                        if "cargo" in dfc.columns and "abono" in dfc.columns and any(
+                            numero_cartola_clp(r["cargo"]) > 0 and numero_cartola_clp(r["abono"]) > 0 for _, r in dfc.iterrows()
+                        ):
+                            st.warning("La cartola contiene filas con cargo y abono simultáneos. Se conservarán ambos importes; no concilies automáticamente esas filas con facturas o pagos.")
                         confirmar_signos = st.checkbox("He comprobado los cargos y abonos contra la cartola original", key="sgci_confirma_signos_pdf") if archivo.name.lower().endswith(".pdf") else True
                         if errores_signo:
                             st.error(f"Movimientos con cargo/abono inválidos en filas: {errores_signo[:12]}")
