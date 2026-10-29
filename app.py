@@ -4348,6 +4348,72 @@ def sgci_conciliar_lineas_existentes(conn,movimiento_id,diario_ids):
         raise
     return len(ids)
 
+def sgci_grupo_cheque_protestado(conn, movimiento_id):
+    """Identifica exclusivamente un cheque debitado, una devolución neutra y su reversa.
+
+    No infiere pagos a proveedores ni altera el libro diario.
+    """
+    mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(movimiento_id,)).fetchone()
+    if not mov or int(mov['conciliado'] or 0):
+        return None
+    desc=str(mov['descripcion'] or '').upper()
+    if 'DEV CHQ' not in desc or 'FIRMA DISCONFORM' not in desc:
+        return None
+    importe=float(mov['cargo'] or 0)
+    if importe<=0 or abs(importe-float(mov['abono'] or 0))>0.005:
+        return None
+    filas=conn.execute("""SELECT * FROM cartola_bancaria
+        WHERE banco_id=? AND fecha=? AND conciliado=0 AND id<>?
+        ORDER BY id""",(mov['banco_id'],mov['fecha'],movimiento_id)).fetchall()
+    cargos=[r for r in filas if 'CHEQUE COBRADO POR OTRO BANCO' in str(r['descripcion'] or '').upper()
+            and abs(float(r['cargo'] or 0)-importe)<0.005 and abs(float(r['abono'] or 0))<0.005]
+    reversas=[r for r in filas if 'REVERSA DE CARGO' in str(r['descripcion'] or '').upper()
+              and abs(float(r['abono'] or 0)-importe)<0.005 and abs(float(r['cargo'] or 0))<0.005]
+    # No seleccionar automáticamente si existen varias operaciones posibles.
+    if len(cargos)!=1 or len(reversas)!=1:
+        return None
+    grupo=[cargos[0],mov,reversas[0]]
+    if any(r['asiento_id'] is not None or r['match_tipo'] is not None or r['match_id'] is not None for r in grupo):
+        return None
+    ids=[int(r['id']) for r in grupo]
+    if len(set(ids))!=3 or abs(sum(float(r['abono'] or 0)-float(r['cargo'] or 0) for r in grupo))>0.005:
+        return None
+    return grupo
+
+
+def sgci_conciliar_cheque_protestado(conn, movimiento_id):
+    """Cierra el grupo bancario de efecto neto cero sin asientos ni pagos."""
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        grupo=sgci_grupo_cheque_protestado(conn,movimiento_id)
+        if not grupo:
+            raise ValueError('El grupo no es inequívoco o alguno de sus movimientos ya cambió.')
+        ids=[int(r['id']) for r in grupo]
+        # Verificar referencias externas antes de marcar movimientos.
+        for tabla in ('obligaciones_manuales','pagos_clientes','sgci_conciliacion_lineas'):
+            existe=conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",(tabla,)).fetchone()
+            if existe:
+                n=conn.execute(f"SELECT COUNT(*) FROM {tabla} WHERE cartola_id IN (?,?,?)",ids).fetchone()[0]
+                if n:
+                    raise ValueError('Existen vínculos previos: operación no modificada.')
+        detalle='Cheque protestado: débito, devolución de cargo y reversa; efecto neto $0. Sin pago ni asiento contable.'
+        for r in grupo:
+            cur=conn.execute("""UPDATE cartola_bancaria SET conciliado=1,
+                match_tipo='CHEQUE_PROTESTADO',match_id=?,match_confianza=100,
+                observacion=? WHERE id=? AND conciliado=0 AND asiento_id IS NULL AND match_tipo IS NULL""",
+                (int(movimiento_id),detalle,int(r['id'])))
+            if cur.rowcount!=1:
+                raise ValueError('Un movimiento cambió; no se aplicaron modificaciones.')
+        conn.execute("""INSERT INTO auditoria(fecha_hora,usuario,accion,detalle)
+            VALUES(CURRENT_TIMESTAMP,'SGCI','CONCILIACION CHEQUE PROTESTADO',?)""",
+            (f'Movimientos {ids}; devolución {movimiento_id}; sin asiento ni pago',))
+        conn.commit()
+        return ids
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def conciliacion_banco(conn, banco_id):
     banco=conn.execute("SELECT * FROM bancos WHERE id=?",(banco_id,)).fetchone()
     if not banco: return None
@@ -8909,15 +8975,38 @@ elif menu == "🏦 Bancos y Cartolas":
                 st.subheader("Movimientos pendientes")
                 opciones_mov = []
                 for r in pendientes.itertuples():
-                    monto = r.cargo if float(r.cargo or 0)>0 else r.abono
-                    clase = "Cargo" if float(r.cargo or 0)>0 else "Abono"
-                    opciones_mov.append(f"{r.id} | {r.fecha} | {clase} {money(monto)} | {r.descripcion}")
+                    cargo=float(r.cargo or 0)
+                    abono=float(r.abono or 0)
+                    if cargo>0 and abono>0:
+                        etiqueta=f"Cargo {money(cargo)} + Abono {money(abono)} (neto {money(abono-cargo)})"
+                    elif cargo>0:
+                        etiqueta=f"Cargo {money(cargo)}"
+                    else:
+                        etiqueta=f"Abono {money(abono)}"
+                    opciones_mov.append(f"{r.id} | {r.fecha} | {etiqueta} | {r.descripcion}")
                 elegido = st.selectbox("Selecciona un movimiento", opciones_mov)
                 movimiento_id = int(elegido.split(" | ",1)[0])
-                cand = candidatos_conciliacion(conn,movimiento_id)
-                if cand.empty:
+                grupo_protesto=sgci_grupo_cheque_protestado(conn,movimiento_id)
+                if grupo_protesto:
+                    st.warning("Cheque protestado detectado: el débito original, la devolución y la reversa suman $0. No se debe aplicar este cheque como pago de la factura de VALVAL.")
+                    st.dataframe(pd.DataFrame([{'ID':int(r['id']),'Fecha':r['fecha'],
+                        'Descripción':r['descripcion'],'Cargo':money(r['cargo']),
+                        'Abono':money(r['abono'])} for r in grupo_protesto]),
+                        use_container_width=True,hide_index=True)
+                    confirmar_protesto=st.checkbox('Confirmo que este cheque fue protestado y que no existe pago contabilizado asociado.',key=f'protesto_ok_{movimiento_id}')
+                    if st.button('Conciliar grupo de cheque protestado (sin contabilizar)',
+                                 disabled=not confirmar_protesto,key=f'protesto_btn_{movimiento_id}'):
+                        try:
+                            ids=sgci_conciliar_cheque_protestado(conn,movimiento_id)
+                            sgci_exito(f'Grupo {ids} conciliado sin generar pagos ni asientos.')
+                            st.rerun()
+                        except Exception as exc:
+                            st.error(str(exc))
+                    st.info('Para evitar pagos incorrectos, no se ofrecen coincidencias con facturas para esta devolución.')
+                cand = pd.DataFrame() if grupo_protesto else candidatos_conciliacion(conn,movimiento_id)
+                if cand.empty and not grupo_protesto:
                     st.warning("No encontré coincidencias exactas por monto. Puedes imputar este movimiento directamente a contabilidad aquí mismo.")
-                else:
+                elif not grupo_protesto:
                     mostrar = cand[["confianza","tipo","fecha","descripcion","referencia","monto","cuenta"]].copy()
                     mostrar["confianza"] = mostrar["confianza"].apply(lambda x: f"{x:.0f}%")
                     st.dataframe(mostrar.rename(columns={"confianza":"Coincidencia","tipo":"Origen","fecha":"Fecha","descripcion":"Detalle","referencia":"Referencia","monto":"Monto","cuenta":"Cuenta"}), use_container_width=True, hide_index=True)
@@ -8935,6 +9024,8 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.error(f"No se pudo conciliar: {e}")
 
                 mov_sel = pendientes.loc[pendientes["id"] == movimiento_id].iloc[0]
+                if grupo_protesto:
+                    st.stop()  # La devolución neutra solo admite la conciliación controlada anterior.
                 with st.expander("🛠️ Corregir cargo/abono del movimiento pendiente"):
                     st.warning("Solo para errores de importación. No crea asientos ni altera movimientos conciliados. Comprueba el PDF original antes de guardar.")
                     st.write(f"Movimiento #{movimiento_id} · {mov_sel['fecha']} · {mov_sel['descripcion']}")
