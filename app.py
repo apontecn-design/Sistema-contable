@@ -4556,128 +4556,75 @@ def numero_cartola_clp(valor):
 
 
 def leer_cartola_pdf(uploaded_file, password=""):
-    """Extrae cartolas PDF BCI a: fecha, descripción, referencia, cargo, abono, saldo.
-
-    BCI puede omitir el N° de documento en depósitos/abonos, por lo que no se
-    exige ese campo para reconocer una fila. El sentido del movimiento se
-    determina por la descripción y, como control adicional, por la variación
-    del saldo entre movimientos consecutivos.
-    """
+    """Lee cartolas BCI separando referencia, cargos y abonos y verificando saldos."""
     datos = uploaded_file.getvalue()
     if not datos:
         raise ValueError("El PDF está vacío.")
-
-    PdfReader = None
     try:
-        from pypdf import PdfReader as _PdfReader
-        PdfReader = _PdfReader
-    except Exception:
-        try:
-            from PyPDF2 import PdfReader as _PdfReader
-            PdfReader = _PdfReader
-        except Exception:
-            raise ValueError("Para leer PDF debes agregar 'pypdf' al archivo requirements.txt de Render/GitHub.")
-
+        from pypdf import PdfReader
+    except ImportError:
+        from PyPDF2 import PdfReader
     try:
         lector = PdfReader(io.BytesIO(datos))
         if getattr(lector, "is_encrypted", False):
-            if not password:
-                raise ValueError("La cartola está protegida. Ingresa la contraseña del PDF.")
-            resultado = lector.decrypt(password)
-            if not resultado:
-                raise ValueError("La contraseña del PDF no es correcta.")
-        texto = "\n".join((pagina.extract_text() or "") for pagina in lector.pages)
+            if not password or not lector.decrypt(password):
+                raise ValueError("Ingresa la contraseña correcta del PDF.")
+        texto = "\n".join(p.extract_text() or "" for p in lector.pages)
     except ValueError:
         raise
     except Exception as e:
-        raise ValueError(f"No fue posible leer el PDF: {e}")
+        raise ValueError(f"No fue posible leer el PDF: {e}") from e
 
-    if not texto.strip():
-        raise ValueError("El PDF no contiene texto extraíble. Si es una cartola escaneada, deberá cargarse manualmente o en CSV/Excel.")
-
-    movimientos = []
-    # La extracción de pypdf conserva cada movimiento BCI en una línea, pero
-    # depósitos/abonos pueden venir SIN número de documento:
-    # 06-01-2026 OF VIRT U PAGO RECIBIDO EDJ ... 185.440.196 293.098.855
-    # Cargos suelen venir CON documento:
-    # 07-01-2026 ROSARIO N CHEQUE COBRADO POR CAJA 318411 24.990 293.073.865
-    patron = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+([\d\.]+)\s+([\d\.]+)\s*$")
-    patron_doble = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(\d{1,3}(?:\.\d{3})+)\s+(\d{1,3}(?:\.\d{3})+)\s+(\d{1,3}(?:\.\d{3})+)\s*$")
-
-    palabras_abono = (
-        "ABONO", "DEPOSITO", "DEPÓSITO", "TRANSFERENCIA RECIBIDA",
-        "PAGO RECIBIDO", "TRANSFERENCIA DE", "TRANSFER DE", "DEPOSITO EN", "DEPÓSITO EN"
-    )
-
+    # Separa estrictamente los importes CLP con puntos de miles de las
+    # referencias (p. ej. 5297574, 5297569 o R).
+    monto_re = r"\d{1,3}(?:\.\d{3})+"
+    fila_re = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(" + monto_re + r")\s+(" + monto_re + r")\s*$")
+    fila_doble_re = re.compile(r"^(\d{2}-\d{2}-\d{4})\s+(.+?)\s+(" + monto_re + r")\s+(" + monto_re + r")\s+(" + monto_re + r")\s*$")
+    ref_re = re.compile(r"^(.*?)\s+(\d{4,}|R)$", re.I)
+    palabras_abono = ("ABONO", "DEPOSITO", "DEPÓSITO", "TRANSFERENCIA RECIBIDA", "PAGO RECIBIDO", "TRANSFERENCIA DE", "TRANSFER DE", "DEPOSITO EN", "DEPÓSITO EN", "REVERSA DE CARGO")
+    saldo_inicial_match = re.search(r"Saldo Anterior\s+(" + monto_re + r")", texto, re.I)
+    saldo_anterior = numero_cartola_clp(saldo_inicial_match.group(1)) if saldo_inicial_match else None
+    salida = []
     for linea in texto.splitlines():
         linea = re.sub(r"\s+", " ", linea.strip())
-        md = patron_doble.match(linea)
-        m = md or patron.match(linea)
-        if not m:
+        doble = fila_doble_re.match(linea)
+        simple = None if doble else fila_re.match(linea)
+        if not doble and not simple:
             continue
-
-        if md:
-            fecha_txt, cuerpo_con_ref, cargo_txt, abono_txt, saldo_txt = md.groups()
-            monto_txt = cargo_txt
+        if doble:
+            fecha, cuerpo, cargo_s, abono_s, saldo_s = doble.groups()
+            cargo = numero_cartola_clp(cargo_s)
+            abono = numero_cartola_clp(abono_s)
         else:
-            fecha_txt, cuerpo_con_ref, monto_txt, saldo_txt = m.groups()
-            cargo_txt = abono_txt = None
-        cuerpo_con_ref = cuerpo_con_ref.strip()
-        cuerpo_upper = cuerpo_con_ref.upper()
-        es_abono_desc = any(x in cuerpo_upper for x in palabras_abono)
-
-        # En cargos BCI suele existir N° documento al final del cuerpo.
-        # En abonos puede estar vacío: no debemos confundir el monto con documento.
+            fecha, cuerpo, importe_s, saldo_s = simple.groups()
+            importe = numero_cartola_clp(importe_s)
+            cargo = abono = 0.0
+        saldo = numero_cartola_clp(saldo_s)
+        # Referencia documental al final del texto, antes de los importes.
+        # La referencia no puede confundirse con un monto monetario.
         referencia = ""
-        cuerpo = cuerpo_con_ref
-        if not es_abono_desc:
-            mr = re.match(r"^(.*\D)\s+(\d{3,}|R)$", cuerpo_con_ref, re.I)
-            if mr:
-                cuerpo = mr.group(1).strip()
-                referencia = mr.group(2)
-
-        monto = numero_cartola_clp(monto_txt)
-        saldo = numero_cartola_clp(saldo_txt)
-
-        movimientos.append({
-            "fecha": fecha_iso(fecha_txt),
-            "descripcion": cuerpo,
-            "referencia": referencia,
-            "monto_detectado": abs(monto),
-            "cargo_explicito": numero_cartola_clp(cargo_txt) if cargo_txt is not None else None,
-            "abono_explicito": numero_cartola_clp(abono_txt) if abono_txt is not None else None,
-            "es_abono_desc": es_abono_desc,
-            "tipo_incierto": not es_abono_desc and not any(x in cuerpo_upper for x in ("CHEQUE COBRADO", "TRASPASO FONDOS", "TRANSFERENCIA A", "PAGO REALIZADO", "GIRO", "COMISION", "COMISIÓN", "CARGO")),
-            "saldo": saldo,
-        })
-
-    if not movimientos:
-        raise ValueError("Pude abrir el PDF, pero no reconocí movimientos bancarios. Puedes usar la carga manual o CSV/Excel.")
-
-    # Clasificación final. Primero manda la descripción. Como control para
-    # descripciones no conocidas, la variación del saldo confirma cargo/abono.
-    salida = []
-    saldo_anterior = None
-    for mov in movimientos:
-        monto = mov["monto_detectado"]
-        es_abono = mov["es_abono_desc"]
-        if saldo_anterior is not None:
-            delta = clp_round(mov["saldo"] - saldo_anterior)
-            if abs(abs(delta) - monto) <= 1:
-                es_abono = delta > 0
-        cargo_final = mov["cargo_explicito"] if mov["cargo_explicito"] is not None else (0.0 if es_abono else monto)
-        abono_final = mov["abono_explicito"] if mov["abono_explicito"] is not None else (monto if es_abono else 0.0)
-        salida.append({
-            "fecha": mov["fecha"],
-            "descripcion": mov["descripcion"],
-            "referencia": mov["referencia"],
-            "cargo": cargo_final,
-            "abono": abono_final,
-            "saldo": mov["saldo"],
-            "revision": "CARGO Y ABONO: REVISAR" if cargo_final > 0 and abono_final > 0 else ("REVISAR SIGNO" if saldo_anterior is None and mov["tipo_incierto"] else ""),
-        })
-        saldo_anterior = mov["saldo"]
-
+        mref = ref_re.match(cuerpo.strip())
+        if mref:
+            cuerpo, referencia = mref.group(1).strip(), mref.group(2)
+        descripcion = cuerpo.strip()
+        if simple:
+            delta = None if saldo_anterior is None else round(saldo - saldo_anterior)
+            if delta is not None and abs(abs(delta) - importe) <= 1:
+                abono = importe if delta > 0 else 0.0
+                cargo = importe if delta < 0 else 0.0
+            elif any(pal in descripcion.upper() for pal in palabras_abono):
+                abono = importe
+            else:
+                cargo = importe
+        revision = "CARGO Y ABONO: REVISAR" if cargo and abono else ""
+        if saldo_anterior is not None and abs((saldo_anterior - cargo + abono) - saldo) > 1:
+            raise ValueError("La cartola no cuadra en el movimiento '" + descripcion + "'. No se importará: revisa la lectura del PDF.")
+        salida.append({"fecha": fecha_iso(fecha), "descripcion": descripcion,
+                       "referencia": referencia, "cargo": cargo, "abono": abono,
+                       "saldo": saldo, "revision": revision})
+        saldo_anterior = saldo
+    if not salida:
+        raise ValueError("No se reconocieron movimientos bancarios en el PDF.")
     return pd.DataFrame(salida)
 
 
