@@ -4401,6 +4401,39 @@ def historial_archivos(conn, modulo, limite=50):
         FROM importaciones_archivos WHERE modulo=? ORDER BY id DESC LIMIT ?""", conn, params=(modulo,int(limite)))
 
 
+def resumen_rcv_historico(conn, tipo):
+    """Resumen de documentos existentes; no reconstruye archivos ni altera asientos."""
+    tabla = "compras" if tipo == "compras" else "ventas"
+    return pd.read_sql_query(f"""
+        SELECT substr(fecha,1,7) AS periodo,
+               COUNT(*) AS documentos,
+               COUNT(DISTINCT lote_id) AS lotes_identificados
+        FROM {tabla}
+        WHERE fecha IS NOT NULL AND length(fecha) >= 7
+        GROUP BY substr(fecha,1,7)
+        ORDER BY periodo DESC
+    """, conn)
+
+
+def mostrar_historial_rcv_completo(conn, tipo):
+    """Muestra tanto importaciones auditadas como documentos anteriores al registro de archivos."""
+    modulo = "RCV_COMPRAS" if tipo == "compras" else "RCV_VENTAS"
+    historico = resumen_rcv_historico(conn, tipo)
+    st.markdown("**Documentos registrados por período**")
+    st.caption("Períodos según fecha del documento. Incluye registros antiguos, pero no permite recuperar el nombre ni la fecha de carga de archivos no registrados.")
+    if historico.empty:
+        st.caption("No hay documentos registrados para mostrar.")
+    else:
+        st.dataframe(historico.rename(columns={"periodo":"Período", "documentos":"Documentos registrados", "lotes_identificados":"Lotes identificados"}), use_container_width=True, hide_index=True)
+    st.markdown("**Archivos importados con trazabilidad**")
+    hist = historial_archivos(conn, modulo)
+    if hist.empty:
+        st.caption("No existen archivos registrados en el historial de importaciones.")
+    else:
+        st.dataframe(hist.rename(columns={"archivo":"Archivo", "fecha_importacion":"Fecha importación", "lote":"Lote", "leidos":"Leídos", "nuevos":"Nuevos", "duplicados":"Duplicados"}), use_container_width=True, hide_index=True)
+    st.info("Control de duplicados: se comprueba RUT + tipo de documento + folio contra los documentos ya registrados y contra el archivo cargado. Solo los documentos nuevos y válidos pueden contabilizarse.")
+
+
 def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
     """Importa movimientos tabulares evitando duplicados."""
     df = normalizar_columnas(df)
@@ -9957,12 +9990,8 @@ elif menu == "📥 RCV Compras":
                     st.error(f"No se pudo regularizar el IVA histórico: {e}")
 
     st.divider()
-    st.subheader("Historial de archivos RCV Compras")
-    hist_rcv_c=historial_archivos(conn,"RCV_COMPRAS")
-    if hist_rcv_c.empty:
-        st.caption("Aún no hay archivos registrados con el nuevo control de duplicados.")
-    else:
-        st.dataframe(hist_rcv_c.rename(columns={"archivo":"Archivo","fecha_importacion":"Fecha importación","lote":"Lote","leidos":"Leídos","nuevos":"Nuevos","duplicados":"Duplicados"}),use_container_width=True,hide_index=True)
+    st.subheader("Historial RCV Compras")
+    mostrar_historial_rcv_completo(conn, "compras")
 
 
 # ============================================================
@@ -10091,12 +10120,8 @@ elif menu == "📤 RCV Ventas":
                     st.error(f"No se contabilizó el lote: {e}")
 
     st.divider()
-    st.subheader("Historial de archivos RCV Ventas")
-    hist_rcv_v=historial_archivos(conn,"RCV_VENTAS")
-    if hist_rcv_v.empty:
-        st.caption("Aún no hay archivos registrados con el nuevo control de duplicados.")
-    else:
-        st.dataframe(hist_rcv_v.rename(columns={"archivo":"Archivo","fecha_importacion":"Fecha importación","lote":"Lote","leidos":"Leídos","nuevos":"Nuevos","duplicados":"Duplicados"}),use_container_width=True,hide_index=True)
+    st.subheader("Historial RCV Ventas")
+    mostrar_historial_rcv_completo(conn, "ventas")
 
 
 # ============================================================
