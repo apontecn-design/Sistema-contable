@@ -8000,26 +8000,80 @@ def oc_crear_tablas(conn):
     conn.commit()
 
 def oc_pdf(conn, oc_id):
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet
+    """OC corporativa: reutiliza el perfil y logotipo ya configurados en SGCI."""
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, KeepTogether
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_RIGHT, TA_CENTER
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
     from xml.sax.saxutils import escape
-    oc=conn.execute("SELECT o.*,p.rut,p.nombre,p.razon_social FROM ordenes_compra o JOIN proveedores p ON p.id=o.proveedor_id WHERE o.id=?",(oc_id,)).fetchone()
-    detalle=conn.execute("SELECT * FROM ordenes_compra_detalle WHERE oc_id=? ORDER BY id",(oc_id,)).fetchall()
-    buf=io.BytesIO(); doc=SimpleDocTemplate(buf,pagesize=A4)
-    styles=getSampleStyleSheet()
+    oc=conn.execute("""SELECT o.*,p.rut,p.nombre,p.razon_social,p.direccion,p.comuna,p.ciudad,
+        p.email,p.telefono FROM ordenes_compra o JOIN proveedores p ON p.id=o.proveedor_id
+        WHERE o.id=?""",(oc_id,)).fetchone()
+    if oc is None: raise ValueError('Orden de compra no encontrada.')
+    detalle=conn.execute('SELECT * FROM ordenes_compra_detalle WHERE oc_id=? ORDER BY id',(oc_id,)).fetchall()
+    perfil=sgci_perfil(conn)
+    if not perfil.get('razon_social'):
+        emp=conn.execute('SELECT * FROM empresa ORDER BY id LIMIT 1').fetchone()
+        if emp: perfil={**dict(emp),**{k:v for k,v in perfil.items() if v}}
     e=lambda x:escape(str(x or ''))
-    story=[Paragraph('ORDEN DE COMPRA '+e(oc['numero']),styles['Title']),Spacer(1,12),
-      Paragraph('Fecha: '+e(oc['fecha'])+' | Estado: '+e(oc['estado']),styles['Normal']),
-      Paragraph('Proveedor: '+e(oc['razon_social'] or oc['nombre'])+' | RUT: '+e(oc['rut']),styles['Normal']),
-      Paragraph('Condición de pago: '+e(oc['condicion_pago']),styles['Normal']),Spacer(1,12)]
-    rows=[['Descripción','Cantidad','Precio neto','Neto']]
-    for d in detalle: rows.append([Paragraph(e(d['descripcion']),styles['Normal']),str(d['cantidad']),money(d['precio_unitario']),money(d['neto'])])
-    t=Table(rows,colWidths=[245,65,90,90],repeatRows=1)
-    t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#E5EEE7')),('GRID',(0,0),(-1,-1),.3,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP')]))
-    story.extend([t,Spacer(1,12),Paragraph('Neto: '+money(oc['neto'])+' | IVA: '+money(oc['iva'])+' | Total: '+money(oc['total']),styles['Heading3']),Paragraph('Observaciones: '+e(oc['observaciones']),styles['Normal'])])
-    doc.build(story);return buf.getvalue()
+    navy=colors.HexColor('#23618C'); gray=colors.HexColor('#F0F4F6')
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='OCtitle',parent=styles['Title'],fontSize=17,leading=21,textColor=navy,spaceAfter=12))
+    styles.add(ParagraphStyle(name='OCsmall',parent=styles['Normal'],fontSize=8.5,leading=12))
+    styles.add(ParagraphStyle(name='OChead',parent=styles['Normal'],fontSize=8,leading=11,textColor=colors.white,fontName='Helvetica-Bold'))
+    styles.add(ParagraphStyle(name='OCright',parent=styles['Normal'],fontSize=9,leading=13,alignment=TA_RIGHT))
+    buf=io.BytesIO()
+    doc=SimpleDocTemplate(buf,pagesize=A4,topMargin=39*mm,bottomMargin=23*mm,leftMargin=18*mm,rightMargin=18*mm)
+    width=A4[0]-36*mm
+    story=[Paragraph('ORDEN DE COMPRA',styles['OCtitle'])]
+    def cell(label,value):return Paragraph('<b>'+e(label)+'</b> '+e(value),styles['OCsmall'])
+    meta=Table([[cell('N.º OC:',oc['numero']),cell('Fecha:',oc['fecha'])],
+                [cell('Estado:',oc['estado']),cell('Condición de pago:',oc['condicion_pago'])]],colWidths=[width*.48,width*.52])
+    meta.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),gray),('BOX',(0,0),(-1,-1),.5,colors.HexColor('#CED9DF')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8)]))
+    story.extend([meta,Spacer(1,15),Paragraph('<b>DATOS DEL PROVEEDOR</b>',styles['Heading3'])])
+    prov=[cell('Razón social:',oc['razon_social'] or oc['nombre']),cell('RUT:',oc['rut']),
+          cell('Dirección:',', '.join(filter(None,[oc['direccion'],oc['comuna'],oc['ciudad']]))),
+          cell('Contacto:',' | '.join(filter(None,[oc['email'],oc['telefono']]))) ]
+    story.extend(prov+[Spacer(1,15)])
+    rows=[[Paragraph(h,styles['OChead']) for h in ('CANT.','DESCRIPCIÓN','PRECIO UNIT.','TOTAL NETO')]]
+    for d in detalle:
+        rows.append([Paragraph(e(f"{d['cantidad']:g}"),styles['OCsmall']),Paragraph(e(d['descripcion'])+(' (Exento)' if not d['afecto_iva'] else ''),styles['OCsmall']),Paragraph(e(money(d['precio_unitario'])),styles['OCsmall']),Paragraph(e(money(d['neto'])),styles['OCsmall'])])
+    tab=Table(rows,colWidths=[width*.12,width*.48,width*.20,width*.20],repeatRows=1,hAlign='LEFT')
+    tab.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),navy),('GRID',(0,0),(-1,-1),.35,colors.HexColor('#CBD5DA')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8)]))
+    story.extend([tab,Spacer(1,12)])
+    totals=Table([[Paragraph('Subtotal neto',styles['OCright']),Paragraph(money(oc['neto']),styles['OCright'])],
+                  [Paragraph('IVA',styles['OCright']),Paragraph(money(oc['iva']),styles['OCright'])],
+                  [Paragraph('<b>TOTAL</b>',styles['OCright']),Paragraph('<b>'+money(oc['total'])+'</b>',styles['OCright'])]],colWidths=[width*.77,width*.23],hAlign='RIGHT')
+    totals.setStyle(TableStyle([('LINEABOVE',(0,2),(-1,2),1,navy),('BACKGROUND',(0,2),(-1,2),gray),('BOTTOMPADDING',(0,0),(-1,-1),7)]))
+    story.extend([totals,Spacer(1,15),Paragraph('<b>OBSERVACIONES Y CONDICIONES</b>',styles['Heading3']),Paragraph(e(oc['observaciones']) or 'Sin observaciones adicionales.',styles['OCsmall']),Spacer(1,35)])
+    sign=Table([['________________________________','________________________________'],['Autorizado por','Fecha / Firma']],colWidths=[width/2,width/2])
+    sign.setStyle(TableStyle([('ALIGN',(0,0),(-1,-1),'CENTER'),('FONTSIZE',(0,0),(-1,-1),8),('TEXTCOLOR',(0,0),(-1,-1),colors.HexColor('#59636A'))]))
+    story.append(sign)
+    def header(canvas,doc):
+        from reportlab.lib.utils import ImageReader
+        from PIL import Image as PILImage
+        canvas.saveState()
+        x=doc.leftMargin; y=A4[1]-15*mm
+        logo=perfil.get('logo')
+        if logo:
+            try:
+                pic=PILImage.open(io.BytesIO(logo))
+                canvas.drawImage(ImageReader(pic),x,y-16*mm,width=26*mm,height=16*mm,preserveAspectRatio=True,anchor='c',mask='auto')
+                x+=30*mm
+            except Exception:pass
+        canvas.setFillColor(navy);canvas.setFont('Helvetica-Bold',11)
+        canvas.drawString(x,y,e(perfil.get('razon_social') or 'Empresa sin configurar')[:65])
+        canvas.setFillColor(colors.HexColor('#485760'));canvas.setFont('Helvetica',7.5)
+        canvas.drawString(x,y-10,('RUT: '+str(perfil.get('rut') or '')+'  |  '+str(perfil.get('giro') or ''))[:105])
+        canvas.drawString(x,y-20,', '.join(filter(None,[perfil.get('direccion'),perfil.get('comuna'),perfil.get('ciudad')]))[:105])
+        canvas.drawString(x,y-30,' | '.join(filter(None,[perfil.get('telefono'),perfil.get('correo')]))[:105])
+        canvas.setStrokeColor(navy);canvas.line(doc.leftMargin,A4[1]-34*mm,A4[0]-doc.rightMargin,A4[1]-34*mm)
+        canvas.setFont('Helvetica',7);canvas.drawRightString(A4[0]-doc.rightMargin,10*mm,f'Página {doc.page}')
+        canvas.restoreState()
+    doc.build(story,onFirstPage=header,onLaterPages=header)
+    return buf.getvalue()
 
 def oc_pantalla(conn):
     st.title('🧾 Órdenes de compra')
