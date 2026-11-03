@@ -7974,12 +7974,158 @@ def sgci_pantalla_empresa(conn):
         st.success('Datos de empresa guardados. Se aplicarán a los nuevos PDF generados.')
 
 # ============================================================
+# ORDENES DE COMPRA - modulo aislado, sin asientos contables
+# ============================================================
+def oc_crear_tablas(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS ordenes_compra (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, numero TEXT UNIQUE,
+      proveedor_id INTEGER NOT NULL REFERENCES proveedores(id), fecha TEXT NOT NULL,
+      condicion_pago TEXT, observaciones TEXT, estado TEXT NOT NULL DEFAULT 'BORRADOR',
+      neto INTEGER NOT NULL DEFAULT 0, iva INTEGER NOT NULL DEFAULT 0,
+      total INTEGER NOT NULL DEFAULT 0, creado_en TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS ordenes_compra_detalle (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, oc_id INTEGER NOT NULL REFERENCES ordenes_compra(id),
+      descripcion TEXT NOT NULL, cantidad REAL NOT NULL, precio_unitario REAL NOT NULL,
+      afecto_iva INTEGER NOT NULL DEFAULT 1, neto INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS ordenes_compra_facturas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      oc_id INTEGER NOT NULL REFERENCES ordenes_compra(id),
+      compra_id INTEGER NOT NULL REFERENCES compras(id),
+      monto_asociado INTEGER NOT NULL CHECK(monto_asociado > 0),
+      creado_en TEXT NOT NULL, UNIQUE(oc_id, compra_id));
+    CREATE INDEX IF NOT EXISTS idx_oc_proveedor ON ordenes_compra(proveedor_id);
+    CREATE INDEX IF NOT EXISTS idx_oc_factura ON ordenes_compra_facturas(compra_id);
+    """)
+    conn.commit()
+
+def oc_pdf(conn, oc_id):
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from xml.sax.saxutils import escape
+    oc=conn.execute("SELECT o.*,p.rut,p.nombre,p.razon_social FROM ordenes_compra o JOIN proveedores p ON p.id=o.proveedor_id WHERE o.id=?",(oc_id,)).fetchone()
+    detalle=conn.execute("SELECT * FROM ordenes_compra_detalle WHERE oc_id=? ORDER BY id",(oc_id,)).fetchall()
+    buf=io.BytesIO(); doc=SimpleDocTemplate(buf,pagesize=A4)
+    styles=getSampleStyleSheet()
+    e=lambda x:escape(str(x or ''))
+    story=[Paragraph('ORDEN DE COMPRA '+e(oc['numero']),styles['Title']),Spacer(1,12),
+      Paragraph('Fecha: '+e(oc['fecha'])+' | Estado: '+e(oc['estado']),styles['Normal']),
+      Paragraph('Proveedor: '+e(oc['razon_social'] or oc['nombre'])+' | RUT: '+e(oc['rut']),styles['Normal']),
+      Paragraph('Condición de pago: '+e(oc['condicion_pago']),styles['Normal']),Spacer(1,12)]
+    rows=[['Descripción','Cantidad','Precio neto','Neto']]
+    for d in detalle: rows.append([Paragraph(e(d['descripcion']),styles['Normal']),str(d['cantidad']),money(d['precio_unitario']),money(d['neto'])])
+    t=Table(rows,colWidths=[245,65,90,90],repeatRows=1)
+    t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#E5EEE7')),('GRID',(0,0),(-1,-1),.3,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP')]))
+    story.extend([t,Spacer(1,12),Paragraph('Neto: '+money(oc['neto'])+' | IVA: '+money(oc['iva'])+' | Total: '+money(oc['total']),styles['Heading3']),Paragraph('Observaciones: '+e(oc['observaciones']),styles['Normal'])])
+    doc.build(story);return buf.getvalue()
+
+def oc_pantalla(conn):
+    st.title('🧾 Órdenes de compra')
+    t_crear,t_listar,t_asociar=st.tabs(['➕ Crear OC','📋 Administrar OC','🔗 Asociar facturas RCV'])
+    proveedores=conn.execute("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre,rut) nombre FROM proveedores WHERE COALESCE(activo,1)=1 ORDER BY nombre").fetchall()
+    opciones={f"{p['nombre']} ({p['rut']})":p['id'] for p in proveedores}
+    with t_crear:
+        if not opciones: st.warning('Primero registra un proveedor en Compras → Proveedores.')
+        else:
+            with st.form('oc_nueva',clear_on_submit=True):
+                proveedor=st.selectbox('Proveedor',list(opciones))
+                fecha=st.date_input('Fecha de emisión',value=date.today())
+                condicion=st.selectbox('Condición de pago',['Crédito 30 días','Contado','Crédito 15 días','Crédito 60 días','Otra'])
+                observaciones=st.text_area('Observaciones')
+                st.caption('Ingresa precios netos. Cada línea puede ser afecta o exenta de IVA.')
+                lineas=st.data_editor(pd.DataFrame([{'Descripción':'','Cantidad':1.0,'Precio neto':0.0,'Afecto IVA':True}]),num_rows='dynamic',hide_index=True,use_container_width=True,key='oc_lineas')
+                guardar=st.form_submit_button('Guardar borrador de OC',type='primary')
+            if guardar:
+                detalles=[]
+                for _,r in lineas.iterrows():
+                    desc=str(r.get('Descripción') or '').strip()
+                    if not desc: continue
+                    try: cantidad=float(r['Cantidad']); precio=float(r['Precio neto'])
+                    except (ValueError,TypeError): cantidad=0;precio=-1
+                    if cantidad<=0 or precio<0: st.error('Cada línea debe tener cantidad positiva y precio no negativo.');st.stop()
+                    neto=clp_round(cantidad*precio)
+                    detalles.append((desc,cantidad,precio,int(bool(r['Afecto IVA'])),neto))
+                if not detalles: st.error('Agrega al menos una línea con descripción.')
+                else:
+                    neto=sum(d[4] for d in detalles)
+                    iva=sum(clp_round(d[4]*0.19) for d in detalles if d[3])
+                    try:
+                        with conn:
+                            cur=conn.execute('INSERT INTO ordenes_compra(proveedor_id,fecha,condicion_pago,observaciones,neto,iva,total,creado_en) VALUES(?,?,?,?,?,?,?,?)',(opciones[proveedor],fecha.isoformat(),condicion,observaciones,neto,iva,neto+iva,datetime.now().isoformat(timespec='seconds')))
+                            oc_id=cur.lastrowid; numero=f'OC-{oc_id:06d}'
+                            conn.execute('UPDATE ordenes_compra SET numero=? WHERE id=?',(numero,oc_id))
+                            conn.executemany('INSERT INTO ordenes_compra_detalle(oc_id,descripcion,cantidad,precio_unitario,afecto_iva,neto) VALUES(?,?,?,?,?,?)',[(oc_id,*d) for d in detalles])
+                        st.success(f'{numero} guardada. Total: {money(neto+iva)}. No se generó asiento contable.')
+                    except sqlite3.Error as ex: st.error(f'No se pudo guardar la OC: {ex}')
+    with t_listar:
+        filas=conn.execute("""SELECT o.*,COALESCE(NULLIF(p.razon_social,''),p.nombre,p.rut) proveedor,
+          COALESCE((SELECT SUM(monto_asociado) FROM ordenes_compra_facturas a WHERE a.oc_id=o.id),0) facturado
+          FROM ordenes_compra o JOIN proveedores p ON p.id=o.proveedor_id ORDER BY o.id DESC""").fetchall()
+        if not filas: st.info('No hay órdenes de compra todavía.')
+        else:
+            st.dataframe(pd.DataFrame([{'OC':r['numero'],'Fecha':r['fecha'],'Proveedor':r['proveedor'],'Estado':r['estado'],'Total':r['total'],'Facturado':r['facturado'],'Pendiente':r['total']-r['facturado']} for r in filas]),hide_index=True,use_container_width=True)
+            seleccion=st.selectbox('Selecciona OC',range(len(filas)),format_func=lambda i:f"{filas[i]['numero']} · {filas[i]['proveedor']}",key='oc_admin_sel')
+            oc=filas[seleccion]
+            st.dataframe(pd.read_sql_query('SELECT descripcion,cantidad,precio_unitario,afecto_iva,neto FROM ordenes_compra_detalle WHERE oc_id=?',conn,params=(oc['id'],)),hide_index=True,use_container_width=True)
+            estados=['BORRADOR','EMITIDA','ANULADA']
+            estado=st.selectbox('Estado administrativo',estados,index=estados.index(oc['estado']) if oc['estado'] in estados else 0)
+            if st.button('Actualizar estado',key='oc_estado'):
+                if oc['facturado'] and estado=='ANULADA': st.error('No se puede anular una OC con facturas asociadas.')
+                else:
+                    with conn:conn.execute('UPDATE ordenes_compra SET estado=? WHERE id=?',(estado,oc['id']))
+                    st.success('Estado actualizado.');st.rerun()
+            try:
+                st.download_button('📄 Descargar OC en PDF',oc_pdf(conn,oc['id']),file_name=oc['numero']+'.pdf',mime='application/pdf')
+            except ImportError:st.warning('Para generar PDF instala reportlab en requirements.txt.')
+    with t_asociar:
+        st.caption('La asociación es administrativa: no crea ni modifica asientos, pagos ni documentos del RCV.')
+        ordenes=conn.execute("SELECT o.id,o.numero,o.proveedor_id,o.total,o.estado,p.rut FROM ordenes_compra o JOIN proveedores p ON p.id=o.proveedor_id WHERE o.estado!='ANULADA' ORDER BY o.id DESC").fetchall()
+        if not ordenes: st.info('Primero crea una OC.')
+        else:
+            elegido=st.selectbox('Orden de compra',range(len(ordenes)),format_func=lambda i:ordenes[i]['numero'],key='oc_asoc_sel')
+            oc=ordenes[elegido]
+            asignado=conn.execute('SELECT COALESCE(SUM(monto_asociado),0) FROM ordenes_compra_facturas WHERE oc_id=?',(oc['id'],)).fetchone()[0]
+            st.metric('Saldo OC por asociar',money(oc['total']-asignado))
+            facturas=conn.execute("""SELECT c.id,c.fecha,c.tipo_doc,c.folio,c.monto_total,
+              COALESCE((SELECT SUM(a.monto_asociado) FROM ordenes_compra_facturas a WHERE a.compra_id=c.id),0) asociado
+              FROM compras c WHERE c.proveedor_id=? AND COALESCE(c.monto_total,0)>0 AND COALESCE(c.tipo_doc,33) NOT IN (60,61)
+              ORDER BY c.fecha DESC,c.id DESC""",(oc['proveedor_id'],)).fetchall()
+            candidatas=[f for f in facturas if f['monto_total']-f['asociado']>0 and not conn.execute('SELECT 1 FROM ordenes_compra_facturas WHERE oc_id=? AND compra_id=?',(oc['id'],f['id'])).fetchone()]
+            if not candidatas:st.info('No hay facturas disponibles de este proveedor para asociar.')
+            else:
+                ix=st.selectbox('Factura importada / registrada',range(len(candidatas)),format_func=lambda i:f"{candidatas[i]['fecha']} · Tipo {candidatas[i]['tipo_doc']} · Folio {candidatas[i]['folio']} · Disponible {money(candidatas[i]['monto_total']-candidatas[i]['asociado'])}",key='oc_fact_sel')
+                factura=candidatas[ix]
+                maximo=max(0,min(clp_round(oc['total']-asignado),clp_round(factura['monto_total']-factura['asociado'])))
+                if maximo:
+                    monto=st.number_input('Monto a asociar (CLP, IVA incluido)',min_value=1,max_value=maximo,value=maximo,step=1,key='oc_monto_asoc')
+                    if st.button('🔗 Asociar factura',type='primary'):
+                        try:
+                            with conn:
+                                saldo_oc=conn.execute('SELECT total-COALESCE((SELECT SUM(monto_asociado) FROM ordenes_compra_facturas WHERE oc_id=?),0) FROM ordenes_compra WHERE id=?',(oc['id'],oc['id'])).fetchone()[0]
+                                saldo_fac=conn.execute('SELECT monto_total-COALESCE((SELECT SUM(monto_asociado) FROM ordenes_compra_facturas WHERE compra_id=?),0) FROM compras WHERE id=? AND proveedor_id=?',(factura['id'],factura['id'],oc['proveedor_id'])).fetchone()
+                                if not saldo_fac or monto>min(saldo_oc,saldo_fac[0]):raise ValueError('Saldo insuficiente o proveedor distinto.')
+                                conn.execute('INSERT INTO ordenes_compra_facturas(oc_id,compra_id,monto_asociado,creado_en) VALUES(?,?,?,?)',(oc['id'],factura['id'],monto,datetime.now().isoformat(timespec='seconds')))
+                            st.success('Factura asociada sin generar asiento contable.');st.rerun()
+                        except (sqlite3.Error,ValueError) as ex:st.error(str(ex))
+            links=conn.execute('SELECT a.id,c.fecha,c.folio,a.monto_asociado FROM ordenes_compra_facturas a JOIN compras c ON c.id=a.compra_id WHERE a.oc_id=?',(oc['id'],)).fetchall()
+            if links:
+                st.subheader('Facturas asociadas')
+                st.dataframe(pd.DataFrame([dict(x) for x in links]),hide_index=True,use_container_width=True)
+                borrar=st.selectbox('Desvincular asociación',range(len(links)),format_func=lambda i:f"Folio {links[i]['folio']} · {money(links[i]['monto_asociado'])}")
+                if st.button('Desvincular factura'):
+                    with conn:conn.execute('DELETE FROM ordenes_compra_facturas WHERE id=?',(links[borrar]['id'],))
+                    st.success('Asociación eliminada; factura y contabilidad intactas.');st.rerun()
+
+# ============================================================
 # INICIALIZACIÓN
 # ============================================================
 
 conn = conectar()
 
 crear_esquema(conn)
+oc_crear_tablas(conn)
 sgci_crear_seguridad(conn)
 dte_crear_tablas(conn)
 sgci_empresa_esquema(conn)
@@ -8032,10 +8178,11 @@ elif modulo_principal == "💰 Ventas/clientes":
     elif sub == "Antigüedad de saldos": menu = "📌 Cuentas por Cobrar/Pagar"; nav_context = "clientes"
     else: menu = "📊 Conciliación"; nav_context = "clientes"
 elif modulo_principal == "💳 Compras/proveedores":
-    sub = st.selectbox("Sección de Cuentas por Pagar", ["Proveedores y estados de cuenta", "Pagos de proveedores", "RCV Compras", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxp")
+    sub = st.selectbox("Sección de Cuentas por Pagar", ["Proveedores y estados de cuenta", "Pagos de proveedores", "RCV Compras", "Órdenes de compra", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxp")
     if sub == "Proveedores y estados de cuenta": menu = "🏢 Proveedores"
     elif sub == "Pagos de proveedores": menu = "💵 Pagos"; nav_context = "proveedores"
     elif sub == "RCV Compras": menu = "📥 RCV Compras"
+    elif sub == "Órdenes de compra": menu = "🧾 Órdenes de compra"
     elif sub == "Antigüedad de saldos": menu = "📌 Cuentas por Cobrar/Pagar"; nav_context = "proveedores"
     else: menu = "📊 Conciliación"; nav_context = "proveedores"
 elif modulo_principal == "🧾 Facturación y DTE":
@@ -9645,6 +9792,9 @@ elif menu == "📌 Cuentas por Cobrar/Pagar":
 # ============================================================
 # RCV COMPRAS
 # ============================================================
+
+elif menu == "🧾 Órdenes de compra":
+    oc_pantalla(conn)
 
 elif menu == "📥 RCV Compras":
 
