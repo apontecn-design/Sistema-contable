@@ -51,6 +51,37 @@ class TestMenuPermisos(unittest.TestCase):
             ('Ventas','cxc','Clientes y estados de cuenta','ver',0)""")
         self.assertFalse(usuarios.sgci_puede(self.db, "cxc", "ver"))
 
+    def test_mutation_requires_explicit_submodule_permission(self):
+        self.db.execute("""INSERT INTO sgci_permisos VALUES
+            ('test@example.com','cxc','editar',1)""")
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxc','Clientes y estados de cuenta','editar',0)""")
+        with self.assertRaises(PermissionError):
+            usuarios.sgci_autorizar_operacion(
+                self.db, 'cxc', 'editar', 'Clientes y estados de cuenta'
+            )
+
+    def test_mutation_with_specific_permission(self):
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxc','Clientes y estados de cuenta','editar',1)""")
+        self.assertIsNone(usuarios.sgci_autorizar_operacion(
+            self.db, 'cxc', 'editar', 'Clientes y estados de cuenta'
+        ))
+
+    def test_mutation_denial_override(self):
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxc','Clientes y estados de cuenta','editar',1)""")
+        self.db.execute("""INSERT INTO sgci_usuario_permisos_detalle VALUES
+            ('test@example.com','cxc','Clientes y estados de cuenta','editar',0)""")
+        with self.assertRaises(PermissionError):
+            usuarios.sgci_autorizar_operacion(
+                self.db, 'cxc', 'editar', 'Clientes y estados de cuenta'
+            )
+
+    def test_unknown_submodule_is_denied(self):
+        with self.assertRaises(PermissionError):
+            usuarios.sgci_autorizar_operacion(self.db, 'cxc', 'editar', 'Inexistente')
+
     def test_inactive_user_denied(self):
         self.db.execute("UPDATE sgci_usuarios SET activo=0")
         self.assertFalse(usuarios.sgci_puede(self.db, "cxc", "ver"))
