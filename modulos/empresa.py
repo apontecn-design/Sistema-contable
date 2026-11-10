@@ -19,7 +19,17 @@ def sgci_membrete_pdf(canvas, doc):
     from reportlab.lib import colors
     from reportlab.lib.units import mm
     from reportlab.pdfbase.pdfmetrics import stringWidth
-    perfil=sgci_perfil(conn)
+    # El callback ReportLab se ejecuta al construir el PDF, fuera del
+    # alcance de la conexión de la pantalla. Leer el perfil desde SQLite
+    # sin escribir ni depender de un 'conn' global inexistente.
+    perfil = {}
+    try:
+        with sqlite3.connect('file:' + os.path.abspath(DB_FILE) + '?mode=ro', uri=True) as pdf_conn:
+            pdf_conn.row_factory = sqlite3.Row
+            fila = pdf_conn.execute('SELECT * FROM sgci_perfil_empresa WHERE id=1').fetchone()
+            perfil = dict(fila) if fila else {}
+    except (sqlite3.Error, OSError):
+        pass
     w,h=doc.pagesize
     x=doc.leftMargin
     y=h-11*mm
