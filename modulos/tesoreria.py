@@ -1,4 +1,6 @@
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
+from datetime import datetime
+
 def tes_crear_tablas(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS tes_solicitudes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
