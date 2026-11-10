@@ -23,3 +23,19 @@ jobs:
         run: |
           python -c "import sqlite3,os; sqlite3.connect(os.environ['CONTEM_TEST_DB']).close()"
           python -m unittest discover -s tests -v
+
+      - name: Comprobar arranque de Streamlit sin credenciales
+        env:
+          SGCI_DATA_DIR: ${{ runner.temp }}/contem_login_smoke
+          SGCI_LAB_MODE: '0'
+          SUPABASE_URL: ''
+          SGCI_PASSWORD_HASH: ''
+        run: |
+          python - <<'PY'
+          from streamlit.testing.v1 import AppTest
+          at = AppTest.from_file('app.py', default_timeout=30).run()
+          errores = [str(e.message) for e in at.exception]
+          assert not errores, 'Error de inicio de Streamlit: ' + repr(errores)
+          assert not at.session_state.get('authenticated', False), 'Acceso sin autenticación'
+          print('Arranque Streamlit sin sesión: correcto')
+          PY
