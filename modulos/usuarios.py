@@ -156,8 +156,10 @@ def sgci_autorizar_operacion(conn, modulo, accion, submodulo=None):
         raise PermissionError(f'Acceso denegado: {modulo} / {accion}. Contacta al administrador.')
 
 
-def sgci_exigir_permiso(conn, modulo, accion='ver'):
-    if not sgci_puede(conn, modulo, accion):
+def sgci_exigir_permiso(conn, modulo, accion='ver', submodulo=None):
+    permitido = (sgci_puede_submodulo(conn, modulo, submodulo, accion)
+                 if submodulo is not None else sgci_puede(conn, modulo, accion))
+    if not permitido:
         st.error('No tienes autorización para esta operación. Contacta al administrador.')
         st.stop()
 
