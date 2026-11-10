@@ -139,8 +139,19 @@ def sgci_puede(conn, modulo, accion='ver'):
     return bool(permiso and permiso['permitido'])
 
 
-def sgci_autorizar_operacion(conn, modulo, accion):
-    """Control de autorización ejecutado en el servidor antes de mutar datos."""
+def sgci_autorizar_operacion(conn, modulo, accion, submodulo=None):
+    """Control del servidor; las operaciones nuevas deben indicar submódulo.
+
+    Sin submódulo se conserva temporalmente la API histórica. Cuando se
+    proporciona, se exige el permiso específico y se respetan las excepciones.
+    La autorización por registro (p. ej. RR. HH.) se comprueba por separado.
+    """
+    if submodulo is not None:
+        if not sgci_puede_submodulo(conn, modulo, submodulo, accion):
+            raise PermissionError(
+                f'Acceso denegado: {modulo} / {submodulo} / {accion}.'
+            )
+        return
     if not sgci_puede(conn, modulo, accion):
         raise PermissionError(f'Acceso denegado: {modulo} / {accion}. Contacta al administrador.')
 
