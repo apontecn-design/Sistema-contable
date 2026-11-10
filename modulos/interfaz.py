@@ -1106,7 +1106,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     confirmar_protesto=st.checkbox('Confirmo que este cheque fue protestado y que no existe pago contabilizado asociado.',key=f'protesto_ok_{movimiento_id}')
                     if st.button('Conciliar grupo de cheque protestado (sin contabilizar)',
                                  disabled=not confirmar_protesto,key=f'protesto_btn_{movimiento_id}'):
-                                     sgci_exigir_permiso(conn, 'banco', 'conciliar', 'Conciliación bancaria')
+                        sgci_exigir_permiso(conn, 'banco', 'conciliar', 'Conciliación bancaria')
                         try:
                             ids=sgci_conciliar_cheque_protestado(conn,movimiento_id)
                             sgci_exito(f'Grupo {ids} conciliado sin generar pagos ni asientos.')
@@ -1149,7 +1149,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                                   key=f"sgci_confirma_signo_{movimiento_id}")
                     if st.button("Guardar corrección de signo", key=f"sgci_guardar_signo_{movimiento_id}",
                                  disabled=not confirmar_signo or tipo_nuevo == actual_tipo):
-                                     sgci_exigir_permiso(conn, 'banco', 'editar', 'Bancos y cartolas')
+                        sgci_exigir_permiso(conn, 'banco', 'editar', 'Bancos y cartolas')
                         try:
                             sgci_corregir_signo_cartola_pendiente(conn, movimiento_id, tipo_nuevo)
                             sgci_exito(f"Movimiento #{movimiento_id} corregido a {tipo_nuevo} y registrado en auditoría.")
@@ -1448,7 +1448,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             if st.button("💰 Contabilizar y conciliar cobro mixto",
                                 disabled=not(confirm_mix and diferencia_mix==0 and (ids_mix or aplicar_apertura)),
                                 key=f"mix_btn_{movimiento_id}",type="primary"):
-                                    sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+                                sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                                 try:
                                     asi=sgci_cobro_mixto(conn,movimiento_id,cli_id,ids_mix,int(aplicar_apertura))
                                     sgci_exito(f"Cobro mixto contabilizado en asiento {asi}.")
@@ -1657,7 +1657,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 conf_rev_cli = st.checkbox('Confirmo que este anticipo NO ha sido aplicado y deseo revertir su conciliación.', key='sgci_rev_cli_conf')
                 if st.button('↩️ Revertir abono de cliente y reabrir movimiento',
                              disabled=not conf_rev_cli, key='sgci_rev_cli_btn'):
-                                 sgci_exigir_permiso(conn, 'banco', 'anular', 'Conciliación bancaria')
+                    sgci_exigir_permiso(conn, 'banco', 'anular', 'Conciliación bancaria')
                     try:
                         rev_cli = revertir_abono_cliente_cartola(conn, mapa_rev_cli[sel_rev_cli])
                         sgci_exito(f'Asiento reverso {rev_cli} registrado. Abono retirado del auxiliar y cartola pendiente para conciliar nuevamente.')
@@ -2521,7 +2521,7 @@ elif menu == "✍️ Asientos y Saldos":
                                            key="sgci_manual_confirmar")
             if st.button("✅ Contabilizar asiento manual", type="primary",
                          disabled=not confirmar_manual, key="sgci_manual_guardar"):
-                             sgci_exigir_permiso(conn, 'contabilidad', 'contabilizar', 'Asientos y Saldos')
+                sgci_exigir_permiso(conn, 'contabilidad', 'contabilizar', 'Asientos y Saldos')
                 try:
                     # Revalidación de cierre y cuentas justo antes de escribir.
                     if periodo_cerrado(conn, borrador_manual["fecha"]):
@@ -3321,7 +3321,7 @@ elif menu == "📊 Conciliación":
                 )
                 if st.button("🔗 Asignar anticipo al auxiliar",type="primary",
                              disabled=not conf_asig,key="btn_asignar_ant_existente"):
-                                 sgci_exigir_permiso(conn, 'cxc', 'editar', 'Pagos de clientes')
+                    sgci_exigir_permiso(conn, 'cxc', 'editar', 'Pagos de clientes')
                     try:
                         monto_asig=asignar_anticipo_contable_a_cliente(
                             conn,mapa_ant[ant_lab],mapa_cli_asig[cli_lab_asig]
@@ -3383,7 +3383,7 @@ elif menu == "📊 Conciliación":
                 )
                 if st.button("🔗 Aplicar abono a factura(s)",type="primary",
                              disabled=(not confirma_aux or not ids_docs_aux),key="aux_aplicar_cliente"):
-                                 sgci_exigir_permiso(conn, 'cxc', 'editar', 'Pagos de clientes')
+                    sgci_exigir_permiso(conn, 'cxc', 'editar', 'Pagos de clientes')
                     try:
                         apps_aux,saldo_aux=aplicar_abono_auxiliar_cliente(conn,id_cli_aux,pago_id_aux,ids_docs_aux)
                         total_ap_aux=sum(x[1] for x in apps_aux)
