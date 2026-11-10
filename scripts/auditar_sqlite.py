@@ -54,6 +54,17 @@ def auditar(ruta):
                 ('cartola_bancaria',),
                 """SELECT count(*) FROM cartola_bancaria
                    WHERE conciliado=1 AND asiento_id IS NULL"""),
+            'cartolas_tesoreria_sin_asiento': (
+                ('cartola_bancaria',),
+                """SELECT count(*) FROM cartola_bancaria
+                   WHERE conciliado=1 AND match_tipo='TESORERIA'
+                   AND asiento_id IS NULL"""),
+            'cartolas_sin_asiento_por_tipo': (
+                ('cartola_bancaria',),
+                """SELECT COALESCE(match_tipo,'SIN_TIPO'),count(*)
+                   FROM cartola_bancaria
+                   WHERE conciliado=1 AND asiento_id IS NULL
+                   GROUP BY COALESCE(match_tipo,'SIN_TIPO')"""),
             'cartolas_tesoreria_duplicadas': (
                 ('cartola_bancaria',),
                 """SELECT count(*) FROM (SELECT match_id FROM cartola_bancaria
@@ -62,8 +73,12 @@ def auditar(ruta):
         }
         hallazgos={}
         for nombre,(requeridas,sql) in consultas.items():
-            hallazgos[nombre]=(conn.execute(sql).fetchone()[0]
-                if set(requeridas)<=tablas else None)
+            if not set(requeridas)<=tablas:
+                hallazgos[nombre]=None
+            elif nombre=='cartolas_sin_asiento_por_tipo':
+                hallazgos[nombre]={tipo:cantidad for tipo,cantidad in conn.execute(sql)}
+            else:
+                hallazgos[nombre]=conn.execute(sql).fetchone()[0]
         return {'integridad':integridad,'infracciones_claves_foraneas':len(fk),
                 'tablas':len(tablas),'hallazgos':hallazgos,
                 'nota':'Cartolas sin asiento pueden ser conciliaciones documentales o cheques protestados; revisar match_tipo.'}
