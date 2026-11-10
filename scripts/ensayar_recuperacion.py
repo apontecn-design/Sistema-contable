@@ -1,0 +1,46 @@
+"""Ensayo aislado de respaldo y restauración SQLite. No toca Render.
+
+Uso: python scripts/ensayar_recuperacion.py /ruta/copia.db
+Crea ficheros temporales; nunca escribe sobre la base de origen.
+"""
+import json
+import sqlite3
+import sys
+import tempfile
+from pathlib import Path
+
+
+def ensayar(origen):
+    origen=Path(origen).resolve()
+    if not origen.is_file():
+        raise FileNotFoundError(origen)
+    with tempfile.TemporaryDirectory(prefix='contem_recovery_') as temp:
+        respaldo=Path(temp)/'respaldo.db'
+        restaurada=Path(temp)/'restaurada.db'
+        with sqlite3.connect(origen.as_uri()+'?mode=ro',uri=True) as db_origen:
+            with sqlite3.connect(respaldo) as db_respaldo:
+                db_origen.backup(db_respaldo)
+        with sqlite3.connect(respaldo.as_uri()+'?mode=ro',uri=True) as db_respaldo:
+            with sqlite3.connect(restaurada) as db_restaurada:
+                db_respaldo.backup(db_restaurada)
+        with sqlite3.connect(origen.as_uri()+'?mode=ro',uri=True) as db_origen:
+            esquema_origen=db_origen.execute(
+                "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+            ).fetchall()
+        with sqlite3.connect(restaurada.as_uri()+'?mode=ro',uri=True) as db_restaurada:
+            integridad=db_restaurada.execute('PRAGMA integrity_check').fetchone()[0]
+            fk=db_restaurada.execute('PRAGMA foreign_key_check').fetchall()
+            esquema_restaurado=db_restaurada.execute(
+                "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+            ).fetchall()
+        return {'integridad_restaurada':integridad,
+                'claves_foraneas_invalidas':len(fk),
+                'esquema_identico':esquema_origen==esquema_restaurado,
+                'aprobado':integridad=='ok' and not fk and esquema_origen==esquema_restaurado,
+                'nota':'Ensayo local de backup/restore; no prueba despliegue Render ni migración.'}
+
+
+if __name__=='__main__':
+    if len(sys.argv)!=2:
+        raise SystemExit('Uso: python scripts/ensayar_recuperacion.py /ruta/copia.db')
+    print(json.dumps(ensayar(sys.argv[1]),ensure_ascii=False,indent=2))
