@@ -124,10 +124,10 @@ def sgci_puede(conn, modulo, accion='ver'):
         configurado = conn.execute(
             """SELECT 1 FROM sgci_perfil_permisos
                WHERE perfil=(SELECT rol FROM sgci_usuarios WHERE email=?)
-                 AND modulo=? AND accion='ver'
+                 AND modulo=?
                UNION ALL
                SELECT 1 FROM sgci_usuario_permisos_detalle
-               WHERE email=? AND modulo=? AND accion='ver'
+               WHERE email=? AND modulo=?
                LIMIT 1""", (email, modulo, email, modulo)
         ).fetchone()
         if configurado:
