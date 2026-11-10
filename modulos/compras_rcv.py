@@ -77,6 +77,7 @@ def recuperar_datos_tributarios_rcv(conn, cruces):
     verifica con una conexión nueva al archivo SQLite después del COMMIT.
     No crea compras/asientos ni modifica proveedores, pagos o banco.
     """
+    sgci_autorizar_operacion(conn, 'cxp', 'editar', 'RCV Compras')
     if cruces is None or cruces.empty:
         return {"actualizados":0,"verificados":0,"iva":0.0,"errores":[]}
 
