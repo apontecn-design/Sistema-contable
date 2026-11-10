@@ -72,6 +72,10 @@ def contabilizar_rcv(
     recordar=True
 ):
 
+    if tipo not in ('compras', 'ventas'):
+        raise ValueError('Tipo de RCV no válido.')
+    sgci_autorizar_operacion(conn, 'cxp' if tipo == 'compras' else 'cxc',
+        'contabilizar', 'RCV Compras' if tipo == 'compras' else 'RCV Ventas')
     compras = tipo == "compras"
 
     plan = Plan(conn)
