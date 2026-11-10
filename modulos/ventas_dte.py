@@ -197,6 +197,7 @@ def dte_parsear(datos):
 
 
 def dte_guardar(conn,datos,archivo,rut_permitido=None):
+    sgci_autorizar_operacion(conn, 'dte', 'importar', 'Importar XML')
     registros=dte_parsear(datos)
     nuevos=duplicados=0
     for cab,items,refs in registros:
