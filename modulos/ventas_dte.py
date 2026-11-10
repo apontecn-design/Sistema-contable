@@ -526,7 +526,7 @@ def tes_vista_comprobante(pago,sid):
 
 
 def tes_conciliar_pago(conn,movimiento_id,solicitud_id):
-    sgci_autorizar_operacion(conn, 'banco', 'conciliar')
+    sgci_autorizar_operacion(conn, 'banco', 'conciliar', 'Conciliación bancaria')
     """Solo vincula cartola con asiento ya existente. No crea un asiento nuevo."""
     try:
         conn.execute('BEGIN IMMEDIATE')
