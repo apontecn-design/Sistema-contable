@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import tempfile
 import types
+import pandas  # precargar NumPy fuera del parche temporal de sys.modules
 import unittest
 from pathlib import Path
 from unittest.mock import patch
