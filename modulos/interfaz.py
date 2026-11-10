@@ -506,6 +506,7 @@ elif menu == "👥 Recursos Humanos":
             guardar=st.form_submit_button('💾 Guardar ficha',type='primary')
             if guardar:
                 if not rut.strip() or not nombre.strip(): st.error('RUT y nombre son obligatorios.')
+                    sgci_exigir_permiso(conn, 'nomina', 'crear', 'Trabajadores')
                 else:
                     vals=(rut.strip(),nombre.strip(),ingreso.isoformat(),cargo.strip(),contrato,clp_round(sueldo),grat_tipo,clp_round(grat),afp,salud_tipo,isapre.strip(),salud_modalidad,salud_valor,int(afc),int(anticipo),ant_pct,banco.strip(),tipo_cta,nro.strip(),int(activo),datetime.now().isoformat(timespec='seconds'))
                     if edit_row:
@@ -560,6 +561,7 @@ elif menu == "👥 Recursos Humanos":
                         conn.commit();sgci_exito("Movimiento de vacaciones registrado.");st.rerun()
             st.markdown("#### Solicitudes")
             with st.expander("➕ Nueva solicitud",expanded=False):
+                sgci_exigir_permiso(conn, 'nomina', 'editar', 'Vacaciones')
                 with st.form("rrhh_vac_sol_form",clear_on_submit=True):
                     a,b=st.columns(2)
                     desde=a.date_input("Desde",value=date.today())
@@ -588,6 +590,7 @@ elif menu == "👥 Recursos Humanos":
                         responsable=st.text_input("Responsable de la decisión")
                         obs_revision=st.text_input("Observación de revisión")
                         if st.button("Guardar decisión",key="rrhh_vac_resolver"):
+                            sgci_exigir_permiso(conn, 'nomina', 'aprobar', 'Vacaciones')
                             if not responsable.strip(): st.error("Indica quién resuelve.")
                             else:
                                 cur=conn.execute("""UPDATE rrhh_vacaciones_solicitudes SET estado=?,revisado_por=?,fecha_revision=?,observacion_revision=?
@@ -616,6 +619,7 @@ elif menu == "👥 Recursos Humanos":
                 fecha_ant=st.date_input('Fecha del anticipo',date.today(),key='ant_fecha'); monto_ant=st.number_input('Monto',min_value=0.0,value=float(sugerido),step=10000.0,format='%.0f',key='ant_monto')
                 obs_ant=st.text_input('Observación',key='ant_obs')
                 if st.button('Registrar anticipo',key='ant_save'):
+                    sgci_exigir_permiso(conn, 'nomina', 'crear', 'Anticipos y préstamos')
                     conn.execute("INSERT INTO nomina_anticipos(trabajador_id,periodo,fecha,monto,observacion) VALUES(?,?,?,?,?)",(tr.id,periodo,fecha_ant.isoformat(),monto_ant,obs_ant)); conn.commit(); sgci_exito('Anticipo registrado.'); st.rerun()
             with c2:
                 st.markdown('#### Préstamo al trabajador')
@@ -643,6 +647,7 @@ elif menu == "👥 Recursos Humanos":
                         restante-=int(valor_c)
                     st.caption(f'Total programado: {money(sum(x[1] for x in fechas_cuotas))} / Préstamo: {money(monto_p)}')
                 if st.button('Registrar préstamo',key='pre_save'):
+                    sgci_exigir_permiso(conn, 'nomina', 'crear', 'Anticipos y préstamos')
                     if monto_p<=0:
                         st.error('El préstamo debe ser mayor que cero.')
                     elif modalidad=='Fechas específicas / quincenal' and (sum(x[1] for x in fechas_cuotas)!=int(round(monto_p)) or any(x[1]<=0 for x in fechas_cuotas) or len(set(x[0] for x in fechas_cuotas))!=len(fechas_cuotas) or any(x[0]<fecha_p.isoformat() for x in fechas_cuotas)):
@@ -682,6 +687,7 @@ elif menu == "👥 Recursos Humanos":
                 op=st.selectbox('Movimiento pendiente',[x[0] for x in pendientes]); mov=next(x for x in pendientes if x[0]==op)
                 bm={f"{r.nombre} - {r.numero_cuenta} ({r.cuenta_contable})":r for r in bancos.itertuples()}; bl=st.selectbox('Banco utilizado',list(bm)); br=bm[bl]
                 if st.button('Contabilizar salida bancaria',type='primary'):
+                    sgci_exigir_permiso(conn, 'nomina', 'contabilizar', 'Contabilización')
                     asi=nomina_registrar_pago_activo(conn,mov[1],mov[2],mov[3],mov[4],mov[5],br.cuenta_contable,mov[0]); sgci_exito(f'Asiento N° {asi} generado.'); st.rerun()
             elif pendientes: st.warning('Hay movimientos pendientes, pero no existe una cuenta bancaria activa vinculada contablemente.')
 
@@ -744,6 +750,7 @@ elif menu == "👥 Recursos Humanos":
             st.info(f"AFP {afp_vig}: 10% + comisión {comision:.2f}% | Salud: {salud_tipo_vig} · {mod} | Anticipo registrado: {money(ant)}")
             obs=st.text_area('Observaciones',value=ex.get('observacion','') or '')
             if st.button('💾 Guardar / recalcular liquidación',type='primary'):
+                sgci_exigir_permiso(conn, 'nomina', 'editar', 'Liquidación mensual')
                 vals=(periodo,tr.id,dias,sueldo_base,sueldo_periodo,grat,horas,bonos,otros_imp,bono_noimp,noimp,otros_noimp,total_imp,total_noimp,clp_round(total_imp+total_noimp),afp_vig,comision,calc['afp'],salud_tipo_vig,mod,sval,calc['salud'],afc,impuesto,pre_desc,otros_desc,calc['total_desc'],calc['liquido'],ant,calc['saldo'],uf_valor,calc['salud_plan_pesos'],'CALCULADO',obs)
                 conn.execute("""INSERT INTO nomina_liquidaciones(periodo,trabajador_id,dias_trabajados,sueldo_base,sueldo_periodo,gratificacion,horas_extras,bonos_imponibles,otros_imponibles,bono_no_imponible,asignacion_no_imponible,otros_no_imponibles,total_imponible,total_no_imponible,total_haberes,afp_nombre,afp_comision,afp_descuento,salud_tipo,salud_modalidad,salud_valor,salud_descuento,afc_descuento,impuesto_unico,prestamo_descuento,otros_descuentos,total_descuentos,liquido_periodo,anticipo,saldo_pagar,uf_valor,salud_plan_pesos,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(periodo,trabajador_id) DO UPDATE SET dias_trabajados=excluded.dias_trabajados,sueldo_base=excluded.sueldo_base,sueldo_periodo=excluded.sueldo_periodo,gratificacion=excluded.gratificacion,horas_extras=excluded.horas_extras,bonos_imponibles=excluded.bonos_imponibles,otros_imponibles=excluded.otros_imponibles,bono_no_imponible=excluded.bono_no_imponible,asignacion_no_imponible=excluded.asignacion_no_imponible,otros_no_imponibles=excluded.otros_no_imponibles,total_imponible=excluded.total_imponible,total_no_imponible=excluded.total_no_imponible,total_haberes=excluded.total_haberes,afp_nombre=excluded.afp_nombre,afp_comision=excluded.afp_comision,afp_descuento=excluded.afp_descuento,salud_tipo=excluded.salud_tipo,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,salud_descuento=excluded.salud_descuento,afc_descuento=excluded.afc_descuento,impuesto_unico=excluded.impuesto_unico,prestamo_descuento=excluded.prestamo_descuento,otros_descuentos=excluded.otros_descuentos,total_descuentos=excluded.total_descuentos,liquido_periodo=excluded.liquido_periodo,anticipo=excluded.anticipo,saldo_pagar=excluded.saldo_pagar,uf_valor=excluded.uf_valor,salud_plan_pesos=excluded.salud_plan_pesos,estado=CASE WHEN nomina_liquidaciones.estado='CONTABILIZADO' THEN nomina_liquidaciones.estado ELSE 'CALCULADO' END,observacion=excluded.observacion""",vals)
                 conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)",(periodo,)); conn.commit(); sgci_exito('Liquidación guardada.'); st.rerun()
@@ -786,11 +793,13 @@ elif menu == "👥 Recursos Humanos":
         afpdf=pd.read_sql_query("SELECT afp,comision,vigente_desde,activo FROM nomina_parametros_afp ORDER BY afp",conn); st.dataframe(afpdf,use_container_width=True,hide_index=True)
         amap={r.afp:r for r in afpdf.itertuples()}; aa=st.selectbox('AFP a modificar',list(amap)); ar=amap[aa]; nueva=st.number_input('Comisión %',min_value=0.0,max_value=10.0,value=float(ar.comision),step=.01); vig=st.text_input('Vigente desde',value=ar.vigente_desde or '')
         if st.button('Guardar parámetro AFP'):
+            sgci_exigir_permiso(conn, 'nomina', 'editar', 'Parámetros')
             conn.execute("UPDATE nomina_parametros_afp SET comision=?,vigente_desde=? WHERE afp=?",(nueva,vig,aa)); conn.commit(); sgci_exito('Parámetro actualizado.'); st.rerun()
         st.info('Salud: Fonasa usa 7% legal. Isapre admite 7%, porcentaje pactado, plan en UF o monto pactado en pesos; la liquidación conserva el valor UF utilizado y permite ajuste manual.')
         st.markdown('#### Valor UF por período')
         pu=st.text_input('Período UF (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='uf_per'); vu=st.number_input('Valor UF del período',min_value=0.0,value=0.0,step=1.0,key='uf_val')
         if st.button('Guardar valor UF',key='uf_save'):
+            sgci_exigir_permiso(conn, 'nomina', 'editar', 'Parámetros')
             conn.execute("INSERT INTO nomina_parametros_mensuales(periodo,valor_uf) VALUES(?,?) ON CONFLICT(periodo) DO UPDATE SET valor_uf=excluded.valor_uf",(pu,vu)); conn.commit(); sgci_exito('UF guardada para el período.'); st.rerun()
         ufdf=pd.read_sql_query("SELECT periodo,valor_uf FROM nomina_parametros_mensuales ORDER BY periodo DESC",conn)
         if not ufdf.empty: st.dataframe(ufdf,use_container_width=True,hide_index=True)
@@ -819,6 +828,7 @@ elif menu == "👥 Recursos Humanos":
                 st.info('Las cotizaciones de cargo del empleador no están incluidas en este asiento y requieren su registro separado. El anticipo de febrero de Maricruz no se incluye en enero.')
                 confirma=st.checkbox('Revisé las cuentas y los montos de la vista previa.',key=f'confirmar_nomina_{per}')
                 if st.button('🧾 Contabilizar nómina',type='primary',disabled=(not confirma or total_debe!=total_haber)):
+                    sgci_exigir_permiso(conn, 'nomina', 'contabilizar', 'Contabilización')
                     try:
                         asi=nomina_contabilizar_periodo(conn,per)
                         registrar_auditoria(conn,'CONTABILIZAR NÓMINA',f'{per} asiento {asi}')
@@ -1016,6 +1026,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         key="confirmar_borrar_cartola"
                     )
                     if st.button("🗑️ Eliminar importación seleccionada",disabled=not confirmar_borrado,key="borrar_lote_cartola"):
+                        sgci_exigir_permiso(conn, 'banco', 'eliminar', 'Bancos y cartolas')
                         try:
                             n=eliminar_importacion_cartola(conn,banco_id,lote_sel)
                             sgci_exito(f"Importación eliminada correctamente: {n} movimiento(s).")
@@ -1097,6 +1108,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     confirmar_protesto=st.checkbox('Confirmo que este cheque fue protestado y que no existe pago contabilizado asociado.',key=f'protesto_ok_{movimiento_id}')
                     if st.button('Conciliar grupo de cheque protestado (sin contabilizar)',
                                  disabled=not confirmar_protesto,key=f'protesto_btn_{movimiento_id}'):
+                                     sgci_exigir_permiso(conn, 'banco', 'conciliar', 'Conciliación bancaria')
                         try:
                             ids=sgci_conciliar_cheque_protestado(conn,movimiento_id)
                             sgci_exito(f'Grupo {ids} conciliado sin generar pagos ni asientos.')
@@ -1139,6 +1151,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                                   key=f"sgci_confirma_signo_{movimiento_id}")
                     if st.button("Guardar corrección de signo", key=f"sgci_guardar_signo_{movimiento_id}",
                                  disabled=not confirmar_signo or tipo_nuevo == actual_tipo):
+                                     sgci_exigir_permiso(conn, 'banco', 'editar', 'Bancos y cartolas')
                         try:
                             sgci_corregir_signo_cartola_pendiente(conn, movimiento_id, tipo_nuevo)
                             sgci_exito(f"Movimiento #{movimiento_id} corregido a {tipo_nuevo} y registrado en auditoría.")
@@ -1172,6 +1185,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.info('Selecciona únicamente las líneas bancarias cuya suma coincida exactamente con la cartola.')
                         confirmar=st.checkbox('Confirmo que estas líneas corresponden a esta misma operación bancaria y que no debo generar otro asiento.',key=f'conf_lineas_existentes_{movimiento_id}')
                         if st.button('🔗 Conciliar sin contabilizar nuevamente',type='primary',disabled=not (correcto and confirmar),key=f'btn_lineas_existentes_{movimiento_id}'):
+                            sgci_exigir_permiso(conn, 'banco', 'conciliar', 'Conciliación bancaria')
                             try:
                                 n=sgci_conciliar_lineas_existentes(conn,movimiento_id,ids_elegidos)
                                 sgci_exito(f'Movimiento {movimiento_id} conciliado con {n} líneas existentes. Sin asiento adicional.')
@@ -1200,6 +1214,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         eleg_tes=st.selectbox('Selecciona el pago de Tesorería',list(opciones_tes),key=f'tes_match_{movimiento_id}')
                         confirma_tes=st.checkbox('Confirmo que corresponde a la misma transferencia; no se generará otro asiento.',key=f'tes_match_ok_{movimiento_id}')
                         if st.button('Conciliar sin contabilizar nuevamente',type='primary',disabled=not confirma_tes,key=f'tes_match_btn_{movimiento_id}'):
+                            sgci_exigir_permiso(conn, 'banco', 'conciliar', 'Conciliación bancaria')
                             try:
                                 asiento_tes=tes_conciliar_pago(conn,movimiento_id,opciones_tes[eleg_tes])
                                 sgci_exito(f'Conciliación registrada con asiento existente {asiento_tes}. Sin duplicar contabilidad.')
@@ -1236,6 +1251,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             key=f"nomina_conf_banco_{movimiento_id}"
                         )
                         if st.button("👤 Contabilizar y vincular anticipo",type="primary",disabled=not confirma_nom,key=f"nomina_btn_banco_{movimiento_id}"):
+                            sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                             try:
                                 asiento_nom, anticipo_id=contabilizar_anticipo_nomina_desde_cartola(
                                     conn,movimiento_id,trab_banco.id,periodo_banco,obs_nom
@@ -1300,6 +1316,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                 confirma_prov = st.checkbox("Confirmo que este movimiento corresponde al pago del proveedor y documentos seleccionados.", key=f"conf_pago_prov_{movimiento_id}")
                                 falta_cuenta_dif = bool(docs_ids and diferencia_pago>0 and not cuenta_dif_codigo)
                                 if st.button("💳 Contabilizar pago a proveedor", type="primary", disabled=(not confirma_prov or not docs_ids or falta_cuenta_dif), key=f"btn_pago_prov_{movimiento_id}"):
+                                    sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                                     try:
                                         asiento, aplicaciones, diferencia = contabilizar_pago_proveedor_desde_cartola(
                                             conn, movimiento_id, prov_id, docs_ids,
@@ -1319,6 +1336,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.caption("Esta opción es apropiada para saldos anteriores o documentos que aún no están cargados. Hasta incorporar el saldo inicial, el auxiliar puede mostrar temporalmente un saldo deudor.")
                             confirma_sin_doc = st.checkbox("Confirmo que el pago corresponde a este proveedor y no deseo asociarlo a un documento.", key=f"conf_pago_prov_sd_{movimiento_id}")
                             if st.button("💳 Contabilizar pago sin documento", type="primary", disabled=not confirma_sin_doc, key=f"btn_pago_prov_sd_{movimiento_id}"):
+                                sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                                 try:
                                     asiento = contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, prov_id)
                                     sgci_exito(f"Pago sin documento contabilizado y conciliado en el asiento {asiento}. Auxiliar del proveedor actualizado.")
@@ -1368,6 +1386,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             if not valido_dev:
                                 st.error('La diferencia disponible no alcanza para este abono. Verifica los documentos y reembolsos anteriores.')
                             if st.button('↩️ Contabilizar y conciliar devolución',type='primary',disabled=not (confirma_dev and valido_dev),key=f'dev_btn_{movimiento_id}'):
+                                sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                                 try:
                                     asiento_dev=sgci_contabilizar_devolucion_proveedor(conn,movimiento_id,prov_dev,id_nc,id_fac,glosa_dev)
                                     sgci_exito(f'Devolución conciliada. Asiento N.º {asiento_dev}. Auxiliar del proveedor actualizado sin duplicar IVA.')
@@ -1395,6 +1414,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                 min_value=0,step=1000,value=monto_reg,key=f"apert_cli_monto_{cli_id}")
                             st.caption("Solo registra el auxiliar; el saldo ya está en el Libro Diario. Verifica que coincida con el detalle del asiento de apertura.")
                             if st.button("Guardar saldo inicial auxiliar",key=f"apert_cli_save_{cli_id}"):
+                                sgci_exigir_permiso(conn, 'cxc', 'editar', 'Clientes y estados de cuenta')
                                 aplicado=conn.execute("SELECT COALESCE(SUM(monto),0) FROM sgci_aplicaciones_apertura_clientes WHERE cliente_id=?",(cli_id,)).fetchone()[0]
                                 if int(saldo_nuevo)<int(aplicado):
                                     st.error("El saldo inicial no puede ser menor que lo ya aplicado.")
@@ -1430,6 +1450,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             if st.button("💰 Contabilizar y conciliar cobro mixto",
                                 disabled=not(confirm_mix and diferencia_mix==0 and (ids_mix or aplicar_apertura)),
                                 key=f"mix_btn_{movimiento_id}",type="primary"):
+                                    sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                                 try:
                                     asi=sgci_cobro_mixto(conn,movimiento_id,cli_id,ids_mix,int(aplicar_apertura))
                                     sgci_exito(f"Cobro mixto contabilizado en asiento {asi}.")
@@ -1469,6 +1490,7 @@ elif menu == "🏦 Bancos y Cartolas":
                                 conf=st.checkbox("Confirmo la aplicación de este abono al cliente y facturas seleccionadas.",key=f"conf_cobro_cli_{movimiento_id}")
                                 falta=bool(ids and sobrante>0 and not cuenta_sobrante)
                                 if st.button("💰 Contabilizar cobro de cliente",type="primary",disabled=(not conf or not ids or falta),key=f"btn_cobro_cli_{movimiento_id}"):
+                                    sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                                     try:
                                         asi,aps,sob=contabilizar_cobro_cliente_desde_cartola(conn,movimiento_id,cli_id,ids,cuenta_sobrante,glosa_sobrante)
                                         sgci_exito(f"Cobro contabilizado y conciliado en asiento {asi}."+ (f" Sobrante registrado: {money(sob)}." if sob else ""))
@@ -1482,6 +1504,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             st.info(f"Se registrará {money(float(mov_sel['abono'] or 0))} como anticipo/cobro sin documento del cliente seleccionado, sin cancelar facturas.")
                             conf=st.checkbox("Confirmo que este abono corresponde al cliente y no deseo aplicarlo a una factura.",key=f"conf_ant_cli_{movimiento_id}")
                             if st.button("💰 Registrar anticipo de cliente",type="primary",disabled=not conf,key=f"btn_ant_cli_{movimiento_id}"):
+                                sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                                 try:
                                     asi=contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cli_id,mapa.get(selcta))
                                     sgci_exito(f"Anticipo/cobro sin documento contabilizado y conciliado en asiento {asi}.")
@@ -1506,6 +1529,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         st.info(f"Movimiento: {naturaleza_sel} por {money(monto_sel)}. SGCI usará automáticamente la cuenta bancaria como la otra línea del asiento.")
                         confirmar_manual = st.checkbox("Confirmo que revisé la cuenta contable y deseo contabilizar y conciliar este movimiento.", key=f"imputacion_confirma_{movimiento_id}")
                         if st.button("🧾 Contabilizar e imputar manualmente", type="primary", disabled=not confirmar_manual, key=f"imputacion_btn_{movimiento_id}"):
+                            sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                             try:
                                 asiento = contabilizar_imputacion_manual_bancaria(conn,movimiento_id,mapa_manual[cuenta_manual],glosa_manual)
                                 sgci_exito(f"Movimiento imputado, conciliado y contabilizado en el asiento {asiento}.")
@@ -1549,6 +1573,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         st.warning("La distribución debe sumar exactamente el monto bancario y contener al menos dos montos mayores que cero.")
                     confirma_multi = st.checkbox("Confirmo la distribución y deseo contabilizar y conciliar este movimiento.", key=f"multi_conf_{movimiento_id}")
                     if st.button("🧩 Contabilizar distribución", type="primary", disabled=not (confirma_multi and cuadra_multi), key=f"multi_btn_{movimiento_id}"):
+                        sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
                         try:
                             asiento = contabilizar_imputacion_multiple_bancaria(conn, movimiento_id, distribuciones_ui, glosa_multi)
                             sgci_exito(f"Movimiento distribuido, conciliado y contabilizado en el asiento {asiento}.")
@@ -1570,6 +1595,7 @@ elif menu == "🏦 Bancos y Cartolas":
             monto_op = st.number_input("Monto de la operación", min_value=0.0, step=1000.0,format='%.0f')
             cuenta_op = st.selectbox("Cuenta contable de contrapartida", list(mapa.keys())) if mapa else ""
             if st.form_submit_button("Guardar operación"):
+                sgci_exigir_permiso(conn, 'banco', 'crear', 'Bancos y cartolas')
                 if not descripcion_op or monto_op <= 0 or not cuenta_op:
                     st.error("Completa descripción, monto y cuenta contable.")
                 else:
@@ -1634,6 +1660,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 conf_rev_cli = st.checkbox('Confirmo que este anticipo NO ha sido aplicado y deseo revertir su conciliación.', key='sgci_rev_cli_conf')
                 if st.button('↩️ Revertir abono de cliente y reabrir movimiento',
                              disabled=not conf_rev_cli, key='sgci_rev_cli_btn'):
+                                 sgci_exigir_permiso(conn, 'banco', 'anular', 'Conciliación bancaria')
                     try:
                         rev_cli = revertir_abono_cliente_cartola(conn, mapa_rev_cli[sel_rev_cli])
                         sgci_exito(f'Asiento reverso {rev_cli} registrado. Abono retirado del auxiliar y cartola pendiente para conciliar nuevamente.')
@@ -1657,6 +1684,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 ant_sel=st.selectbox('Anticipo a corregir',list(ant_map),key='sgci_rev_ant_sel')
                 ant_confirm=st.checkbox('Confirmo que esta transferencia NO corresponde a un anticipo del trabajador y debe volver a quedar pendiente.',key='sgci_rev_ant_conf')
                 if st.button('↩️ Revertir anticipo y reabrir transferencia',disabled=not ant_confirm,key='sgci_rev_ant_btn'):
+                    sgci_exigir_permiso(conn, 'banco', 'anular', 'Conciliación bancaria')
                     try:
                         rev=revertir_anticipo_nomina_cartola(conn,ant_map[ant_sel])
                         sgci_exito(f'Anticipo revertido mediante asiento {rev}. Transferencia pendiente para conciliar con el proveedor.')
@@ -1680,6 +1708,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 corr_label = st.selectbox("Movimiento a corregir", list(corr_map.keys()), key="corr_mov_banco")
                 confirma_corr = st.checkbox("Confirmo que deseo revertir contablemente esta imputación y volver a dejar el movimiento pendiente.", key="corr_confirma")
                 if st.button("↩️ Revertir y reabrir movimiento", disabled=not confirma_corr, key="corr_btn"):
+                    sgci_exigir_permiso(conn, 'banco', 'anular', 'Conciliación bancaria')
                     try:
                         rev = corregir_conciliacion_manual(conn, corr_map[corr_label])
                         sgci_exito(f"Imputación revertida mediante el asiento {rev}. El movimiento vuelve a estar pendiente de conciliación.")
@@ -1717,12 +1746,14 @@ elif menu == "🔒 Cierre Mensual":
         else: sgci_exito("🟢 No se detectaron diferencias básicas. El período está listo para revisión final.")
         if periodo_estado(conn,periodo)=="ABIERTO":
             if st.button("🔒 CERRAR PERÍODO",type="primary"):
+                sgci_exigir_permiso(conn, 'administracion', 'aprobar', 'Cierre Mensual')
                 if alertas: st.error("No se recomienda cerrar mientras existan alertas.")
                 else:
                     conn.execute("UPDATE periodos_contables SET estado='CERRADO',fecha_cierre=? WHERE periodo=?",(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),periodo)); conn.commit(); registrar_auditoria(conn,"CIERRE CONTABLE",periodo); sgci_exito("Período cerrado."); st.rerun()
         else:
             sgci_exito("🔒 Período cerrado")
             if st.button("Reabrir período"):
+                sgci_exigir_permiso(conn, 'administracion', 'aprobar', 'Cierre Mensual')
                 conn.execute("UPDATE periodos_contables SET estado='ABIERTO',fecha_cierre=NULL WHERE periodo=?",(periodo,)); conn.commit(); registrar_auditoria(conn,"REAPERTURA CONTABLE",periodo); st.warning("Período reabierto."); st.rerun()
     except Exception as e: st.error(f"Período inválido: {e}")
 
@@ -1891,6 +1922,7 @@ elif menu == "📥 RCV Compras":
                 st.info(f"{len(seleccionados)} compra(s) seleccionada(s). Se generará un asiento de reclasificación por cada documento.")
             confirmar = st.checkbox("Confirmo la reclasificación contable seleccionada", key="confirmar_reclas")
             if st.button("🔄 RECLASIFICAR COMPRAS", type="primary", disabled=(not seleccionados or not confirmar), key="btn_reclas_compras"):
+                sgci_exigir_permiso(conn, 'cxp', 'editar', 'RCV Compras')
                 try:
                     r = reclasificar_compras(conn, seleccionados, nueva_codigo, recordar)
                     sgci_exito(f"Reclasificación completada: {r['reclasificadas']} compra(s). Omitidas: {r['omitidas']}.")
@@ -1991,6 +2023,7 @@ elif menu == "📥 RCV Compras":
             st.warning(f"{len(validos)} documento(s) listos para contabilizar.")
 
             if st.button("✅ CONTABILIZAR COMPRAS", type="primary"):
+                sgci_exigir_permiso(conn, 'cxp', 'contabilizar', 'RCV Compras')
                 try:
                     resultado = contabilizar_rcv(conn,"compras",validos)
                     meta=st.session_state.get("rcv_compras_archivo")
@@ -2051,6 +2084,7 @@ elif menu == "📥 RCV Compras":
                         key="conf_recuperar_rcv_hist"
                     )
                     if st.button("📚 Recuperar datos tributarios",type="primary",disabled=not conf_rec,key="btn_recuperar_rcv_hist"):
+                        sgci_exigir_permiso(conn, 'cxp', 'editar', 'RCV Compras')
                         try:
                             res=recuperar_datos_tributarios_rcv(conn,cruces_hist)
                             if res["actualizados"] == res["verificados"] and not res["errores"]:
@@ -2123,6 +2157,7 @@ elif menu == "📥 RCV Compras":
                 disabled=(not confirma_iva_hist) or (not sin_cuenta.empty),
                 key="btn_regularizar_iva_hist"
             ):
+                sgci_exigir_permiso(conn, 'cxp', 'contabilizar', 'RCV Compras')
                 try:
                     res_iva = regularizar_iva_historico_compras(conn)
                     sgci_exito(
@@ -2252,6 +2287,7 @@ elif menu == "📤 RCV Ventas":
 
         if not validos.empty:
             if st.button("✅ CONTABILIZAR VENTAS", type="primary"):
+                sgci_exigir_permiso(conn, 'cxc', 'contabilizar', 'RCV Ventas')
                 try:
                     resultado=contabilizar_rcv(conn,"ventas",validos)
                     meta=st.session_state.get("rcv_ventas_archivo")
@@ -2334,6 +2370,7 @@ elif menu == "✍️ Asientos y Saldos":
             key="f29_confirma"
         )
         if st.button("🧾 Registrar compensación IVA / F29", type="primary", key="f29_registrar"):
+            sgci_exigir_permiso(conn, 'contabilidad', 'contabilizar', 'Asientos y Saldos')
             if not periodo_f29.strip() or len(periodo_f29.strip()) != 7:
                 st.error("Indica el período en formato AAAA-MM.")
             elif existe_f29:
@@ -2487,6 +2524,7 @@ elif menu == "✍️ Asientos y Saldos":
                                            key="sgci_manual_confirmar")
             if st.button("✅ Contabilizar asiento manual", type="primary",
                          disabled=not confirmar_manual, key="sgci_manual_guardar"):
+                             sgci_exigir_permiso(conn, 'contabilidad', 'contabilizar', 'Asientos y Saldos')
                 try:
                     # Revalidación de cierre y cuentas justo antes de escribir.
                     if periodo_cerrado(conn, borrador_manual["fecha"]):
@@ -2613,6 +2651,7 @@ elif menu == "✍️ Asientos y Saldos":
                     st.dataframe(resultado, use_container_width=True, hide_index=True)
 
                     if st.button("✅ REGISTRAR EN LIBRO DIARIO", type="primary"):
+                        sgci_exigir_permiso(conn, 'contabilidad', 'contabilizar', 'Asientos y Saldos')
                         prefix = "SALDO-INI-" if tipo_carga == "Saldo inicial" else "ASIENTOS-MAN-"
                         lote = prefix + datetime.now().strftime("%Y%m%d-%H%M%S")
                         cur = conn.cursor()
@@ -2789,6 +2828,7 @@ elif menu == "👥 Clientes":
             telefono = st.text_input("Teléfono")
 
             if st.form_submit_button("Guardar cliente"):
+                sgci_exigir_permiso(conn, 'cxc', 'crear', 'Clientes y estados de cuenta')
                 if not validar_rut(rut):
                     st.error("RUT inválido.")
                 elif not nombre.strip():
@@ -2908,6 +2948,7 @@ elif menu == "🏢 Proveedores":
             telefono = st.text_input("Teléfono")
 
             if st.form_submit_button("Guardar proveedor"):
+                sgci_exigir_permiso(conn, 'cxp', 'crear', 'Proveedores y estados de cuenta')
                 if not validar_rut(rut):
                     st.error("RUT inválido.")
                 elif not nombre.strip():
@@ -3248,6 +3289,7 @@ elif menu == "📊 Conciliación":
                         imp=st.number_input("Importe a aplicar",min_value=1,max_value=max(1,limite),value=max(1,limite),step=1,key="sgci_ventas_imp_ant")
                         conf=st.checkbox("Verifiqué que el pago corresponde al saldo histórico y que no se aplicó anteriormente.",key="sgci_ventas_conf_ant")
                         if st.button("Aplicar a ejercicio anterior",disabled=not conf,key="sgci_ventas_aplicar_ant"):
+                            sgci_exigir_permiso(conn, 'cxc', 'editar', 'Pagos de clientes')
                             try: sgci_aplicar_pago_ejercicio(conn,modulo_ant,tercero,sid,pid,imp);st.rerun()
                             except Exception as exc: st.error(str(exc))
 
@@ -3284,6 +3326,7 @@ elif menu == "📊 Conciliación":
                 )
                 if st.button("🔗 Asignar anticipo al auxiliar",type="primary",
                              disabled=not conf_asig,key="btn_asignar_ant_existente"):
+                                 sgci_exigir_permiso(conn, 'cxc', 'editar', 'Pagos de clientes')
                     try:
                         monto_asig=asignar_anticipo_contable_a_cliente(
                             conn,mapa_ant[ant_lab],mapa_cli_asig[cli_lab_asig]
@@ -3345,6 +3388,7 @@ elif menu == "📊 Conciliación":
                 )
                 if st.button("🔗 Aplicar abono a factura(s)",type="primary",
                              disabled=(not confirma_aux or not ids_docs_aux),key="aux_aplicar_cliente"):
+                                 sgci_exigir_permiso(conn, 'cxc', 'editar', 'Pagos de clientes')
                     try:
                         apps_aux,saldo_aux=aplicar_abono_auxiliar_cliente(conn,id_cli_aux,pago_id_aux,ids_docs_aux)
                         total_ap_aux=sum(x[1] for x in apps_aux)
@@ -3440,6 +3484,7 @@ elif menu == "📊 Conciliación":
                         imp=st.number_input("Importe a aplicar",min_value=1,max_value=max(1,limite),value=max(1,limite),step=1,key="sgci_compras_imp_ant")
                         conf=st.checkbox("Verifiqué que el pago corresponde al saldo histórico y que no se aplicó anteriormente.",key="sgci_compras_conf_ant")
                         if st.button("Aplicar a ejercicio anterior",disabled=not conf,key="sgci_compras_aplicar_ant"):
+                            sgci_exigir_permiso(conn, 'cxp', 'editar', 'Pagos de proveedores')
                             try: sgci_aplicar_pago_ejercicio(conn,modulo_ant,tercero,sid,pid,imp);st.rerun()
                             except Exception as exc: st.error(str(exc))
 
@@ -3526,6 +3571,7 @@ elif menu == "📊 Conciliación":
                     disabled=(not confirma_prov_aux or not ids_docs_prov),
                     key="aux_aplicar_proveedor"
                 ):
+                    sgci_exigir_permiso(conn, 'cxp', 'editar', 'Pagos de proveedores')
                     try:
                         apps_prov,saldo_prov=aplicar_pago_auxiliar_proveedor(
                             conn,id_prov_aux,pago_id_prov,ids_docs_prov
@@ -3624,6 +3670,7 @@ elif menu == "📋 Plan de Cuentas":
             nivel = st.number_input("Nivel", min_value=1, max_value=10, value=3)
 
             if st.form_submit_button("Crear cuenta"):
+                sgci_exigir_permiso(conn, 'contabilidad', 'crear', 'Plan de Cuentas')
                 try:
                     conn.execute(
                         """
@@ -3793,6 +3840,7 @@ elif menu == "⚙️ Reglas Contables":
         descripcion = st.text_input("Descripción")
 
         if st.form_submit_button("Guardar regla"):
+            sgci_exigir_permiso(conn, 'administracion', 'editar', 'Reglas Contables')
             guardar_regla(
                 conn,
                 tipo,
@@ -3859,6 +3907,7 @@ elif menu == "📦 Lotes":
         )
 
         if st.button("🗑️ DESHACER LOTE", type="secondary"):
+            sgci_exigir_permiso(conn, 'administracion', 'anular', 'Lotes')
             try:
                 resultado = deshacer_lote(conn, lote)
                 sgci_exito(f"Lote eliminado: {resultado}")
@@ -3943,6 +3992,7 @@ elif menu == "🧰 Matriz Contable":
                     st.dataframe(resultado, use_container_width=True, hide_index=True)
 
                     if st.button("✅ IMPORTAR MATRIZ", type="primary"):
+                        sgci_exigir_permiso(conn, 'administracion', 'importar', 'Matriz Contable')
                         lote = "MATRIZ-" + datetime.now().strftime("%Y%m%d-%H%M%S")
                         cur = conn.cursor()
                         base = siguiente_asiento(conn)
