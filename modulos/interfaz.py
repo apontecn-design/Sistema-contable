@@ -906,6 +906,7 @@ elif menu == "🏦 Bancos y Cartolas":
             cuenta = c.selectbox("Cuenta contable bancaria", list(mapa.keys())) if mapa else ""
             saldo = st.number_input("Saldo inicial", value=0.0, step=1000.0,format='%.0f')
             if st.form_submit_button("Guardar cuenta bancaria"):
+                sgci_exigir_permiso(conn, 'banco', 'crear', 'Bancos y cartolas')
                 conn.execute("INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)", (nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo))
                 conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); sgci_exito("Cuenta bancaria creada.")
 
@@ -923,6 +924,7 @@ elif menu == "🏦 Bancos y Cartolas":
             if actual:
                 st.info(f"Actualmente vinculada a: {actual} - {Plan(conn).todos.get(actual, actual)}")
             if st.button("💾 Guardar vinculación bancaria", key="guardar_cfg_banco"):
+                sgci_exigir_permiso(conn, 'banco', 'editar', 'Bancos y cartolas')
                 conn.execute("UPDATE bancos SET cuenta_contable=? WHERE id=?", (mapa[nueva_etiqueta], banco_cfg_id))
                 conn.commit(); registrar_auditoria(conn,"VINCULACIÓN BANCO",f"Banco {banco_cfg_id} -> {mapa[nueva_etiqueta]}")
                 sgci_exito("Vinculación actualizada. Los próximos asientos de esta cartola usarán esa cuenta bancaria.")
@@ -975,6 +977,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         if errores_signo:
                             st.error(f"Movimientos con cargo/abono inválidos en filas: {errores_signo[:12]}")
                         if st.button("Importar cartola", type="primary", disabled=bool(errores_signo) or not confirmar_signos):
+                            sgci_exigir_permiso(conn, 'banco', 'importar', 'Bancos y cartolas')
                             nuevos,repetidos,lote = importar_cartola(conn, dfc, banco_id, origen="PDF" if archivo.name.lower().endswith(".pdf") else "ARCHIVO")
                             registrar_importacion_archivo(conn,"CARTOLA",archivo.name,archivo_hash,lote,len(dfc),nuevos,repetidos)
                             sgci_exito(f"Importados {nuevos} movimientos. Repetidos omitidos: {repetidos}.")
@@ -1036,6 +1039,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 monto = st.number_input("Monto", min_value=0.0, step=1000.0,format='%.0f')
                 saldo = st.number_input("Saldo después del movimiento (opcional)", value=0.0, step=1000.0,format='%.0f')
                 if st.form_submit_button("Guardar movimiento manual", type="primary"):
+                    sgci_exigir_permiso(conn, 'banco', 'crear', 'Bancos y cartolas')
                     if not descripcion or monto <= 0:
                         st.error("Indica descripción y un monto mayor que cero.")
                     else:
@@ -1113,6 +1117,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     elegido_c = cand.iloc[idx]
                     st.info("Si el movimiento ya fue contabilizado en Tesorería, usa la opción 💼 Tesorería más abajo: NO confirmes aquí una nueva contabilización.")
                     if st.button("✅ Confirmar y contabilizar coincidencia", type="primary"):
+                        sgci_exigir_permiso(conn, 'banco', 'conciliar', 'Conciliación bancaria')
                         try:
                             asiento = contabilizar_conciliacion_bancaria(conn,movimiento_id,elegido_c["tipo"],int(elegido_c["id"]))
                             sgci_exito(f"Movimiento conciliado y contabilizado en el asiento {asiento}.")
@@ -1601,6 +1606,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 opcion=st.selectbox('Pago a proveedor para revertir',list(opciones),key='sgci_rev_prov_sel')
                 confirma=st.checkbox('Confirmo que quiero revertir este pago y sus aplicaciones.',key='sgci_rev_prov_confirm')
                 if st.button('↩️ Revertir pago a proveedor',disabled=not confirma,key='sgci_rev_prov_btn'):
+                    sgci_exigir_permiso(conn, 'banco', 'anular', 'Conciliación bancaria')
                     try:
                         nuevo=revertir_pago_proveedor_cartola(conn,opciones[opcion])
                         sgci_exito(f'Asiento reverso {nuevo} creado. Movimiento pendiente para conciliar nuevamente.')
@@ -3195,6 +3201,7 @@ elif menu == "📊 Conciliación":
                     obs=st.text_input("Referencia / observación",key="sgci_ventas_nc_obs")
                     conf=st.checkbox("Confirmo que los documentos corresponden a la misma operación y que su efecto contable ya está registrado.",key="sgci_ventas_nc_conf")
                     if st.button("🔗 Compensar documentos",disabled=not conf,type="primary",key="sgci_ventas_nc_aplicar"):
+                        sgci_exigir_permiso(conn, 'cxc', 'editar', 'Clientes y estados de cuenta')
                         try:
                             sgci_compensar_nc(conn,modulo_doc,tercero,nc_id,fac_id,importe,obs)
                             sgci_exito("Compensación auxiliar registrada sin generar asientos.");st.rerun()
@@ -3206,6 +3213,7 @@ elif menu == "📊 Conciliación":
                         cid=st.selectbox("Registro",historial.id.astype(int).tolist(),key="sgci_ventas_rev_id")
                         motivo=st.text_input("Motivo obligatorio",key="sgci_ventas_rev_motivo")
                         if st.button("Revertir",disabled=not motivo.strip(),key="sgci_ventas_rev_btn"):
+                            sgci_exigir_permiso(conn, 'cxc', 'anular', 'Clientes y estados de cuenta')
                             try: sgci_anular_compensacion(conn,cid,motivo);st.rerun()
                             except Exception as exc: st.error(str(exc))
 
@@ -3385,6 +3393,7 @@ elif menu == "📊 Conciliación":
                     obs=st.text_input("Referencia / observación",key="sgci_compras_nc_obs")
                     conf=st.checkbox("Confirmo que los documentos corresponden a la misma operación y que su efecto contable ya está registrado.",key="sgci_compras_nc_conf")
                     if st.button("🔗 Compensar documentos",disabled=not conf,type="primary",key="sgci_compras_nc_aplicar"):
+                        sgci_exigir_permiso(conn, 'cxp', 'editar', 'Proveedores y estados de cuenta')
                         try:
                             sgci_compensar_nc(conn,modulo_doc,tercero,nc_id,fac_id,importe,obs)
                             sgci_exito("Compensación auxiliar registrada sin generar asientos.");st.rerun()
@@ -3396,6 +3405,7 @@ elif menu == "📊 Conciliación":
                         cid=st.selectbox("Registro",historial.id.astype(int).tolist(),key="sgci_compras_rev_id")
                         motivo=st.text_input("Motivo obligatorio",key="sgci_compras_rev_motivo")
                         if st.button("Revertir",disabled=not motivo.strip(),key="sgci_compras_rev_btn"):
+                            sgci_exigir_permiso(conn, 'cxp', 'anular', 'Proveedores y estados de cuenta')
                             try: sgci_anular_compensacion(conn,cid,motivo);st.rerun()
                             except Exception as exc: st.error(str(exc))
 
