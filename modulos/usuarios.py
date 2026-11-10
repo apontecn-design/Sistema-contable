@@ -260,7 +260,7 @@ def sgci_admin_auth_request(metodo,ruta,datos):
     """Uso EXCLUSIVO del servidor. No exponer la service-role key en Colab ni GitHub."""
     config=sgci_supabase_config()
     secreto=os.getenv('SUPABASE_SERVICE_ROLE_KEY','').strip()
-    if not config or not secreto or os.getenv('SGCI_LAB_MODE','1')=='1':
+    if not config or not secreto or os.getenv('SGCI_LAB_MODE','0')=='1':
         raise ValueError('Creación de cuentas deshabilitada en este laboratorio. Requiere un servidor privado configurado.')
     url,_=config
     req=urllib.request.Request(url+'/auth/v1/admin/'+ruta,
@@ -388,7 +388,7 @@ def sgci_pantalla_permisos(conn):
             with st.form('provision_cuenta'):
                 temporal=st.text_input('Contraseña temporal',type='password')
                 confirmar_temp=st.text_input('Confirmar contraseña temporal',type='password')
-                enviar_temp=st.form_submit_button('Crear cuenta Supabase',disabled=os.getenv('SGCI_LAB_MODE','1')=='1')
+                enviar_temp=st.form_submit_button('Crear cuenta Supabase',disabled=os.getenv('SGCI_LAB_MODE','0')=='1')
             if enviar_temp:
                 try:
                     sgci_validar_clave_nueva(temporal,confirmar_temp)
