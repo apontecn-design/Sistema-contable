@@ -5,6 +5,11 @@ def obtener_entidad(
     rut,
     razon_social
 ):
+    if tabla not in ('proveedores', 'clientes'):
+        raise ValueError('Entidad RCV no válida.')
+    sgci_autorizar_operacion(
+        conn, 'cxp' if tabla == 'proveedores' else 'cxc',
+        'contabilizar', 'RCV Compras' if tabla == 'proveedores' else 'RCV Ventas')
 
     rut = normalizar_rut(rut)
 
