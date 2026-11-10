@@ -59,7 +59,7 @@ def tes_crear_tablas(conn):
 
 
 def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
-    sgci_autorizar_operacion(conn, 'tesoreria', 'contabilizar')
+    sgci_autorizar_operacion(conn, 'tesoreria', 'contabilizar', 'Confirmación de pagos')
     """Contabilización atómica y única. No registra cartola ni conciliación."""
     try:
         conn.execute('BEGIN IMMEDIATE')
@@ -209,7 +209,7 @@ def pantalla_tesoreria(conn):
             observacion = st.text_area('Observaciones', height=80)
             guardar = st.form_submit_button('Guardar solicitud en borrador', type='primary')
         if guardar:
-            sgci_exigir_permiso(conn, 'tesoreria', 'crear')
+            sgci_exigir_permiso(conn, 'tesoreria', 'crear', 'Solicitudes de fondos')
             pid = opciones[opcion]
             if pid is not None:
                 beneficiario = str(proveedores.loc[proveedores.id == pid, 'nombre'].iloc[0])
@@ -291,7 +291,7 @@ def pantalla_tesoreria(conn):
                     elegida=st.selectbox(f'Línea {n} · {d["descripcion"]} · {money(d["monto"])}',opciones_tes,index=indice,key=f'tes_linea_cta_{d["id"]}')
                     seleccion_tes[d['id']]=cuentas_tes.get(elegida)
                 if seleccion_tes and st.button('💾 Guardar clasificación por línea',key=f'tes_guardar_cuentas_{sid}'):
-                    sgci_exigir_permiso(conn,'tesoreria','contabilizar')
+                    sgci_exigir_permiso(conn,'tesoreria','contabilizar','Confirmación de pagos')
                     if fila['estado']=='CONTABILIZADA':
                         st.error('No se puede modificar un asiento contabilizado.')
                     else:
@@ -301,7 +301,7 @@ def pantalla_tesoreria(conn):
                         st.success('Clasificación contable guardada para todas las líneas.')
             if fila['estado'] == 'BORRADOR':
                 if st.button('Marcar como enviada a Finanzas', key=f'tes_env_{sid}'):
-                    sgci_exigir_permiso(conn, 'tesoreria', 'crear')
+                    sgci_exigir_permiso(conn, 'tesoreria', 'crear', 'Solicitudes de fondos')
                     with conn:
                         conn.execute("UPDATE tes_solicitudes SET estado='ENVIADA', fecha_envio=? WHERE id=? AND estado='BORRADOR'", (datetime.now().isoformat(timespec='seconds'), sid))
                     st.session_state['tes_preferir_listado']=True
@@ -310,13 +310,13 @@ def pantalla_tesoreria(conn):
                 st.caption('Registra únicamente decisiones efectivamente comunicadas por Finanzas.')
                 c1, c2 = st.columns(2)
                 if c1.button('Registrar aprobación externa', key=f'tes_ap_{sid}'):
-                    sgci_exigir_permiso(conn, 'tesoreria', 'aprobar')
+                    sgci_exigir_permiso(conn, 'tesoreria', 'aprobar', 'Solicitudes de fondos')
                     with conn:
                         conn.execute("UPDATE tes_solicitudes SET estado='APROBADA', fecha_aprobacion=? WHERE id=? AND estado='ENVIADA'", (datetime.now().isoformat(timespec='seconds'), sid))
                     st.session_state['tes_preferir_listado']=True
                     st.rerun()
                 if c2.button('Registrar rechazo externo', key=f'tes_re_{sid}'):
-                    sgci_exigir_permiso(conn, 'tesoreria', 'aprobar')
+                    sgci_exigir_permiso(conn, 'tesoreria', 'aprobar', 'Solicitudes de fondos')
                     with conn:
                         conn.execute("UPDATE tes_solicitudes SET estado='RECHAZADA', fecha_rechazo=? WHERE id=? AND estado='ENVIADA'", (datetime.now().isoformat(timespec='seconds'), sid))
                     st.session_state['tes_preferir_listado']=True
@@ -341,7 +341,7 @@ def pantalla_tesoreria(conn):
                     conformidad = st.checkbox('Confirmo que recibí evidencia del pago y que los datos son correctos.', key=f'tes_ok_{sid}')
                     registrar = st.form_submit_button('Confirmar transferencia y contabilizar', type='primary')
                 if registrar:
-                    sgci_exigir_permiso(conn, 'tesoreria', 'contabilizar')
+                    sgci_exigir_permiso(conn, 'tesoreria', 'contabilizar', 'Confirmación de pagos')
                     datos = respaldo.getvalue() if respaldo is not None else b''
                     if faltan:
                         st.error('Asigna y guarda una cuenta contable a cada línea antes de contabilizar.')
@@ -402,7 +402,7 @@ def pantalla_tesoreria(conn):
                     cuenta_sin_dte=None
                     st.caption('Para corregir cuentas pendientes, utiliza los selectores por línea y guarda la clasificación.')
                     if st.button('Contabilizar pago confirmado',type='primary',key=f'tes_cont_{sid}'):
-                        sgci_exigir_permiso(conn, 'tesoreria', 'contabilizar')
+                        sgci_exigir_permiso(conn, 'tesoreria', 'contabilizar', 'Confirmación de pagos')
                         try:
                             if banco_sel=='Seleccionar banco':
                                 raise ValueError('Selecciona el banco de origen.')
