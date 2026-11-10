@@ -506,7 +506,6 @@ elif menu == "👥 Recursos Humanos":
             guardar=st.form_submit_button('💾 Guardar ficha',type='primary')
             if guardar:
                 if not rut.strip() or not nombre.strip(): st.error('RUT y nombre son obligatorios.')
-                    sgci_exigir_permiso(conn, 'nomina', 'crear', 'Trabajadores')
                 else:
                     vals=(rut.strip(),nombre.strip(),ingreso.isoformat(),cargo.strip(),contrato,clp_round(sueldo),grat_tipo,clp_round(grat),afp,salud_tipo,isapre.strip(),salud_modalidad,salud_valor,int(afc),int(anticipo),ant_pct,banco.strip(),tipo_cta,nro.strip(),int(activo),datetime.now().isoformat(timespec='seconds'))
                     if edit_row:
@@ -561,7 +560,6 @@ elif menu == "👥 Recursos Humanos":
                         conn.commit();sgci_exito("Movimiento de vacaciones registrado.");st.rerun()
             st.markdown("#### Solicitudes")
             with st.expander("➕ Nueva solicitud",expanded=False):
-                sgci_exigir_permiso(conn, 'nomina', 'editar', 'Vacaciones')
                 with st.form("rrhh_vac_sol_form",clear_on_submit=True):
                     a,b=st.columns(2)
                     desde=a.date_input("Desde",value=date.today())
@@ -1595,7 +1593,6 @@ elif menu == "🏦 Bancos y Cartolas":
             monto_op = st.number_input("Monto de la operación", min_value=0.0, step=1000.0,format='%.0f')
             cuenta_op = st.selectbox("Cuenta contable de contrapartida", list(mapa.keys())) if mapa else ""
             if st.form_submit_button("Guardar operación"):
-                sgci_exigir_permiso(conn, 'banco', 'crear', 'Bancos y cartolas')
                 if not descripcion_op or monto_op <= 0 or not cuenta_op:
                     st.error("Completa descripción, monto y cuenta contable.")
                 else:
@@ -2828,7 +2825,6 @@ elif menu == "👥 Clientes":
             telefono = st.text_input("Teléfono")
 
             if st.form_submit_button("Guardar cliente"):
-                sgci_exigir_permiso(conn, 'cxc', 'crear', 'Clientes y estados de cuenta')
                 if not validar_rut(rut):
                     st.error("RUT inválido.")
                 elif not nombre.strip():
@@ -2948,7 +2944,6 @@ elif menu == "🏢 Proveedores":
             telefono = st.text_input("Teléfono")
 
             if st.form_submit_button("Guardar proveedor"):
-                sgci_exigir_permiso(conn, 'cxp', 'crear', 'Proveedores y estados de cuenta')
                 if not validar_rut(rut):
                     st.error("RUT inválido.")
                 elif not nombre.strip():
@@ -3670,7 +3665,6 @@ elif menu == "📋 Plan de Cuentas":
             nivel = st.number_input("Nivel", min_value=1, max_value=10, value=3)
 
             if st.form_submit_button("Crear cuenta"):
-                sgci_exigir_permiso(conn, 'contabilidad', 'crear', 'Plan de Cuentas')
                 try:
                     conn.execute(
                         """
@@ -3840,7 +3834,6 @@ elif menu == "⚙️ Reglas Contables":
         descripcion = st.text_input("Descripción")
 
         if st.form_submit_button("Guardar regla"):
-            sgci_exigir_permiso(conn, 'administracion', 'editar', 'Reglas Contables')
             guardar_regla(
                 conn,
                 tipo,
