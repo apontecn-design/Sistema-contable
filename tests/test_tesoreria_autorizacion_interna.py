@@ -40,6 +40,37 @@ class TestTesoreriaProteccionInterna(unittest.TestCase):
             p.stop()
         self.conn.close()
 
+    def test_pago_ya_contabilizado_no_se_duplica(self):
+        self.conn.execute("""CREATE TABLE tes_confirmaciones_pago (
+            solicitud_id INTEGER PRIMARY KEY, asiento_id INTEGER, estado TEXT)""")
+        self.conn.execute("""INSERT INTO tes_confirmaciones_pago VALUES
+            (1,42,'CONTABILIZADO')""")
+        self.conn.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Finanzas','tesoreria','Confirmación de pagos','contabilizar',1)""")
+        self.conn.commit()
+        with self.assertRaisesRegex(ValueError, 'ya fue contabilizada'):
+            tesoreria.tes_contabilizar_pago(self.conn, 1, 99)
+        self.assertEqual(self.conn.execute(
+            'SELECT asiento_id FROM tes_confirmaciones_pago WHERE solicitud_id=1'
+        ).fetchone()[0], 42)
+        self.assertEqual(self.conn.execute(
+            'SELECT COUNT(*) FROM tes_confirmaciones_pago'
+        ).fetchone()[0], 1)
+        self.assertFalse(self.conn.in_transaction)
+
+    def test_solicitud_inexistente_no_genera_pago(self):
+        self.conn.execute("""CREATE TABLE tes_confirmaciones_pago (
+            solicitud_id INTEGER PRIMARY KEY, asiento_id INTEGER, estado TEXT)""")
+        self.conn.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Finanzas','tesoreria','Confirmación de pagos','contabilizar',1)""")
+        self.conn.commit()
+        with self.assertRaisesRegex(ValueError, 'no está pendiente'):
+            tesoreria.tes_contabilizar_pago(self.conn, 999, 99)
+        self.assertEqual(self.conn.execute(
+            'SELECT COUNT(*) FROM tes_confirmaciones_pago'
+        ).fetchone()[0], 0)
+        self.assertFalse(self.conn.in_transaction)
+
     def test_sin_permiso_rechaza_antes_de_mutar(self):
         with self.assertRaises(PermissionError):
             tesoreria.tes_contabilizar_pago(self.conn, 1, 99)
