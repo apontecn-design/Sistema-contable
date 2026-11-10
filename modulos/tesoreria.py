@@ -326,7 +326,7 @@ def pantalla_tesoreria(conn):
             elif fila['estado'] == 'APROBADA':
                 sin_dte_ap=detalle['compra_id'].isna().any()
                 cuenta_ap=None
-                faltan=conn.execute('SELECT COUNT(*) FROM tes_solicitud_detalle WHERE solicitud_id=? AND compra_id IS NULL AND COALESCE(cuenta_contable,'')=''',(sid,)).fetchone()[0]
+                faltan=conn.execute("SELECT COUNT(*) FROM tes_solicitud_detalle WHERE solicitud_id=? AND compra_id IS NULL AND COALESCE(cuenta_contable, '') = ''", (sid,)).fetchone()[0]
                 if faltan:
                     st.warning(f'Hay {faltan} línea(s) sin cuenta contable. Guarda la clasificación antes de confirmar el pago.')
                 st.info('Al guardar la confirmación, SGCI intentará contabilizar automáticamente. La conciliación se realiza después.')
