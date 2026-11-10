@@ -25,14 +25,19 @@ def compras_pendientes_regularizar_iva(conn):
     """
     asegurar_control_regularizacion_iva_compras(conn)
     codigo_iva = ROLES["iva_credito"][1]
+    # Compatibilidad con bases nuevas o históricas que aún no tienen esta
+    # columna opcional del proceso de recuperación tributaria del RCV.
+    columnas_compras = {fila[1] for fila in conn.execute('PRAGMA table_info(compras)').fetchall()}
+    expr_recuperados = ('COALESCE(c.datos_tributarios_recuperados,0)'
+                         if 'datos_tributarios_recuperados' in columnas_compras else '0')
 
-    df = pd.read_sql_query("""
+    df = pd.read_sql_query(f"""
         SELECT
             c.id, c.fecha, c.tipo_doc, c.folio, c.glosa, c.lote_id,
             c.cuenta_gasto, COALESCE(c.monto_neto,0) AS monto_neto,
             COALESCE(c.iva,0) AS iva_registrado,
             COALESCE(c.monto_total,0) AS monto_total,
-            COALESCE(c.datos_tributarios_recuperados,0) AS datos_tributarios_recuperados,
+            {expr_recuperados} AS datos_tributarios_recuperados,
             p.rut,
             COALESCE(NULLIF(p.razon_social,''),p.nombre) AS proveedor
         FROM compras c
