@@ -17,5 +17,9 @@ jobs:
         run: pip install -r requirements.txt
       - name: Validar sintaxis Python
         run: python -m compileall -q app.py modulos tests sgci_rrhh_autorizacion.py sgci_rrhh_seguridad.py
-      - name: Ejecutar pruebas seguras sin datos reales
-        run: python -m unittest discover -s tests -v
+      - name: Crear base SQLite sintética y ejecutar pruebas
+        env:
+          CONTEM_TEST_DB: ${{ runner.temp }}/contem_sintetico.db
+        run: |
+          python -c "import sqlite3,os; sqlite3.connect(os.environ['CONTEM_TEST_DB']).close()"
+          python -m unittest discover -s tests -v
