@@ -1,0 +1,21 @@
+name: Validación CONTEM (rama de integración)
+on:
+  push:
+    branches: [contem-v1-integracion]
+  pull_request:
+    branches: [main]
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Dependencias
+        run: pip install -r requirements.txt
+      - name: Validar sintaxis Python
+        run: python -m compileall -q app.py modulos tests sgci_rrhh_autorizacion.py sgci_rrhh_seguridad.py
+      - name: Ejecutar pruebas seguras sin datos reales
+        run: python -m unittest discover -s tests -v
