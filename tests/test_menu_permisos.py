@@ -34,6 +34,18 @@ class TestMenuPermisos(unittest.TestCase):
     def test_legacy_menu_without_matrix(self):
         self.assertTrue(usuarios.sgci_puede(self.db, "cxc", "ver"))
 
+    def test_matrix_without_view_does_not_fall_back_to_legacy(self):
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxc','Clientes y estados de cuenta','editar',1)""")
+        self.assertFalse(usuarios.sgci_puede(self.db, 'cxc', 'ver'))
+
+    def test_explicit_view_restores_menu_access(self):
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxc','Clientes y estados de cuenta','editar',1)""")
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxc','Clientes y estados de cuenta','ver',1)""")
+        self.assertTrue(usuarios.sgci_puede(self.db, 'cxc', 'ver'))
+
     def test_profile_grant_enables_module(self):
         self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
             ('Ventas','cxc','Clientes y estados de cuenta','ver',1)""")
