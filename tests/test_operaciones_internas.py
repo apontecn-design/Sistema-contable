@@ -61,6 +61,18 @@ class TestOperacionesInternas(unittest.TestCase):
         with self.assertRaises(PermissionError):
             contabilidad_asientos.contabilizar_rcv(self.conn,'ventas',[])
 
+    def test_entidad_rcv_no_permite_escritura_indirecta(self):
+        with patch.dict(contabilidad_asientos.obtener_entidad.__globals__,
+                        {'sgci_autorizar_operacion':usuarios.sgci_autorizar_operacion}):
+            with self.assertRaises(PermissionError):
+                contabilidad_asientos.obtener_entidad(
+                    self.conn,'proveedores','11-1','Proveedor')
+
+    def test_entidad_rcv_rechaza_tabla_arbitraria(self):
+        with self.assertRaises(ValueError):
+            contabilidad_asientos.obtener_entidad(
+                self.conn,'sqlite_master','11-1','Proveedor')
+
     def test_tipo_rcv_invalido_rechazado(self):
         with self.assertRaises(ValueError):
             contabilidad_asientos.contabilizar_rcv(self.conn,'invalido',[])
