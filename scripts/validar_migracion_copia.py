@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from modulos.usuarios import sgci_crear_seguridad
 
 
