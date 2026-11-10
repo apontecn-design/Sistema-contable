@@ -38,5 +38,34 @@ class TestMigracionCopia(unittest.TestCase):
             self.assertEqual(origen.read_bytes(),antes)
 
 
+    def test_esquema_real_sin_usuarios_preserva_diario(self):
+        # El respaldo de 2026-11-10 contiene sgci_usuarios y sgci_permisos
+        # sin registros; reproducimos esa condición sin incluir datos privados.
+        with tempfile.TemporaryDirectory() as temp:
+            origen=Path(temp)/'copia_esquema.db'
+            with sqlite3.connect(origen) as db:
+                db.executescript("""
+                    CREATE TABLE sgci_usuarios (
+                        email TEXT PRIMARY KEY COLLATE NOCASE,
+                        rol TEXT NOT NULL DEFAULT 'Personalizado',
+                        activo INTEGER NOT NULL DEFAULT 1,
+                        creado_en TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+                    CREATE TABLE sgci_permisos (
+                        email TEXT NOT NULL COLLATE NOCASE,
+                        modulo TEXT NOT NULL,
+                        accion TEXT NOT NULL,
+                        permitido INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(email,modulo,accion),
+                        FOREIGN KEY(email) REFERENCES sgci_usuarios(email));
+                    CREATE TABLE nomina_trabajadores(id INTEGER PRIMARY KEY);
+                    CREATE TABLE libro_diario(id INTEGER PRIMARY KEY,debe REAL,haber REAL);
+                    INSERT INTO libro_diario VALUES(1,2500,0),(2,0,2500);
+                """)
+            resultado=MOD.validar(origen)
+            self.assertTrue(resultado['aprobado'],resultado)
+            self.assertEqual(resultado['registros_despues']['sgci_usuarios'],0)
+            self.assertTrue(resultado['totales_diario_preservados'])
+
+
 if __name__=='__main__':
     unittest.main()
