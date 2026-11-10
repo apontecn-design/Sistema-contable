@@ -112,6 +112,28 @@ def sgci_puede(conn, modulo, accion='ver'):
     fila = conn.execute('SELECT activo FROM sgci_usuarios WHERE email=?', (email,)).fetchone()
     if not fila or not fila['activo']:
         return False
+    # La visibilidad del menú refleja los permisos efectivos de submódulos.
+    # Esta comprobación NO concede permisos para modificar registros.
+    if accion == 'ver' and modulo in SGCI_SUBMODULOS:
+        submodulos = SGCI_SUBMODULOS[modulo]
+        if any(sgci_puede_submodulo(conn, modulo, sub, 'ver') for sub in submodulos):
+            return True
+        # Si ya existe una matriz de permisos para este módulo, la ausencia
+        # de autorizaciones efectivas debe denegar el acceso, incluso cuando
+        # persista una concesión heredada en sgci_permisos.
+        configurado = conn.execute(
+            """SELECT 1 FROM sgci_perfil_permisos
+               WHERE perfil=(SELECT rol FROM sgci_usuarios WHERE email=?)
+                 AND modulo=? AND accion='ver'
+               UNION ALL
+               SELECT 1 FROM sgci_usuario_permisos_detalle
+               WHERE email=? AND modulo=? AND accion='ver'
+               LIMIT 1""", (email, modulo, email, modulo)
+        ).fetchone()
+        if configurado:
+            return False
+    # Compatibilidad con permisos históricos: las operaciones mutantes
+    # siguen sujetas a controles adicionales por submódulo y registro.
     permiso = conn.execute('SELECT permitido FROM sgci_permisos WHERE email=? AND modulo=? AND accion=?',
                           (email, modulo, accion)).fetchone()
     return bool(permiso and permiso['permitido'])
