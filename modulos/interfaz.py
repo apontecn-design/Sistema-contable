@@ -341,9 +341,13 @@ elif menu == "💼 Tesorería":
 elif menu == "🧾 Facturación y DTE":
     pantalla_dte(conn)
 elif menu == "🏠 Inicio":
+    _hoy_panel = date.today()
+    _mes_panel = _hoy_panel.strftime('%m/%Y')
     st.markdown(
-        '<div class="contem-hero"><h2>Bienvenido a CONTEM</h2>'
-        '<p>Tu empresa, tus finanzas y tus tareas en un solo lugar.</p></div>',
+        '<div class="contem-hero"><div><h2>¡Bienvenido a CONTEM!</h2>'
+        '<p>Gestiona la contabilidad, finanzas y operaciones de tu empresa en un solo lugar.</p>'
+        '</div><div class="contem-hero-periodo">📅 Período contable<br><strong>'
+        + _mes_panel + '</strong></div></div>',
         unsafe_allow_html=True
     )
     st.caption('DASHBOARD  /  RESUMEN FINANCIERO')
@@ -365,7 +369,7 @@ elif menu == "🏠 Inicio":
     c4.metric('🏦 Saldo contable en bancos',money(saldo_banco))
     st.caption('Montos del Libro Diario · período '+mes+' · el saldo bancario puede diferir de la cartola hasta su conciliación.')
     st.write('')
-    col_tareas,col_flujo,col_gastos=st.columns([1.25,1.25,1])
+    col_tareas,col_flujo,col_gastos=st.columns([1.1,1.65,1.05])
     with col_tareas:
         st.subheader('✅ Tareas pendientes')
         pendientes_pago=int(_sgci_valor("SELECT COUNT(*) FROM tes_solicitudes WHERE estado='PENDIENTE_CONTABILIZACION'"))
