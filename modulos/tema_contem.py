@@ -92,6 +92,17 @@ def aplicar_tema_contem():
         color:white;border-radius:18px;padding:23px 28px;margin-bottom:18px;
         box-shadow:0 8px 28px rgba(7,94,61,.12);
     }
+    .contem-hero {display:flex;justify-content:space-between;align-items:center;gap:18px;}
+    .contem-hero-periodo {
+        flex:0 0 auto;min-width:160px;padding:13px 17px;
+        border:1px solid rgba(255,255,255,.35);border-radius:13px;
+        background:rgba(255,255,255,.12);color:#eafff3;font-size:12px;
+    }
+    .contem-hero-periodo strong {font-size:19px;color:white;}
+    @media(max-width:800px) {
+        .contem-hero {flex-direction:column;align-items:flex-start;}
+        .contem-hero-periodo {width:100%;}
+    }
     .contem-hero h2 { color:white;margin:0 0 7px;font-size:25px; }
     .contem-hero p { margin:0;color:#e3fff0;font-size:14px; }
     @media(max-width:800px) {
