@@ -81,17 +81,9 @@ def reorganizar_plan_2026_seguro(conn):
     """Amplía/ordena el plan sin borrar ni renumerar cuentas con historia."""
     # Asegura todas las cuentas nuevas del PLAN_BASE.
     instalar_plan_base(conn)
-    # Correcciones descriptivas seguras: conservan código y, por tanto, todos los saldos/movimientos.
-    cambios = [
-        ("1.2.01.01", "Activo fijo - cuenta histórica"),
-        ("5.2.03", "Gastos de personal"),
-        ("5.2.03.01", "Sueldos y remuneraciones"),
-        ("5.2.03.02", "Gratificaciones"),
-        ("5.2.03.03", "Asignaciones no imponibles"),
-        ("5.2.03.04", "Otros gastos de personal"),
-    ]
-    for codigo, nombre in cambios:
-        conn.execute("UPDATE plan_cuentas SET nombre=? WHERE codigo=?", (nombre, codigo))
+    # No renombrar cuentas existentes: la denominación histórica y las
+    # personalizaciones del usuario son la fuente de verdad.
+    # Las cuentas ausentes se agregan de forma aditiva mediante instalar_plan_base.
     # Cuenta transitoria separada de Gastos de personal.
     conn.execute("""
         INSERT OR IGNORE INTO plan_cuentas
