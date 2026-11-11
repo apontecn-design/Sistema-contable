@@ -17,6 +17,13 @@ PLAN_BASE = [
     ("2.1.01.01", "Proveedores", "Pasivo", "Pasivo", "2.1.01", 4),
     ("2.1.01.02", "IVA Débito Fiscal", "Pasivo", "Pasivo", "2.1.01", 4),
     ("2.1.01.03", "IVA por pagar", "Pasivo", "Pasivo", "2.1.01", 4),
+    # Obligaciones laborales del plan histórico de producción (altas no destructivas).
+    ("2.1.02", "Obligaciones laborales y previsionales", "Pasivo", "Pasivo", "2.1", 3),
+    ("2.1.02.01", "Remuneraciones por pagar", "Pasivo", "Pasivo", "2.1.02", 4),
+    ("2.1.02.02", "Cotizaciones previsionales por pagar", "Pasivo", "Pasivo", "2.1.02", 4),
+    ("2.1.02.03", "Retenciones de Trabajadores por pagar", "Pasivo", "Pasivo", "2.1.02", 4),
+    ("2.1.02.04", "Otras obligaciones laborales", "Pasivo", "Pasivo", "2.1.02", 4),
+    ("2.1.02.05", "Impuesto Único de trabajadores por pagar", "Pasivo", "Pasivo", "2.1.02", 4),
     ("3", "PATRIMONIO", "Patrimonio", "Patrimonio", None, 1),
     ("3.1", "Capital", "Patrimonio", "Patrimonio", "3", 2),
     ("3.1.01", "Capital", "Patrimonio", "Patrimonio", "3.1", 3),
