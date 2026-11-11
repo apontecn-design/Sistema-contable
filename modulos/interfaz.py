@@ -3120,10 +3120,44 @@ elif menu == "📒 Libro Diario":
         conn
     )
 
-    st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
     if not df.empty:
-        pdf = pdf_desde_dataframe("Libro Diario","SGCI - Sistema de Gestión Contable Integral",df,{"Debe","Haber"})
-        st.download_button("🖨️ Imprimir / PDF Libro Diario",pdf,"libro_diario.pdf","application/pdf",key="pdf_libro_diario")
+        # Control por asiento: no confundir el total del libro con el de un comprobante.
+        asientos = df["Asiento"].dropna().unique().tolist()
+        opciones_asiento = ["Todos los asientos"] + [
+            f"Asiento N.º {int(n) if float(n).is_integer() else n}" for n in asientos
+        ]
+        seleccion_asiento = st.selectbox(
+            "Consultar asiento contable", opciones_asiento, key="diario_asiento_consulta"
+        )
+        if seleccion_asiento == "Todos los asientos":
+            vista_diario = df
+            st.caption("Totales del Libro Diario para todos los movimientos mostrados.")
+        else:
+            numero_asiento = asientos[opciones_asiento.index(seleccion_asiento) - 1]
+            vista_diario = df.loc[df["Asiento"] == numero_asiento].copy()
+            st.caption(f"Control contable del {seleccion_asiento}.")
+        total_debe = float(pd.to_numeric(vista_diario["Debe"], errors="coerce").fillna(0).sum())
+        total_haber = float(pd.to_numeric(vista_diario["Haber"], errors="coerce").fillna(0).sum())
+        diferencia = total_debe - total_haber
+        col_debe, col_haber, col_diferencia = st.columns(3)
+        col_debe.metric("Total Debe", money(total_debe))
+        col_haber.metric("Total Haber", money(total_haber))
+        col_diferencia.metric("Diferencia", money(diferencia))
+        if abs(diferencia) < 0.01:
+            st.success("Asiento cuadrado." if seleccion_asiento != "Todos los asientos" else "Movimientos mostrados cuadrados.")
+        else:
+            st.error("Diferencia contable detectada. Revise las partidas antes de continuar.")
+        st.dataframe(formatear_montos_df(vista_diario), use_container_width=True, hide_index=True)
+        pdf = pdf_desde_dataframe(
+            "Libro Diario", "CONTEM - Sistema Contable y Empresarial",
+            vista_diario, {"Debe", "Haber"}
+        )
+        st.download_button(
+            "🖨️ Imprimir / PDF Libro Diario", pdf, "libro_diario.pdf",
+            "application/pdf", key="pdf_libro_diario"
+        )
+    else:
+        st.info("No hay movimientos registrados en el Libro Diario.")
 
 
 # ============================================================
