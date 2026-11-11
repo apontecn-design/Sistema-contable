@@ -1,3 +1,4 @@
+from contextlib import closing
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
 def sgci_empresa_esquema(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS sgci_perfil_empresa (
@@ -24,7 +25,7 @@ def sgci_membrete_pdf(canvas, doc):
     # sin escribir ni depender de un 'conn' global inexistente.
     perfil = {}
     try:
-        with sqlite3.connect('file:' + os.path.abspath(DB_FILE) + '?mode=ro', uri=True) as pdf_conn:
+        with closing(sqlite3.connect('file:' + os.path.abspath(DB_FILE) + '?mode=ro', uri=True)) as pdf_conn, pdf_conn:
             pdf_conn.row_factory = sqlite3.Row
             fila = pdf_conn.execute('SELECT * FROM sgci_perfil_empresa WHERE id=1').fetchone()
             perfil = dict(fila) if fila else {}

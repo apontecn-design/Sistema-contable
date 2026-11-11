@@ -19,7 +19,7 @@ CUENTAS_NOMINA = {
 
 
 def auditar(ruta):
-    ruta = Path(ruta).resolve(strict=True)
+    ruta = Path(ruta).resolve()
     conn = sqlite3.connect(ruta.as_uri() + "?mode=ro", uri=True)
     try:
         integridad = conn.execute("PRAGMA integrity_check").fetchone()[0]

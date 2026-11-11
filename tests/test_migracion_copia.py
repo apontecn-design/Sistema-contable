@@ -1,3 +1,4 @@
+from contextlib import closing
 """Ejecuta migración aditiva sobre una copia temporal y verifica invariantes."""
 import importlib.util
 import sqlite3
@@ -15,7 +16,7 @@ class TestMigracionCopia(unittest.TestCase):
     def test_migracion_preserva_registros_y_diario(self):
         with tempfile.TemporaryDirectory() as temp:
             origen=Path(temp)/'respaldo.db'
-            with sqlite3.connect(origen) as db:
+            with closing(sqlite3.connect(origen)) as db, db:
                 db.executescript("""
                     CREATE TABLE sgci_usuarios(
                         email TEXT PRIMARY KEY,rol TEXT,activo INTEGER,creado_en TEXT);
@@ -43,7 +44,7 @@ class TestMigracionCopia(unittest.TestCase):
         # sin registros; reproducimos esa condición sin incluir datos privados.
         with tempfile.TemporaryDirectory() as temp:
             origen=Path(temp)/'copia_esquema.db'
-            with sqlite3.connect(origen) as db:
+            with closing(sqlite3.connect(origen)) as db, db:
                 db.executescript("""
                     CREATE TABLE sgci_usuarios (
                         email TEXT PRIMARY KEY COLLATE NOCASE,

@@ -5,7 +5,7 @@ import sqlite3
 
 
 def auditar_nomina(ruta):
-    conn = sqlite3.connect("file:" + __import__("pathlib").Path(ruta).resolve(strict=True).as_posix() + "?mode=ro", uri=True)
+    conn = sqlite3.connect(__import__("pathlib").Path(ruta).resolve().as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         tablas = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}

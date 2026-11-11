@@ -10,8 +10,9 @@ def pdf_liquidacion_autorizado(conn, email, liquidacion_id, generador):
         raise AccesoDenegado('Liquidación inexistente o no disponible')
     registro = conn.execute(
         """SELECT l.*,t.rut,t.nombre,t.cargo FROM nomina_liquidaciones l
-           JOIN nomina_trabajadores t ON t.id=l.trabajador_id WHERE l.id=?""",
-        (int(autorizado['id']),)
+           JOIN nomina_trabajadores t ON t.id=l.trabajador_id
+           WHERE l.id=? AND l.trabajador_id=?""",
+        (int(autorizado['id']), int(autorizado['trabajador_id']))
     ).fetchone()
     if registro is None:
         raise AccesoDenegado('Liquidación no disponible')

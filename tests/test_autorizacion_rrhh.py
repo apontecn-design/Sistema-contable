@@ -97,5 +97,22 @@ class TestAutorizacionRRHH(unittest.TestCase):
         self.assertFalse(permiso_efectivo(self.conn,self.email,'Inexistente'))
         with self.assertRaises(AccesoDenegado): obtener_liquidacion(self.conn,self.email,10,'eliminar')
 
+    def test_consulta_individual_filtra_alcance_en_sql(self):
+        consultas = []
+        self.conn.set_trace_callback(consultas.append)
+        with self.assertRaises(AccesoDenegado):
+            obtener_liquidacion(self.conn, self.email, 20)
+        consulta = next(sql for sql in consultas if 'SELECT l.id' in sql)
+        self.assertIn('AND l.trabajador_id IN (1)', consulta)
+        self.assertEqual(self.conn.execute(consulta).fetchall(), [])
+
+    def test_id_inexistente_y_ajeno_no_revelan_existencia(self):
+        mensajes = []
+        for identificador in (20, 999):
+            with self.assertRaises(AccesoDenegado) as exc:
+                obtener_liquidacion(self.conn, self.email, identificador)
+            mensajes.append(str(exc.exception))
+        self.assertEqual(mensajes[0], mensajes[1])
+
 
 if __name__ == '__main__': unittest.main()

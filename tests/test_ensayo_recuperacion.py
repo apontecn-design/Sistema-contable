@@ -1,3 +1,4 @@
+from contextlib import closing
 """Ensayo de backup/restore sobre base sintética sin alterar origen."""
 import importlib.util
 import sqlite3
@@ -15,7 +16,7 @@ class TestRecuperacion(unittest.TestCase):
     def test_respaldo_y_restauracion_conservan_origen(self):
         with tempfile.TemporaryDirectory() as carpeta:
             origen=Path(carpeta)/'original.db'
-            with sqlite3.connect(origen) as db:
+            with closing(sqlite3.connect(origen)) as db, db:
                 db.executescript("""
                     PRAGMA foreign_keys=ON;
                     CREATE TABLE clientes(id INTEGER PRIMARY KEY,nombre TEXT);

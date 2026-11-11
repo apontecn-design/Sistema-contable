@@ -1,3 +1,4 @@
+from contextlib import closing
 """Contrato de auditoría de solo lectura sobre copia sintética de SQLite."""
 import importlib.util
 import sqlite3
@@ -15,7 +16,7 @@ class TestAuditoriaSQLite(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.ruta=Path(self.tmp.name)/'copia.db'
-        with sqlite3.connect(self.ruta) as db:
+        with closing(sqlite3.connect(self.ruta)) as db, db:
             db.executescript("""
                 CREATE TABLE cartola_bancaria(
                     id INTEGER PRIMARY KEY,conciliado INTEGER,
@@ -47,14 +48,14 @@ class TestAuditoriaSQLite(unittest.TestCase):
         self.assertEqual(antes,self.ruta.read_bytes())
 
     def test_detecta_duplicados_tesoreria(self):
-        with sqlite3.connect(self.ruta) as db:
+        with closing(sqlite3.connect(self.ruta)) as db, db:
             db.execute("""INSERT INTO cartola_bancaria VALUES
                 (4,1,45,'TESORERIA',20)""")
         r=AUDIT.auditar(self.ruta)
         self.assertEqual(r['hallazgos']['cartolas_tesoreria_duplicadas'],1)
 
     def test_detecta_sobreaplicacion_proveedores(self):
-        with sqlite3.connect(self.ruta) as db:
+        with closing(sqlite3.connect(self.ruta)) as db, db:
             db.execute('UPDATE aplicaciones_proveedores SET monto=90')
         r=AUDIT.auditar(self.ruta)
         self.assertEqual(r['hallazgos']['pagos_proveedores_sobreaplicados'],1)

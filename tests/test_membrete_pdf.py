@@ -1,3 +1,4 @@
+from contextlib import closing
 """Regresión: el membrete ReportLab no requiere 'conn' global."""
 import io
 import os
@@ -18,7 +19,7 @@ class TestMembretePDF(unittest.TestCase):
     def test_pdf_con_perfil_sin_conn_global(self):
         with tempfile.TemporaryDirectory() as temp:
             db = str(Path(temp) / "sgci.db")
-            with sqlite3.connect(db) as conn:
+            with closing(sqlite3.connect(db)) as conn, conn:
                 conn.execute("""CREATE TABLE sgci_perfil_empresa
                     (id INTEGER PRIMARY KEY, razon_social TEXT, rut TEXT,
                      giro TEXT, direccion TEXT, comuna TEXT, ciudad TEXT,

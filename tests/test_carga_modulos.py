@@ -1,5 +1,6 @@
 """Prueba de integración sin servidor web: carga los 22 componentes y crea esquemas en una copia."""
 import os
+from contextlib import closing
 import sqlite3
 import sys
 import tempfile
@@ -18,7 +19,7 @@ class TestCargaModular(unittest.TestCase):
             self.skipTest('Requiere CONTEM_TEST_DB con una copia no productiva')
         with tempfile.TemporaryDirectory() as carpeta:
             db = Path(carpeta)/'sgci.db'
-            with sqlite3.connect(origen) as a, sqlite3.connect(str(db)) as b:
+            with closing(sqlite3.connect(origen)) as a, closing(sqlite3.connect(str(db))) as b, b:
                 a.backup(b)
             st = types.ModuleType('streamlit')
             st.session_state={'authenticated':True,'sgci_auth_tipo':'argon2'}
@@ -27,6 +28,7 @@ class TestCargaModular(unittest.TestCase):
             activado=[]
             def detener_menu(*a,**k):
                 activado.append('navegacion')
+                sys.modules['modulos.interfaz'].conn.close()
                 raise DetenerEnMenu()
             st.sidebar=types.SimpleNamespace(
                 markdown=lambda *a,**k:None,
@@ -44,7 +46,7 @@ class TestCargaModular(unittest.TestCase):
                 with self.assertRaises(DetenerEnMenu):
                     app.iniciar()
                 self.assertEqual(activado,['navegacion'])
-            with sqlite3.connect(str(db)) as con:
+            with closing(sqlite3.connect(str(db))) as con, con:
                 self.assertEqual(con.execute('PRAGMA integrity_check').fetchone()[0],'ok')
                 self.assertTrue(con.execute("SELECT name FROM sqlite_master WHERE name='sgci_perfiles'").fetchone())
 

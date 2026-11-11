@@ -1,5 +1,6 @@
 """Comprueba migración aditiva de permisos sin tocar la base original."""
 import os
+from contextlib import closing
 import shutil
 import sqlite3
 import tempfile
@@ -16,9 +17,9 @@ class TestMigracion(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporal:
             copia = Path(temporal) / 'copia.db'
             # API de backup de SQLite, no copia de bytes de una BD con actividad.
-            with sqlite3.connect(ruta) as origen, sqlite3.connect(str(copia)) as destino:
+            with closing(sqlite3.connect(ruta)) as origen, closing(sqlite3.connect(str(copia))) as destino, destino:
                 origen.backup(destino)
-            with sqlite3.connect(str(copia)) as conexion:
+            with closing(sqlite3.connect(str(copia))) as conexion, conexion:
                 conexion.row_factory = sqlite3.Row
                 conexion.execute('PRAGMA foreign_keys=ON')
                 tablas_antes = {r['name'] for r in conexion.execute("SELECT name FROM sqlite_master WHERE type='table'")}

@@ -1,3 +1,4 @@
+from contextlib import closing
 """Ensayo aislado de respaldo y restauración SQLite. No toca Render.
 
 Uso: python scripts/ensayar_recuperacion.py /ruta/copia.db
@@ -17,17 +18,17 @@ def ensayar(origen):
     with tempfile.TemporaryDirectory(prefix='contem_recovery_') as temp:
         respaldo=Path(temp)/'respaldo.db'
         restaurada=Path(temp)/'restaurada.db'
-        with sqlite3.connect(origen.as_uri()+'?mode=ro',uri=True) as db_origen:
-            with sqlite3.connect(respaldo) as db_respaldo:
+        with closing(sqlite3.connect(origen.as_uri()+'?mode=ro',uri=True)) as db_origen, db_origen:
+            with closing(sqlite3.connect(respaldo)) as db_respaldo, db_respaldo:
                 db_origen.backup(db_respaldo)
-        with sqlite3.connect(respaldo.as_uri()+'?mode=ro',uri=True) as db_respaldo:
-            with sqlite3.connect(restaurada) as db_restaurada:
+        with closing(sqlite3.connect(respaldo.as_uri()+'?mode=ro',uri=True)) as db_respaldo, db_respaldo:
+            with closing(sqlite3.connect(restaurada)) as db_restaurada, db_restaurada:
                 db_respaldo.backup(db_restaurada)
-        with sqlite3.connect(origen.as_uri()+'?mode=ro',uri=True) as db_origen:
+        with closing(sqlite3.connect(origen.as_uri()+'?mode=ro',uri=True)) as db_origen, db_origen:
             esquema_origen=db_origen.execute(
                 "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
             ).fetchall()
-        with sqlite3.connect(restaurada.as_uri()+'?mode=ro',uri=True) as db_restaurada:
+        with closing(sqlite3.connect(restaurada.as_uri()+'?mode=ro',uri=True)) as db_restaurada, db_restaurada:
             integridad=db_restaurada.execute('PRAGMA integrity_check').fetchone()[0]
             fk=db_restaurada.execute('PRAGMA foreign_key_check').fetchall()
             esquema_restaurado=db_restaurada.execute(

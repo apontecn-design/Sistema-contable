@@ -8,6 +8,15 @@ import json
 import os
 import sys
 from pathlib import Path
+from posixpath import normpath
+
+
+def es_ruta_productiva(valor):
+    # Reconocer también rutas declaradas para Linux al validar desde Windows.
+    declarada = normpath(str(valor).replace('\\', '/'))
+    resuelta = Path(valor).expanduser().resolve().as_posix()
+    return any(p == '/var/data' or p.startswith('/var/data/')
+               for p in (declarada, resuelta))
 
 
 def validar(config=None):
@@ -23,13 +32,13 @@ def validar(config=None):
         errores.append('SGCI_DATA_DIR aislado es obligatorio')
     if db:
         ruta=Path(db).expanduser().resolve()
-        if str(ruta)=='/var/data/sgci.db' or str(ruta).startswith('/var/data/'):
+        if es_ruta_productiva(db):
             errores.append('Prohibido usar base de producción en /var/data')
         if ruta.suffix.lower()!='.db':
             errores.append('CONTEM_STAGING_DB debe apuntar a SQLite .db')
     if data_dir:
         carpeta=Path(data_dir).expanduser().resolve()
-        if str(carpeta)=='/var/data' or str(carpeta).startswith('/var/data/'):
+        if es_ruta_productiva(data_dir):
             errores.append('SGCI_DATA_DIR no puede apuntar a producción')
         if db and (ruta.parent!=carpeta):
             errores.append('La base staging debe estar dentro de SGCI_DATA_DIR')

@@ -30,11 +30,20 @@ def obtener_liquidacion(conn, email, liquidacion_id, accion='ver'):
     if accion == 'exportar':
         exigir_lectura(conn, email, 'Liquidaciones', 'ver')
     ids = exigir_lectura(conn, email, 'Liquidaciones', accion)
-    row = conn.execute('''SELECT l.id,l.periodo,l.trabajador_id,t.nombre
+    sql = '''SELECT l.id,l.periodo,l.trabajador_id,t.nombre
                           FROM nomina_liquidaciones l
                           JOIN nomina_trabajadores t ON t.id=l.trabajador_id
-                          WHERE l.id=?''', (int(liquidacion_id),)).fetchone()
+                          WHERE l.id=?'''
+    params = (int(liquidacion_id),)
+    if ids is not None:
+        autorizados = tuple(sorted(ids))
+        sql += ' AND l.trabajador_id IN (' + ','.join('?' for _ in autorizados) + ')'
+        params += autorizados
+    row = conn.execute(sql, params).fetchone()
     if row is None:
+        if ids is not None:
+            # Misma respuesta para ID ajeno o inexistente: no revela terceros.
+            raise AccesoDenegado('Liquidación inexistente o fuera del alcance')
         return None
     if ids is not None and int(row['trabajador_id']) not in ids:
         raise AccesoDenegado('Liquidación fuera del alcance')

@@ -374,7 +374,7 @@ def sgci_contabilizar_devolucion_proveedor(conn, movimiento_id, proveedor_id,
 
     No genera una nueva compra ni altera el asiento de la nota de crédito.
     """
-    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
     sgci_crear_devoluciones_proveedor(conn)
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
     if not mov or int(mov['conciliado'] or 0):
@@ -453,7 +453,7 @@ def sgci_contabilizar_devolucion_proveedor(conn, movimiento_id, proveedor_id,
 
 def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id, compra_ids,
                                                  cuenta_diferencia=None, glosa_diferencia=""):
-    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
     """Contabiliza un cargo bancario como pago a proveedor.
 
     El monto aplicado al auxiliar del proveedor nunca supera el saldo de los documentos elegidos.
@@ -579,7 +579,7 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
 
 
 def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id):
-    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
     """Contabiliza un cargo bancario como pago a proveedor sin aplicarlo a una factura específica.
 
     Se usa para pagos de saldos anteriores o documentos que todavía no están cargados en SGCI.
@@ -652,7 +652,7 @@ def revertir_abono_cliente_cartola(conn, movimiento_id):
     Conserva el asiento original, crea reverso y elimina únicamente el registro
     auxiliar originado por esta conciliación. Nunca deshace aplicaciones posteriores.
     """
-    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
     mov = conn.execute('SELECT * FROM cartola_bancaria WHERE id=?', (int(movimiento_id),)).fetchone()
     if not mov or int(mov['conciliado'] or 0) != 1 or mov['match_tipo'] not in ('CLIENTE_ANTICIPO', 'CLIENTE'):
         raise ValueError('Selecciona un abono de cliente conciliado.')
@@ -746,6 +746,7 @@ def revertir_abono_cliente_cartola(conn, movimiento_id):
 
 def revertir_pago_proveedor_cartola(conn, movimiento_id):
     """Reversión atómica de pago bancario a proveedor, con comprobaciones de trazabilidad."""
+    sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo'] not in ('PROVEEDOR','PROVEEDOR_SIN_DOCUMENTO'):
         raise ValueError('El movimiento no es un pago conciliado a proveedor.')
@@ -814,6 +815,7 @@ def revertir_pago_proveedor_cartola(conn, movimiento_id):
 
 def corregir_conciliacion_manual(conn, movimiento_id):
     """Revierte contablemente una imputación manual bancaria y reabre el movimiento para corregirlo."""
+    sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
     if not mov or int(mov["conciliado"] or 0) != 1:
         raise ValueError("El movimiento no está conciliado.")
@@ -1066,7 +1068,7 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
 
 
 def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_id, periodo, observacion=""):
-    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
     """Vincula un cargo real de cartola con un anticipo de nómina y lo contabiliza una sola vez."""
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov:
@@ -1123,7 +1125,7 @@ def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_i
 
 def revertir_anticipo_nomina_cartola(conn, movimiento_id):
     # Revierte exclusivamente anticipos creados desde cartola.
-    sgci_autorizar_operacion(conn, 'banco', 'contabilizar')
+    sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
     if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo']!='NOMINA_ANTICIPO':
         raise ValueError('El movimiento no es un anticipo de nómina conciliado.')

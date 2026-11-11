@@ -1,3 +1,4 @@
+from contextlib import closing
 """Pruebas de la auditoría de cuentas de Nómina en modo lectura."""
 import importlib.util
 import sqlite3
@@ -15,7 +16,7 @@ class TestAuditoriaCuentasNomina(unittest.TestCase):
     def test_detecta_faltantes_sin_alterar_respaldo(self):
         with tempfile.TemporaryDirectory() as carpeta:
             ruta = Path(carpeta) / "respaldo.db"
-            with sqlite3.connect(ruta) as db:
+            with closing(sqlite3.connect(ruta)) as db, db:
                 db.execute("""CREATE TABLE plan_cuentas (
                     codigo TEXT PRIMARY KEY, nombre TEXT, padre_codigo TEXT)""")
                 db.execute("INSERT INTO plan_cuentas VALUES ('2.1.02.05','Impuesto Único','2.1.02')")
@@ -28,7 +29,7 @@ class TestAuditoriaCuentasNomina(unittest.TestCase):
     def test_valida_jerarquia_completa(self):
         with tempfile.TemporaryDirectory() as carpeta:
             ruta = Path(carpeta) / "respaldo.db"
-            with sqlite3.connect(ruta) as db:
+            with closing(sqlite3.connect(ruta)) as db, db:
                 db.execute("""CREATE TABLE plan_cuentas (
                     codigo TEXT PRIMARY KEY, nombre TEXT, padre_codigo TEXT)""")
                 for codigo, nombre in MOD.CUENTAS_NOMINA.items():

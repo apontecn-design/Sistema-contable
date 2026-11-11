@@ -1,3 +1,4 @@
+from contextlib import closing
 """Ensayo de migración de permisos en copia temporal; nunca modifica origen.
 
 Uso: python scripts/validar_migracion_copia.py /ruta/sgci_respaldo.db
@@ -18,10 +19,10 @@ def validar(origen):
         raise FileNotFoundError(origen)
     with tempfile.TemporaryDirectory(prefix='contem_migracion_') as carpeta:
         destino=Path(carpeta)/'copia.db'
-        with sqlite3.connect(origen.as_uri()+'?mode=ro',uri=True) as entrada:
-            with sqlite3.connect(destino) as salida:
+        with closing(sqlite3.connect(origen.as_uri()+'?mode=ro',uri=True)) as entrada, entrada:
+            with closing(sqlite3.connect(destino)) as salida, salida:
                 entrada.backup(salida)
-        with sqlite3.connect(destino) as db:
+        with closing(sqlite3.connect(destino)) as db, db:
             db.row_factory=sqlite3.Row
             tablas_antes={r['name'] for r in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}

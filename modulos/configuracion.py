@@ -28,8 +28,14 @@ import streamlit as st
 # ============================================================
 
 DATA_DIR = os.getenv("SGCI_DATA_DIR", ".")
-os.makedirs(DATA_DIR, exist_ok=True)
 DB_FILE = os.path.join(DATA_DIR, "sgci.db")
+if os.getenv('CONTEM_ENTORNO', '').strip().lower() in ('staging', 'test'):
+    from scripts.validar_entorno_aislado import validar as _validar_aislamiento
+    _aislamiento = _validar_aislamiento()
+    if not _aislamiento['aprobado']:
+        raise RuntimeError('Entorno de pruebas inseguro: ' + '; '.join(_aislamiento['errores']))
+    DB_FILE = os.path.abspath(os.path.expanduser(os.environ['CONTEM_STAGING_DB']))
+os.makedirs(DATA_DIR, exist_ok=True)
 
 st.set_page_config(
     page_title="CONTEM - Sistema Contable",
