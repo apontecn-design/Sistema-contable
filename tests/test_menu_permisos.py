@@ -90,6 +90,27 @@ class TestMenuPermisos(unittest.TestCase):
                 self.db, 'cxc', 'editar', 'Clientes y estados de cuenta'
             )
 
+    def test_empleado_ve_solo_modulo_con_permiso(self):
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxc','Clientes y estados de cuenta','ver',1)""")
+        self.assertTrue(usuarios.sgci_puede(self.db,'cxc','ver'))
+        self.assertFalse(usuarios.sgci_puede(self.db,'cxp','ver'))
+        self.assertFalse(usuarios.sgci_puede(self.db,'banco','ver'))
+        self.assertFalse(usuarios.sgci_puede(self.db,'administracion','ver'))
+
+    def test_permiso_de_edicion_no_habilita_menu_sin_ver(self):
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxp','RCV Compras','editar',1)""")
+        self.assertFalse(usuarios.sgci_puede(self.db,'cxp','ver'))
+
+    def test_revocacion_individual_oculta_modulo(self):
+        self.db.execute("""INSERT INTO sgci_perfil_permisos VALUES
+            ('Ventas','cxc','Clientes y estados de cuenta','ver',1)""")
+        self.assertTrue(usuarios.sgci_puede(self.db,'cxc','ver'))
+        self.db.execute("""INSERT INTO sgci_usuario_permisos_detalle VALUES
+            ('test@example.com','cxc','Clientes y estados de cuenta','ver',0)""")
+        self.assertFalse(usuarios.sgci_puede(self.db,'cxc','ver'))
+
     def test_unknown_submodule_is_denied(self):
         with self.assertRaises(PermissionError):
             usuarios.sgci_autorizar_operacion(self.db, 'cxc', 'editar', 'Inexistente')
