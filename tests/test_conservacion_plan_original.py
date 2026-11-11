@@ -2,7 +2,7 @@
 import sqlite3
 import unittest
 
-from modulos.plan_cuentas import instalar_plan_base
+from modulos.plan_cuentas import instalar_plan_base, reorganizar_plan_2026_seguro
 
 
 class TestConservacionPlanOriginal(unittest.TestCase):
@@ -42,6 +42,21 @@ class TestConservacionPlanOriginal(unittest.TestCase):
             instalar_plan_base(db)
             self.assertEqual(db.execute("SELECT * FROM libro_diario").fetchall(), antes)
 
+
+
+    def test_reorganizacion_no_renombra_cuentas_historicas(self):
+        with sqlite3.connect(":memory:") as db:
+            db.execute("""CREATE TABLE plan_cuentas (
+                codigo TEXT PRIMARY KEY, nombre TEXT, categoria TEXT,
+                tipo TEXT, padre_codigo TEXT, nivel INTEGER)""")
+            db.execute("CREATE TABLE config_cuentas (rol TEXT, codigo TEXT)")
+            db.execute("""INSERT INTO plan_cuentas VALUES
+                ('5.2.03','Nombre definido por el contador','Nominal','Gastos','5.2',3)""")
+            reorganizar_plan_2026_seguro(db)
+            nombre = db.execute(
+                "SELECT nombre FROM plan_cuentas WHERE codigo='5.2.03'"
+            ).fetchone()[0]
+            self.assertEqual(nombre, "Nombre definido por el contador")
 
 
 if __name__ == "__main__":
