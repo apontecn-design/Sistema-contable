@@ -316,7 +316,7 @@ elif menu == "🏠 Inicio":
         '<p>Tu empresa, tus finanzas y tus tareas en un solo lugar.</p></div>',
         unsafe_allow_html=True
     )
-    st.title('Panel de control')
+    st.caption('DASHBOARD  /  RESUMEN FINANCIERO')
     st.caption('Indicadores y tareas prioritarias · información basada en los registros contables de CONTEM')
     hoy=date.today().isoformat()
     mes=hoy[:7]
@@ -329,10 +329,10 @@ elif menu == "🏠 Inicio":
     gastos=_sgci_valor("SELECT COALESCE(SUM(debe-haber),0) FROM libro_diario WHERE substr(fecha,1,7)=? AND (codigo_cuenta LIKE '5.%' OR codigo_cuenta LIKE '6.%')",(mes,))
     saldo_banco=_sgci_valor("SELECT COALESCE(SUM(d.debe-d.haber),0) FROM libro_diario d WHERE d.codigo_cuenta IN (SELECT cuenta_contable FROM bancos WHERE activo=1)")
     c1,c2,c3,c4=st.columns(4)
-    c1.metric('Saldo contable en bancos',money(saldo_banco))
-    c2.metric('Ingresos del mes',money(ingresos))
-    c3.metric('Gastos del mes',money(gastos))
-    c4.metric('Resultado del mes',money(ingresos-gastos))
+    c1.metric('💰 Ingresos del mes',money(ingresos))
+    c2.metric('🛒 Gastos del mes',money(gastos))
+    c3.metric('📈 Resultado del mes',money(ingresos-gastos))
+    c4.metric('🏦 Saldo contable en bancos',money(saldo_banco))
     st.caption('Montos del Libro Diario · período '+mes+' · el saldo bancario puede diferir de la cartola hasta su conciliación.')
     st.write('')
     col_tareas,col_flujo,col_gastos=st.columns([1.25,1.25,1])
