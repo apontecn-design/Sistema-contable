@@ -47,8 +47,14 @@ if "config_cuentas" not in st.session_state:
 # SIDEBAR
 # ============================================================
 
-st.sidebar.markdown("## CONTEM")
-st.sidebar.caption("Sistema Contable y Empresarial")
+from modulos.tema_contem import aplicar_tema_contem
+aplicar_tema_contem()
+st.sidebar.markdown(
+    '<div class="contem-brand"><div class="contem-brand-icon">C</div>'
+    '<div><div class="contem-brand-name">CONTEM</div>'
+    '<div class="contem-brand-sub">Sistema Contable y Empresarial</div></div></div>',
+    unsafe_allow_html=True
+)
 st.sidebar.markdown("---")
 
 # LABORATORIO: nunca permitir acceso operativo de empleados antes de terminar
@@ -305,8 +311,13 @@ elif menu == "💼 Tesorería":
 elif menu == "🧾 Facturación y DTE":
     pantalla_dte(conn)
 elif menu == "🏠 Inicio":
-    st.title('Panel de control contable')
-    st.caption('Indicadores, tareas prioritarias y accesos rápidos · información basada en los registros de SGCI')
+    st.markdown(
+        '<div class="contem-hero"><h2>Bienvenido a CONTEM</h2>'
+        '<p>Tu empresa, tus finanzas y tus tareas en un solo lugar.</p></div>',
+        unsafe_allow_html=True
+    )
+    st.title('Panel de control')
+    st.caption('Indicadores y tareas prioritarias · información basada en los registros contables de CONTEM')
     hoy=date.today().isoformat()
     mes=hoy[:7]
     def _sgci_valor(sql,params=()):
