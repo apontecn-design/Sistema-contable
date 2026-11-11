@@ -64,6 +64,35 @@ class TestAutorizacionRRHH(unittest.TestCase):
         self.conn.execute('INSERT INTO sgci_rrhh_autorizados VALUES(?,2)',(self.email,))
         self.assertEqual(ids_permitidos(self.conn,self.email),{1,2})
 
+    def test_otro_usuario_no_hereda_vinculo_ajeno(self):
+        self.conn.execute("INSERT INTO sgci_usuarios VALUES('otro@example.com','Personal',1)")
+        self.assertEqual(ids_permitidos(self.conn,'otro@example.com'),set())
+        with self.assertRaises(AccesoDenegado):
+            listar_liquidaciones(self.conn,'otro@example.com')
+        with self.assertRaises(AccesoDenegado):
+            obtener_liquidacion(self.conn,'otro@example.com',10)
+
+    def test_solo_ver_no_autoriza_exportacion(self):
+        self.conn.execute("""UPDATE sgci_perfil_permisos SET permitido=0
+                             WHERE accion='exportar' AND submodulo='Liquidación mensual'""")
+        self.assertEqual(obtener_liquidacion(self.conn,self.email,10)['id'],10)
+        with self.assertRaises(AccesoDenegado):
+            obtener_liquidacion(self.conn,self.email,10,'exportar')
+
+    def test_reasignacion_vinculo_revoca_acceso_anterior(self):
+        self.assertEqual(ids_permitidos(self.conn,self.email),{1})
+        self.conn.execute("""UPDATE sgci_usuario_trabajador SET trabajador_id=2
+                             WHERE email=?""",(self.email,))
+        self.assertEqual(ids_permitidos(self.conn,self.email),{2})
+        with self.assertRaises(AccesoDenegado):
+            obtener_liquidacion(self.conn,self.email,10)
+        self.assertEqual(obtener_liquidacion(self.conn,self.email,20)['id'],20)
+
+    def test_desactivacion_revoca_exportacion(self):
+        self.conn.execute("UPDATE sgci_usuarios SET activo=0 WHERE email=?",(self.email,))
+        with self.assertRaises(AccesoDenegado):
+            obtener_liquidacion(self.conn,self.email,10,'exportar')
+
     def test_modulo_y_accion_no_validos_denegados(self):
         self.assertFalse(permiso_efectivo(self.conn,self.email,'Inexistente'))
         with self.assertRaises(AccesoDenegado): obtener_liquidacion(self.conn,self.email,10,'eliminar')
