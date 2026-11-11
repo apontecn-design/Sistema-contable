@@ -100,12 +100,17 @@ from html import escape as _contem_escape
 _perfil_cabecera = sgci_perfil(conn)
 _empresa_cabecera = _contem_escape(str(_perfil_cabecera.get('razon_social') or 'Empresa sin configurar'))
 _usuario_cabecera = _contem_escape(str(sgci_identidad_actual() or 'Administrador'))
+def _contem_navegar_busqueda():
+    destino = st.session_state.get('contem_buscar_modulo')
+    if destino in sgci_nav_permitidos:
+        st.session_state['nav_modulo_principal'] = destino
+
 st.markdown('<div class="contem-topbar-title">CONTEM <span> / Centro de operaciones</span></div>', unsafe_allow_html=True)
 _bar_busqueda, _bar_empresa, _bar_usuario = st.columns([2.1, 1.25, 1.15], vertical_alignment='bottom')
 with _bar_busqueda:
     _destinos_busqueda = ['🔎 Ir a un módulo...'] + sgci_nav_permitidos
     _buscar_modulo = st.selectbox('Buscar en CONTEM', _destinos_busqueda,
-                                  key='contem_buscar_modulo',
+                                  key='contem_buscar_modulo', on_change=_contem_navegar_busqueda,
                                   help='Selecciona un módulo autorizado para navegar.')
 with _bar_empresa:
     st.text_input('Empresa activa', value=_perfil_cabecera.get('razon_social') or 'Sin configurar',
@@ -113,11 +118,6 @@ with _bar_empresa:
 with _bar_usuario:
     st.text_input('Sesión activa', value=sgci_identidad_actual() or 'Administrador',
                   disabled=True)
-if _buscar_modulo != _destinos_busqueda[0]:
-    st.session_state['nav_modulo_principal'] = _buscar_modulo
-    st.session_state['contem_buscar_modulo'] = _destinos_busqueda[0]
-    st.rerun()
-
 modulo_principal = st.sidebar.radio(
     "Navegación",
     sgci_nav_permitidos,
