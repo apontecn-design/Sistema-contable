@@ -852,6 +852,11 @@ def instalar_cuentas_nomina(conn):
         ('1.1.07','Anticipos y préstamos al personal','Activo','Activo','1.1',3),
         ('1.1.07.01','Anticipos de remuneraciones','Activo','Activo','1.1.07',4),
         ('1.1.07.02','Préstamos a trabajadores','Activo','Activo','1.1.07',4),
+        ('2.1.02','Obligaciones laborales y previsionales','Pasivo','Pasivo','2.1',3),
+        ('2.1.02.01','Remuneraciones por pagar','Pasivo','Pasivo','2.1.02',4),
+        ('2.1.02.02','Cotizaciones previsionales por pagar','Pasivo','Pasivo','2.1.02',4),
+        ('2.1.02.03','Retenciones de Trabajadores por pagar','Pasivo','Pasivo','2.1.02',4),
+        ('2.1.02.04','Otras obligaciones laborales','Pasivo','Pasivo','2.1.02',4),
         ('2.1.02.05','Impuesto Único de trabajadores por pagar','Pasivo','Pasivo','2.1.02',4),
         ('5.2.03','Gastos de personal','Gastos','Gastos','5.2',3),
         ('5.2.03.01','Sueldos y remuneraciones','Gastos','Gastos','5.2.03',4),
@@ -1234,21 +1239,41 @@ def nomina_vista_previa(conn, periodo):
 
 
 def nomina_contabilizar_periodo(conn, periodo):
+    """Contabilización atómica: evita duplicados y períodos parcialmente contabilizados."""
     sgci_autorizar_operacion(conn, 'nomina', 'contabilizar')
-    fecha,filas,debe,haber=nomina_vista_previa(conn,periodo)
-    if debe!=haber:
-        raise ValueError(f'Asiento de nómina descuadrado: Debe {debe:,.0f} / Haber {haber:,.0f}.')
-    asiento=siguiente_asiento(conn)+1
+    if conn.in_transaction:
+        raise RuntimeError('Hay una transacción pendiente. Guarde o revierta antes de contabilizar Nómina.')
     try:
-        for f in filas:
-            nomina_asiento_linea(conn,fecha,f['Código'],f['Debe'],f['Haber'],f'Nómina {periodo}',asiento)
-        conn.execute("UPDATE nomina_liquidaciones SET estado='CONTABILIZADO' WHERE periodo=?",(periodo,))
-        conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)",(periodo,))
-        conn.execute("UPDATE nomina_periodos SET estado='CONTABILIZADO',fecha_cierre=?,asiento_id=? WHERE periodo=?",(fecha,asiento,periodo))
+        # Bloquea otros escritores hasta registrar asiento y estados en una sola transacción.
+        conn.execute('BEGIN IMMEDIATE')
+        previo = conn.execute(
+            "SELECT estado, asiento_id FROM nomina_periodos WHERE periodo=?", (periodo,)
+        ).fetchone()
+        if previo and (previo['estado'] == 'CONTABILIZADO' or previo['asiento_id'] is not None):
+            raise ValueError('El período ya tiene un asiento registrado; no se permite duplicar.')
+        fecha, filas, debe, haber = nomina_vista_previa(conn, periodo)
+        if debe != haber or debe <= 0:
+            raise ValueError(f'Asiento de nómina inválido: Debe {debe:,.0f} / Haber {haber:,.0f}.')
+        asiento = siguiente_asiento(conn) + 1
+        for fila in filas:
+            nomina_asiento_linea(conn, fecha, fila['Código'], fila['Debe'],
+                                fila['Haber'], f'Nómina {periodo}', asiento)
+        actualizados = conn.execute(
+            "UPDATE nomina_liquidaciones SET estado='CONTABILIZADO' "
+            "WHERE periodo=? AND COALESCE(estado,'')<>'CONTABILIZADO'", (periodo,)
+        ).rowcount
+        if actualizados <= 0:
+            raise ValueError('No hay liquidaciones pendientes; no se creó asiento.')
+        conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)", (periodo,))
+        conn.execute(
+            "UPDATE nomina_periodos SET estado='CONTABILIZADO',fecha_cierre=?,asiento_id=? "
+            "WHERE periodo=?", (fecha, asiento, periodo)
+        )
         conn.commit()
         return asiento
     except Exception:
-        conn.rollback(); raise
+        conn.rollback()
+        raise
 
 
 # ============================================================
