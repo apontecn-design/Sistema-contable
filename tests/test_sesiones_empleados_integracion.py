@@ -67,6 +67,23 @@ class TestSesionesEmpleados(unittest.TestCase):
         self.assertEqual(usuarios.sgci_rrhh_ids_autorizados(
             self.db,'empleado@example.com'),{1})
 
+    def test_perfil_no_autoriza_modulo_diferente(self):
+        with self.assertRaises(PermissionError):
+            usuarios.sgci_autorizar_operacion(self.db,'banco','conciliar','Conciliación bancaria')
+
+    def test_revocar_permiso_individual_inmediatamente(self):
+        usuarios.sgci_autorizar_operacion(self.db,'cxc','contabilizar','RCV Ventas')
+        self.db.execute("""INSERT INTO sgci_usuario_permisos_detalle
+            VALUES('empleado@example.com','cxc','RCV Ventas','contabilizar',0)""")
+        with self.assertRaises(PermissionError):
+            usuarios.sgci_autorizar_operacion(self.db,'cxc','contabilizar','RCV Ventas')
+
+    def test_usuario_inactivo_no_puede_operar_tras_revocacion(self):
+        usuarios.sgci_autorizar_operacion(self.db,'cxc','contabilizar','RCV Ventas')
+        self.db.execute("UPDATE sgci_usuarios SET activo=0 WHERE email='empleado@example.com'")
+        with self.assertRaises(PermissionError):
+            usuarios.sgci_autorizar_operacion(self.db,'cxc','contabilizar','RCV Ventas')
+
     def test_propietario_es_excepcion_controlada(self):
         self.sesion['sgci_sb_email']='admin@example.com'
         usuarios.sgci_autorizar_operacion(self.db,'cxc','contabilizar','RCV Ventas')
