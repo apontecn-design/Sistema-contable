@@ -47,6 +47,31 @@ class TestAdministracionPermisos(unittest.TestCase):
         self.assertIsNone(self.db.execute(
             "SELECT 1 FROM sgci_usuarios WHERE email='otra@example.com'").fetchone())
 
+    def test_administrador_principal_tiene_todos_los_modulos_y_acciones(self):
+        self.sesion["sgci_sb_email"] = "admin@example.com"
+        self.assertTrue(usuarios.sgci_es_propietario())
+        for modulo in usuarios.SGCI_MODULOS:
+            for accion in usuarios.SGCI_ACCIONES:
+                with self.subTest(modulo=modulo, accion=accion):
+                    self.assertTrue(usuarios.sgci_puede(self.db, modulo, accion))
+
+    def test_administrador_principal_puede_administrar_perfiles(self):
+        self.sesion["sgci_sb_email"] = "admin@example.com"
+        usuarios.sgci_guardar_perfil(self.db, "Perfil de prueba", set())
+        self.assertIsNotNone(self.db.execute(
+            "SELECT 1 FROM sgci_perfiles WHERE nombre='Perfil de prueba'").fetchone())
+        usuarios.sgci_guardar_permisos(
+            self.db, "nuevo@example.com", "Perfil de prueba", True, set())
+        fila = self.db.execute(
+            "SELECT rol, activo FROM sgci_usuarios WHERE email='nuevo@example.com'").fetchone()
+        self.assertEqual((fila["rol"], fila["activo"]), ("Perfil de prueba", 1))
+
+    def test_admin_respaldo_conserva_acceso_total(self):
+        self.sesion["sgci_auth_tipo"] = "argon2"
+        self.sesion.pop("sgci_sb_email", None)
+        self.assertTrue(usuarios.sgci_es_propietario())
+        self.assertTrue(usuarios.sgci_puede(self.db, "administracion", "editar"))
+
     def test_perfil_desconocido_no_es_aceptado(self):
         self.sesion["sgci_sb_email"]="admin@example.com"
         with self.assertRaises(ValueError):
