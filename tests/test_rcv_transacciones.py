@@ -35,6 +35,7 @@ class TestRCVTransacciones(unittest.TestCase):
         """)
         self.db.commit()
         self.base={
+            'periodo_cerrado':lambda *args:False,
             'sgci_autorizar_operacion':lambda *args:None,
             'Plan':lambda conn:SimpleNamespace(hojas={'100':'Gasto'},todos={'100':'Gasto'}),
             'cargar_roles':lambda conn:{},

@@ -25,7 +25,8 @@ class TestNavegacionSinEscrituras(unittest.TestCase):
             conectar = sqlite3.connect
             def registrar(*args, **kwargs):
                 db = conectar(*args, **kwargs)
-                conexiones.append(db)
+                if kwargs.get('check_same_thread') is False:
+                    conexiones.append(db)
                 return db
             env = {'CONTEM_ENTORNO':'test', 'SGCI_DATA_DIR':carpeta,
                    'CONTEM_STAGING_DB':str(ruta), 'CONTEM_STAGING_AUTORIZADO':'SI',

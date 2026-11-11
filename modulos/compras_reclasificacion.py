@@ -32,6 +32,7 @@ def codigo_cuenta_por_nombre(conn, nombre):
 
 def reclasificar_compras(conn, compra_ids, nueva_cuenta, recordar_proveedor=False):
     """Genera un asiento de reclasificación sin modificar IVA ni Proveedores."""
+    sgci_autorizar_operacion(conn,'cxp','contabilizar','RCV Compras')
     ids = [int(x) for x in compra_ids]
     if not ids:
         raise ValueError("Selecciona al menos una compra.")

@@ -313,13 +313,69 @@ def sgci_provisionar_cuenta(conn,email,clave):
     if not sgci_es_propietario():
         raise PermissionError('Solo el administrador puede crear accesos.')
     if not conn.execute('SELECT 1 FROM sgci_usuarios WHERE email=? AND activo=1',(email,)).fetchone():
-        raise ValueError('Primero registra y habilita el usuario en SGCI.')
+        raise ValueError('Primero registra y habilita el usuario en CONTEM.')
     sgci_validar_clave_nueva(clave,clave)
     sgci_admin_auth_request('POST','users',{'email':email,'password':clave,'email_confirm':True})
     with conn:
         conn.execute('UPDATE sgci_usuarios SET debe_cambiar_clave=1 WHERE email=?',(email,))
         conn.execute('INSERT INTO sgci_auditoria_permisos(actor,usuario,detalle) VALUES(?,?,?)',
             (sgci_identidad_actual(),email,'Cuenta Supabase creada; cambio de contraseña obligatorio'))
+
+
+def sgci_guardar_usuario(conn,email,rol,activo,nombre='',cargo=''):
+    if not sgci_es_propietario():
+        raise PermissionError('Solo el administrador principal puede gestionar usuarios.')
+    email = str(email).strip().lower()
+    if not email or '@' not in email or any(c.isspace() for c in email) or email==os.getenv('SGCI_ADMIN_EMAIL','').strip().lower():
+        raise ValueError('Introduce un correo válido distinto del administrador principal.')
+    if not conn.execute('SELECT 1 FROM sgci_perfiles WHERE nombre=?',(rol,)).fetchone():
+        raise ValueError('Selecciona un perfil existente.')
+    with conn:
+        conn.execute('''INSERT INTO sgci_usuarios(email,rol,activo,nombre_completo,cargo) VALUES(?,?,?,?,?)
+            ON CONFLICT(email) DO UPDATE SET rol=excluded.rol,activo=excluded.activo,
+            nombre_completo=excluded.nombre_completo,cargo=excluded.cargo''',
+            (email,rol,int(bool(activo)),str(nombre).strip(),str(cargo).strip()))
+        conn.execute("INSERT OR IGNORE INTO sgci_alcance_rrhh(email,alcance) VALUES(?,'propios')",(email,))
+        conn.execute('INSERT INTO sgci_auditoria_permisos(actor,usuario,detalle) VALUES(?,?,?)',
+            (sgci_identidad_actual(),email,'Usuario actualizado; perfil='+rol+'; habilitado='+str(bool(activo))))
+
+
+def sgci_vincular_trabajador(conn,email,trabajador_id):
+    if not sgci_es_propietario():
+        raise PermissionError('Solo el administrador principal puede vincular fichas laborales.')
+    email = str(email).strip().lower()
+    if not conn.execute('SELECT 1 FROM sgci_usuarios WHERE email=?',(email,)).fetchone():
+        raise ValueError('Registra primero el usuario.')
+    if trabajador_id is not None and not conn.execute('SELECT 1 FROM nomina_trabajadores WHERE id=?',(trabajador_id,)).fetchone():
+        raise ValueError('Ficha de trabajador no encontrada.')
+    with conn:
+        if trabajador_id is None:
+            conn.execute('DELETE FROM sgci_usuario_trabajador WHERE email=?',(email,))
+        else:
+            conn.execute('''INSERT INTO sgci_usuario_trabajador(email,trabajador_id) VALUES(?,?)
+                ON CONFLICT(email) DO UPDATE SET trabajador_id=excluded.trabajador_id''',(email,trabajador_id))
+        conn.execute('INSERT INTO sgci_auditoria_permisos(actor,usuario,detalle) VALUES(?,?,?)',
+                     (sgci_identidad_actual(),email,'Vinculación laboral actualizada'))
+
+
+def sgci_guardar_alcance_rrhh(conn,email,alcance,autorizados=()):
+    if not sgci_es_propietario():
+        raise PermissionError('Solo el administrador principal puede autorizar acceso a otros trabajadores.')
+    email = str(email).strip().lower()
+    ids = {int(i) for i in autorizados}
+    if alcance not in ('propios','autorizados','todos') or (alcance!='autorizados' and ids):
+        raise ValueError('Alcance de Recursos Humanos inválido.')
+    if not conn.execute('SELECT 1 FROM sgci_usuarios WHERE email=?',(email,)).fetchone():
+        raise ValueError('Registra primero el usuario.')
+    if any(not conn.execute('SELECT 1 FROM nomina_trabajadores WHERE id=?',(i,)).fetchone() for i in ids):
+        raise ValueError('Alguna ficha autorizada no existe.')
+    with conn:
+        conn.execute('''INSERT INTO sgci_alcance_rrhh(email,alcance) VALUES(?,?)
+            ON CONFLICT(email) DO UPDATE SET alcance=excluded.alcance''',(email,alcance))
+        conn.execute('DELETE FROM sgci_rrhh_autorizados WHERE email=?',(email,))
+        conn.executemany('INSERT INTO sgci_rrhh_autorizados(email,trabajador_id) VALUES(?,?)',[(email,i) for i in sorted(ids)])
+        conn.execute('INSERT INTO sgci_auditoria_permisos(actor,usuario,detalle) VALUES(?,?,?)',
+                     (sgci_identidad_actual(),email,'Alcance RR.HH. actualizado: '+alcance))
 
 
 def sgci_pantalla_permisos(conn):
@@ -329,12 +385,12 @@ def sgci_pantalla_permisos(conn):
         st.error('Solo el administrador principal puede gestionar usuarios y permisos.')
         return
     st.title('🛡️ Usuarios y permisos')
-    st.warning('Laboratorio: la configuración detallada NO habilita todavía acceso seguro a datos de trabajadores. No compartir este entorno con otros usuarios.')
+    st.warning('El acceso empresarial de empleados permanece bloqueado hasta completar la validación. El portal laboral utiliza los permisos y el alcance de cada cuenta.')
     tab_usuarios, tab_perfiles, tab_excepciones = st.tabs(['👥 Usuarios', '🛡️ Perfiles y permisos', '⚙️ Excepciones individuales'])
 
     with tab_usuarios:
         st.subheader('Cuentas de acceso y vinculación laboral')
-        st.caption('Registrar un correo aquí NO crea una cuenta en Supabase ni asigna contraseñas. Esa integración está pendiente.')
+        st.caption('Registrar un correo aquí configura su perfil y permisos. La cuenta de acceso se crea por separado mediante la opción de Supabase cuando el servicio esté habilitado.')
         existentes=[r['email'] for r in conn.execute('SELECT email FROM sgci_usuarios ORDER BY email')]
         etiquetas={r['email']:(r['nombre_completo']+' · '+r['email']).strip(' ·') for r in conn.execute('SELECT email,nombre_completo FROM sgci_usuarios ORDER BY email')}
         elegido=st.selectbox('Seleccionar usuario', ['Crear nuevo usuario']+existentes,
@@ -356,10 +412,7 @@ def sgci_pantalla_permisos(conn):
                     raise ValueError('Selecciona un perfil antes de guardar.')
                 if not email or '@' not in email or email==os.getenv('SGCI_ADMIN_EMAIL','').strip().lower():
                     raise ValueError('Introduce un correo válido distinto del administrador principal.')
-                with conn:
-                    conn.execute('INSERT INTO sgci_usuarios(email,rol,activo,nombre_completo,cargo) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET rol=excluded.rol,activo=excluded.activo,nombre_completo=excluded.nombre_completo,cargo=excluded.cargo',(email,rol,int(activo),nombre_usuario.strip(),cargo_usuario.strip()))
-                    conn.execute("INSERT OR IGNORE INTO sgci_alcance_rrhh(email,alcance) VALUES(?,'propios')",(email,))
-                    conn.execute('INSERT INTO sgci_auditoria_permisos(actor,usuario,detalle) VALUES(?,?,?)',(sgci_identidad_actual(),email,'Usuario creado/actualizado; perfil='+rol+'; habilitado='+str(activo)))
+                sgci_guardar_usuario(conn,email,rol,activo,nombre_usuario,cargo_usuario)
                 st.session_state['_sgci_ultimo_exito']='Usuario guardado correctamente: '+email
                 st.rerun()
             except (ValueError,sqlite3.Error) as exc:
@@ -379,12 +432,7 @@ def sgci_pantalla_permisos(conn):
                 etiqueta=st.selectbox('Ficha de trabajador',etiquetas_trabajador,index=idx)
                 if st.button('Guardar vinculación',type='primary'):
                     try:
-                        with conn:
-                            if opciones[etiqueta] is None:
-                                conn.execute('DELETE FROM sgci_usuario_trabajador WHERE email=?',(email_v,))
-                            else:
-                                conn.execute('INSERT INTO sgci_usuario_trabajador(email,trabajador_id) VALUES(?,?) ON CONFLICT(email) DO UPDATE SET trabajador_id=excluded.trabajador_id',(email_v,opciones[etiqueta]))
-                            conn.execute('INSERT INTO sgci_auditoria_permisos(actor,usuario,detalle) VALUES(?,?,?)',(sgci_identidad_actual(),email_v,'Vinculación laboral actualizada'))
+                        sgci_vincular_trabajador(conn,email_v,opciones[etiqueta])
                         st.success('Vinculación guardada. El alcance de RR.HH. permanece en Solo mis datos.')
                     except sqlite3.IntegrityError:
                         st.error('La ficha seleccionada ya está vinculada a otra cuenta.')
@@ -408,16 +456,12 @@ def sgci_pantalla_permisos(conn):
                 actuales={r['trabajador_id'] for r in conn.execute('SELECT trabajador_id FROM sgci_rrhh_autorizados WHERE email=?',(alcance_email,))}
                 autorizados=st.multiselect('Fichas adicionales autorizadas',list(opciones_trab),default=[k for k,v in opciones_trab.items() if v in actuales])
             if st.button('Guardar alcance de RR.HH.'):
-                with conn:
-                    conn.execute('INSERT INTO sgci_alcance_rrhh(email,alcance) VALUES(?,?) ON CONFLICT(email) DO UPDATE SET alcance=excluded.alcance',(alcance_email,alcance_nuevo))
-                    conn.execute('DELETE FROM sgci_rrhh_autorizados WHERE email=?',(alcance_email,))
-                    if alcance_nuevo=='autorizados':
-                        conn.executemany('INSERT INTO sgci_rrhh_autorizados(email,trabajador_id) VALUES(?,?)',[(alcance_email,opciones_trab[k]) for k in autorizados])
-                    conn.execute('INSERT INTO sgci_auditoria_permisos(actor,usuario,detalle) VALUES(?,?,?)',(sgci_identidad_actual(),alcance_email,'Alcance RR.HH. actualizado: '+alcance_nuevo))
+                sgci_guardar_alcance_rrhh(conn,alcance_email,alcance_nuevo,
+                    [opciones_trab[k] for k in autorizados] if alcance_nuevo=='autorizados' else [])
                 st.success('Alcance guardado correctamente.')
         st.divider()
         st.subheader('Contraseña temporal · Integración Supabase')
-        st.info('La creación de cuentas Supabase está deshabilitada en Colab. En un servidor privado se habilitará con una clave administrativa guardada únicamente en variables de entorno.')
+        st.info('La creación de cuentas Supabase requiere que el administrador del servidor haya habilitado ese servicio. Registrar un perfil no crea por sí solo una cuenta de acceso.')
         if existentes:
             email_provision=st.selectbox('Cuenta',existentes,format_func=lambda e:etiquetas.get(e,e),key='provision_email')
             with st.form('provision_cuenta'):

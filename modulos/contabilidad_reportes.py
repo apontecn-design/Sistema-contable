@@ -1,4 +1,5 @@
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
+import sqlite3
 def registrar_auditoria(conn, accion, detalle):
     conn.execute(
         "INSERT INTO auditoria(fecha_hora, usuario, accion, detalle) VALUES (?,?,?,?)",
@@ -333,6 +334,13 @@ def mostrar_historial_rcv_completo(conn, tipo):
 def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
     """Importa movimientos tabulares evitando duplicados."""
     sgci_autorizar_operacion(conn, 'banco', 'importar', 'Bancos y cartolas')
+    return _importar_movimientos_cartola(conn, df, banco_id, origen)
+
+
+def _importar_movimientos_cartola(conn, df, banco_id, origen):
+    """Escritura compartida por las dos entradas autorizadas: importar y crear."""
+    if not conn.execute('SELECT 1 FROM bancos WHERE id=? AND activo=1',(banco_id,)).fetchone():
+        raise ValueError('Selecciona un banco activo.')
     df = normalizar_columnas(df)
 
     def col(*names):
@@ -351,38 +359,34 @@ def importar_cartola(conn, df, banco_id, origen="CARTOLA"):
     if not fecha_c or not desc_c:
         raise ValueError("No pude identificar Fecha y Descripción en la cartola.")
 
-    lote = "BANCO-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    lote = "BANCO-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     nuevos = 0
     repetidos = 0
 
-    for _, r in df.iterrows():
-        fecha = fecha_iso(r.get(fecha_c))
-        desc = limpiar_texto(r.get(desc_c))
-        ref = limpiar_texto(r.get(ref_c)) if ref_c else ""
-        cargo = abs(numero(r.get(cargo_c))) if cargo_c else 0
-        abono = abs(numero(r.get(abono_c))) if abono_c else 0
-        saldo = numero(r.get(saldo_c)) if saldo_c and limpiar_texto(r.get(saldo_c)) else None
-        # BCI puede tener dos transferencias idénticas en fecha, descripción e importe.
-        # El saldo progresivo distingue las operaciones reales sin inventar documentos bancarios.
-        if not ref and saldo is not None:
-            ref = f"SGCI-SALDO-{int(round(saldo))}"
-
-        if not fecha or not desc or (cargo <= 0 and abono <= 0):
-            continue
-
-        try:
-            conn.execute(
-                """INSERT INTO cartola_bancaria
-                   (banco_id,fecha,descripcion,referencia,cargo,abono,saldo,lote_id,origen)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
-                (banco_id, fecha, desc, ref, cargo, abono, saldo, lote, origen),
-            )
-            nuevos += 1
-        except sqlite3.IntegrityError:
-            repetidos += 1
-
-    conn.commit()
-    registrar_auditoria(conn, "IMPORTACIÓN CARTOLA", f"Banco {banco_id}: {nuevos} movimientos nuevos, {repetidos} repetidos")
+    with conn:
+        for _, r in df.iterrows():
+            fecha = fecha_iso(r.get(fecha_c))
+            desc = limpiar_texto(r.get(desc_c))
+            ref = limpiar_texto(r.get(ref_c)) if ref_c else ""
+            cargo = abs(numero(r.get(cargo_c))) if cargo_c else 0
+            abono = abs(numero(r.get(abono_c))) if abono_c else 0
+            saldo = numero(r.get(saldo_c)) if saldo_c and limpiar_texto(r.get(saldo_c)) else None
+            if not ref and saldo is not None:
+                ref = f"SGCI-SALDO-{int(round(saldo))}"
+            if not fecha or not desc or (cargo <= 0 and abono <= 0):
+                continue
+            try:
+                conn.execute('''INSERT INTO cartola_bancaria
+                    (banco_id,fecha,descripcion,referencia,cargo,abono,saldo,lote_id,origen)
+                    VALUES(?,?,?,?,?,?,?,?,?)''', (banco_id,fecha,desc,ref,cargo,abono,saldo,lote,origen))
+                nuevos += 1
+            except sqlite3.IntegrityError as exc:
+                if exc.sqlite_errorname not in ('SQLITE_CONSTRAINT_UNIQUE','SQLITE_CONSTRAINT_PRIMARYKEY'):
+                    raise
+                repetidos += 1
+        conn.execute('INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)',
+            (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),'IMPORTACIÓN CARTOLA',
+             f'Banco {banco_id}: {nuevos} movimientos nuevos, {repetidos} repetidos; lote {lote}'))
     return nuevos, repetidos, lote
 
 
@@ -596,7 +600,7 @@ def registrar_movimiento_manual(conn, banco_id, fecha, descripcion, referencia, 
         "abono": abono,
         "saldo": saldo,
     }])
-    return importar_cartola(conn, df, banco_id, origen="MANUAL")
+    return _importar_movimientos_cartola(conn, df, banco_id, origen="MANUAL")
 
 
 def crear_obligacion_manual(conn, fecha, tipo, descripcion, referencia, monto, codigo_cuenta):
@@ -1177,6 +1181,7 @@ def anticipos_contables_sin_asignar(conn):
 
 
 def asignar_anticipo_contable_a_cliente(conn, asiento_id, cliente_id):
+    sgci_autorizar_operacion(conn,'cxc','editar','Pagos de clientes')
     """Vincula a un cliente un anticipo ya contabilizado. No crea ni modifica asientos."""
     disponibles=anticipos_contables_sin_asignar(conn)
     fila=disponibles.loc[disponibles["asiento_id"]==int(asiento_id)]
@@ -1229,6 +1234,7 @@ def asignar_anticipo_contable_a_cliente(conn, asiento_id, cliente_id):
 
 
 def recuperar_anticipos_historicos_cliente(conn, cliente_id):
+    sgci_autorizar_operacion(conn,'cxc','editar','Pagos de clientes')
     """Recupera anticipos CLIENTE_ANTICIPO creados por versiones antiguas sin alterar sus asientos."""
     movimientos=conn.execute("""
         SELECT cb.*, b.cuenta_contable AS cuenta_banco

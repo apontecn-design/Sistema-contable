@@ -1,4 +1,25 @@
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
+def sgci_respaldo_consistente(conn):
+    """Copia SQLite consistente, incluidos cambios confirmados todavía en WAL."""
+    if not sgci_es_propietario():
+        raise PermissionError('Solo el administrador principal puede descargar la base de datos.')
+    if conn.in_transaction:
+        raise RuntimeError('Guarda o revierte la operación pendiente antes de generar el respaldo.')
+    import sqlite3 as _sqlite3
+    from contextlib import closing as _cerrar
+    from pathlib import Path as _Ruta
+    from tempfile import TemporaryDirectory as _Temporal
+    with _Temporal(prefix='contem_respaldo_') as carpeta:
+        destino = _Ruta(carpeta)/'respaldo.db'
+        with _cerrar(_sqlite3.connect(destino)) as copia:
+            conn.backup(copia)
+            # Un único archivo descargable, independiente de archivos WAL/SHM.
+            copia.execute('PRAGMA journal_mode=DELETE')
+            if copia.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                raise RuntimeError('No se pudo verificar la integridad del respaldo.')
+        return destino.read_bytes()
+
+
 def clp_round(valor):
     """Redondeo comercial al peso: 0,5 o más sube; menos de 0,5 baja."""
     try:

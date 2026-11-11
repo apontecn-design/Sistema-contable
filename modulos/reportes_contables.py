@@ -1,4 +1,22 @@
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
+def balance_ocho_columnas(conn, desde=None, hasta=None):
+    sgci_autorizar_operacion(conn, 'contabilidad', 'ver', 'Balance de Comprobación')
+    from modulos.balance_ocho_columnas import generar_balance_ocho_columnas
+    return generar_balance_ocho_columnas(conn, desde, hasta)
+
+
+def exportar_balance_ocho(conn, desde=None, hasta=None, formato='pdf'):
+    sgci_autorizar_operacion(conn, 'contabilidad', 'ver', 'Balance de Comprobación')
+    sgci_autorizar_operacion(conn, 'contabilidad', 'exportar', 'Balance de Comprobación')
+    from modulos.balance_ocho_columnas import generar_balance_ocho_columnas, balance_ocho_pdf, balance_ocho_excel
+    informe = generar_balance_ocho_columnas(conn, desde, hasta)
+    if formato == 'pdf':
+        return balance_ocho_pdf(informe, desde, hasta, sgci_membrete_pdf)
+    if formato == 'xlsx':
+        return balance_ocho_excel(informe, desde, hasta)
+    raise ValueError('Formato de balance no permitido.')
+
+
 def obtener_mayor(
     conn,
     codigo,
@@ -125,6 +143,7 @@ def listar_lotes(conn):
 
 
 def deshacer_lote(conn, lote):
+    sgci_autorizar_operacion(conn,'administracion','anular','Lotes')
 
     cur = conn.cursor()
     try:

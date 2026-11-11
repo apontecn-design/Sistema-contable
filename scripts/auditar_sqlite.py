@@ -79,6 +79,34 @@ def auditar(ruta):
                 hallazgos[nombre]={tipo:cantidad for tipo,cantidad in conn.execute(sql)}
             else:
                 hallazgos[nombre]=conn.execute(sql).fetchone()[0]
+        # Una conciliación documental puede abarcar varios asientos y no tener
+        # un único asiento_id en la cartola. Verificar los vínculos reales.
+        if {'cartola_bancaria','sgci_conciliacion_lineas','libro_diario'} <= tablas:
+            hallazgos['conciliaciones_existentes_sin_respaldo_cuadrado'] = conn.execute('''
+                SELECT count(*) FROM cartola_bancaria cb
+                WHERE cb.conciliado=1 AND cb.match_tipo='ASIENTOS_EXISTENTES' AND (
+                  NOT EXISTS(SELECT 1 FROM sgci_conciliacion_lineas x WHERE x.cartola_id=cb.id)
+                  OR ABS(ABS(COALESCE(cb.abono,0)-COALESCE(cb.cargo,0))-
+                    COALESCE((SELECT SUM(x.monto) FROM sgci_conciliacion_lineas x WHERE x.cartola_id=cb.id),0))>0.01
+                  OR EXISTS(SELECT 1 FROM sgci_conciliacion_lineas x LEFT JOIN libro_diario ld ON ld.id=x.diario_id
+                            WHERE x.cartola_id=cb.id AND ld.id IS NULL))''').fetchone()[0]
+        else:
+            hallazgos['conciliaciones_existentes_sin_respaldo_cuadrado'] = None
+        cols_cartola = {r[1] for r in conn.execute('PRAGMA table_info(cartola_bancaria)')}
+        if {'banco_id','fecha','abono','cargo'} <= cols_cartola:
+            hallazgos['grupos_cheques_protestados_inconsistentes'] = conn.execute('''
+                SELECT count(*) FROM (SELECT match_id FROM cartola_bancaria
+                    WHERE conciliado=1 AND match_tipo='CHEQUE_PROTESTADO'
+                    GROUP BY match_id HAVING match_id IS NULL OR count(*)!=3
+                      OR count(DISTINCT banco_id)!=1 OR count(DISTINCT fecha)!=1
+                      OR ABS(SUM(COALESCE(abono,0)-COALESCE(cargo,0)))>0.01
+                      OR count(asiento_id)>0
+                      OR SUM(CASE WHEN cargo>0 AND COALESCE(abono,0)=0 THEN 1 ELSE 0 END)!=1
+                      OR SUM(CASE WHEN abono>0 AND COALESCE(cargo,0)=0 THEN 1 ELSE 0 END)!=1
+                      OR SUM(CASE WHEN cargo>0 AND abono>0 AND ABS(cargo-abono)<0.01 THEN 1 ELSE 0 END)!=1
+                      )''').fetchone()[0]
+        else:
+            hallazgos['grupos_cheques_protestados_inconsistentes'] = None
         return {'integridad':integridad,'infracciones_claves_foraneas':len(fk),
                 'tablas':len(tablas),'hallazgos':hallazgos,
                 'nota':'Cartolas sin asiento pueden ser conciliaciones documentales o cheques protestados; revisar match_tipo.'}

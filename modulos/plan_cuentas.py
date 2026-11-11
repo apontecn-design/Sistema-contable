@@ -245,6 +245,7 @@ def cargar_roles(conn):
 
 
 def guardar_rol(conn, rol, codigo):
+    sgci_autorizar_operacion(conn,'administracion','editar','Matriz Contable')
 
     if rol == "iva_uso_comun" and (
         codigo == "5.2.03" or str(codigo).startswith("5.2.03.")

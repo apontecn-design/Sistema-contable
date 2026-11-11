@@ -90,7 +90,7 @@ def contabilizar_rcv(
         "RCV-COMPRAS-"
         if compras
         else "RCV-VENTAS-"
-    ) + datetime.now().strftime("%Y%m%d-%H%M%S")
+    ) + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
 
     cur = conn.cursor()
     asiento = siguiente_asiento(conn)
@@ -102,6 +102,10 @@ def contabilizar_rcv(
     try:
 
         for d in docs.itertuples():
+
+            fecha = d.fecha_doc if fecha_modo == 'documento' else (d.fecha_recepcion or d.fecha_doc)
+            if periodo_cerrado(conn,fecha):
+                raise ValueError('El período del documento está cerrado; no se puede contabilizar el RCV.')
 
             if d.cuenta_codigo not in plan.hojas:
                 raise ValueError(

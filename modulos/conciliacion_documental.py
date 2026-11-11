@@ -173,6 +173,7 @@ def abonos_disponibles_cliente(conn, cliente_id):
 
 
 def aplicar_abono_auxiliar_cliente(conn, cliente_id, pago_id, venta_ids):
+    sgci_autorizar_operacion(conn,'cxc','editar','Pagos de clientes')
     """Aplica un saldo recibido a facturas. Si era anticipo, reclasifica Pasivo -> Clientes."""
     pago=conn.execute("SELECT * FROM pagos_clientes WHERE id=? AND cliente_id=?",
                       (int(pago_id),int(cliente_id))).fetchone()
@@ -300,6 +301,7 @@ def pagos_disponibles_proveedor(conn, proveedor_id):
 
 
 def aplicar_pago_auxiliar_proveedor(conn, proveedor_id, pago_id, compra_ids):
+    sgci_autorizar_operacion(conn,'cxp','editar','Pagos de proveedores')
     """Aplica saldo ya contabilizado de un pago a documentos del proveedor. No genera asiento."""
     pago=conn.execute(
         "SELECT * FROM pagos_proveedores WHERE id=? AND proveedor_id=?",
@@ -949,6 +951,11 @@ def nomina_pdf(titulo, subtitulo, columnas, filas, totales=None):
 
 
 def rrhh_pdf_liquidacion(conn, r):
+    sgci_autorizar_operacion(conn,'nomina','ver','Liquidación mensual')
+    sgci_autorizar_operacion(conn,'nomina','exportar','Liquidación mensual')
+    ids = sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual())
+    if ids is not None and int(r.trabajador_id) not in ids:
+        raise PermissionError('La liquidación está fuera del alcance autorizado.')
     """Formato de Asimex: solo presentación; no recalcula ni contabiliza."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -1242,7 +1249,9 @@ def nomina_vista_previa(conn, periodo):
 
 def nomina_contabilizar_periodo(conn, periodo):
     """Contabilización atómica: evita duplicados y períodos parcialmente contabilizados."""
-    sgci_autorizar_operacion(conn, 'nomina', 'contabilizar')
+    sgci_autorizar_operacion(conn, 'nomina', 'contabilizar', 'Contabilización')
+    if sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual()) is not None:
+        raise PermissionError('La contabilización general de nómina requiere autorización expresa para todos los trabajadores.')
     if conn.in_transaction:
         raise RuntimeError('Hay una transacción pendiente. Guarde o revierta antes de contabilizar Nómina.')
     try:

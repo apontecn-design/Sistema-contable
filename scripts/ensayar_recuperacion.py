@@ -9,6 +9,8 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from scripts.comparar_historicos import comparar
 
 
 def ensayar(origen):
@@ -34,10 +36,12 @@ def ensayar(origen):
             esquema_restaurado=db_restaurada.execute(
                 "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
             ).fetchall()
+        historicos = comparar(origen, restaurada)
         return {'integridad_restaurada':integridad,
                 'claves_foraneas_invalidas':len(fk),
                 'esquema_identico':esquema_origen==esquema_restaurado,
-                'aprobado':integridad=='ok' and not fk and esquema_origen==esquema_restaurado,
+                'contenido_preservado':historicos['aprobado'],
+                'aprobado':integridad=='ok' and not fk and esquema_origen==esquema_restaurado and historicos['aprobado'],
                 'nota':'Ensayo local de backup/restore; no prueba despliegue Render ni migración.'}
 
 

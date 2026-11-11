@@ -134,6 +134,7 @@ def regularizar_iva_historico_compras(conn):
     No toca Proveedores, Banco ni el asiento RCV original.
     Es idempotente mediante regularizacion_iva_compras.
     """
+    sgci_autorizar_operacion(conn,'cxp','contabilizar','RCV Compras')
     pendientes = compras_pendientes_regularizar_iva(conn)
     if pendientes.empty:
         return {"documentos": 0, "iva": 0.0, "lote": None}

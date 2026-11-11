@@ -141,7 +141,91 @@ def oc_crear_tablas(conn):
     """)
     conn.commit()
 
+def oc_guardar(conn, proveedor_id, fecha, condicion, observaciones, lineas, oc_id=None):
+    """Crear o modificar una OC atómicamente, sin generar contabilidad."""
+    sgci_autorizar_operacion(conn,'cxp','crear' if oc_id is None else 'editar','Órdenes de compra')
+    from decimal import Decimal as _D, ROUND_HALF_UP as _redondeo
+    from datetime import date as _fecha
+    fecha = _fecha.fromisoformat(str(fecha)).isoformat()
+    if not conn.execute('SELECT 1 FROM proveedores WHERE id=? AND COALESCE(activo,1)=1',(proveedor_id,)).fetchone():
+        raise ValueError('Selecciona un proveedor activo.')
+    detalles = []
+    for linea in lineas:
+        descripcion = str(linea['descripcion']).strip()
+        cantidad, precio = _D(str(linea['cantidad'])), _D(str(linea['precio_unitario']))
+        if not descripcion or not cantidad.is_finite() or not precio.is_finite() or cantidad <= 0 or precio < 0:
+            raise ValueError('Cada línea requiere descripción, cantidad positiva y precio no negativo.')
+        neto = int((cantidad*precio).quantize(_D(1),rounding=_redondeo))
+        detalles.append((descripcion,float(cantidad),float(precio),int(bool(linea.get('afecto_iva',True))),neto))
+    if not detalles:
+        raise ValueError('Agrega al menos una línea a la orden de compra.')
+    neto = sum(d[4] for d in detalles)
+    iva = sum(int((_D(d[4])*_D('0.19')).quantize(_D(1),rounding=_redondeo)) for d in detalles if d[3])
+    with conn:
+        if oc_id is None:
+            cur = conn.execute('''INSERT INTO ordenes_compra
+                (proveedor_id,fecha,condicion_pago,observaciones,neto,iva,total,creado_en)
+                VALUES(?,?,?,?,?,?,?,?)''',(proveedor_id,fecha,condicion,observaciones,neto,iva,neto+iva,datetime.now().isoformat(timespec='seconds')))
+            oc_id = cur.lastrowid
+            conn.execute('UPDATE ordenes_compra SET numero=? WHERE id=?',(f'OC-{oc_id:06d}',oc_id))
+        else:
+            cur = conn.execute('''UPDATE ordenes_compra SET proveedor_id=?,fecha=?,condicion_pago=?,
+                observaciones=?,neto=?,iva=?,total=? WHERE id=? AND estado IN ('BORRADOR','EMITIDA')
+                AND NOT EXISTS(SELECT 1 FROM ordenes_compra_facturas WHERE oc_id=?)''',
+                (proveedor_id,fecha,condicion,observaciones,neto,iva,neto+iva,oc_id,oc_id))
+            if cur.rowcount != 1:
+                raise ValueError('La OC no existe, está anulada o tiene facturas asociadas; no se puede modificar.')
+            conn.execute('DELETE FROM ordenes_compra_detalle WHERE oc_id=?',(oc_id,))
+        conn.executemany('''INSERT INTO ordenes_compra_detalle
+            (oc_id,descripcion,cantidad,precio_unitario,afecto_iva,neto) VALUES(?,?,?,?,?,?)''',[(oc_id,*d) for d in detalles])
+    return oc_id
+
+
+def oc_cambiar_estado(conn, oc_id, estado):
+    sgci_autorizar_operacion(conn,'cxp','anular' if estado=='ANULADA' else 'editar','Órdenes de compra')
+    if estado not in ('BORRADOR','EMITIDA','ANULADA'):
+        raise ValueError('Estado de OC no permitido.')
+    with conn:
+        cur = conn.execute('''UPDATE ordenes_compra SET estado=? WHERE id=? AND estado!='ANULADA'
+            AND (?!='ANULADA' OR NOT EXISTS(SELECT 1 FROM ordenes_compra_facturas WHERE oc_id=?))''',
+            (estado,oc_id,estado,oc_id))
+        if cur.rowcount != 1:
+            raise ValueError('La OC no existe, está anulada o tiene facturas que impiden anularla.')
+
+
+def oc_asociar_factura(conn, oc_id, compra_id, monto):
+    sgci_autorizar_operacion(conn,'cxp','editar','Órdenes de compra')
+    if isinstance(monto,bool) or int(monto) != monto or monto <= 0:
+        raise ValueError('El monto debe ser un entero positivo en CLP.')
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        orden = conn.execute("SELECT proveedor_id,total,estado FROM ordenes_compra WHERE id=?",(oc_id,)).fetchone()
+        factura = conn.execute('SELECT proveedor_id,monto_total,tipo_doc FROM compras WHERE id=?',(compra_id,)).fetchone()
+        if not orden or orden['estado']=='ANULADA' or not factura or factura['proveedor_id']!=orden['proveedor_id'] or int(factura['tipo_doc'] or 33) in (60,61):
+            raise ValueError('Revisa el estado de la OC y el proveedor/tipo de la factura.')
+        saldo_oc = orden['total'] - conn.execute('SELECT COALESCE(SUM(monto_asociado),0) FROM ordenes_compra_facturas WHERE oc_id=?',(oc_id,)).fetchone()[0]
+        saldo_factura = factura['monto_total'] - conn.execute('SELECT COALESCE(SUM(monto_asociado),0) FROM ordenes_compra_facturas WHERE compra_id=?',(compra_id,)).fetchone()[0]
+        if monto > min(saldo_oc,saldo_factura):
+            raise ValueError('El monto supera el saldo disponible de la OC o de la factura.')
+        conn.execute('INSERT INTO ordenes_compra_facturas(oc_id,compra_id,monto_asociado,creado_en) VALUES(?,?,?,?)',
+                     (oc_id,compra_id,monto,datetime.now().isoformat(timespec='seconds')))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def oc_desvincular_factura(conn, oc_id, asociacion_id):
+    sgci_autorizar_operacion(conn,'cxp','editar','Órdenes de compra')
+    with conn:
+        cur = conn.execute('DELETE FROM ordenes_compra_facturas WHERE id=? AND oc_id=?',(asociacion_id,oc_id))
+        if cur.rowcount != 1:
+            raise ValueError('La asociación no pertenece a esta OC.')
+
+
 def oc_pdf(conn, oc_id):
+    sgci_autorizar_operacion(conn,'cxp','ver','Órdenes de compra')
+    sgci_autorizar_operacion(conn,'cxp','exportar','Órdenes de compra')
     """OC corporativa: reutiliza el perfil y logotipo ya configurados en SGCI."""
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle, Spacer, KeepTogether
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -218,6 +302,7 @@ def oc_pdf(conn, oc_id):
     return buf.getvalue()
 
 def oc_pantalla(conn):
+    sgci_autorizar_operacion(conn,'cxp','ver','Órdenes de compra')
     st.title('🧾 Órdenes de compra')
     t_crear,t_listar,t_asociar=st.tabs(['➕ Crear OC','📋 Administrar OC','🔗 Asociar facturas RCV'])
     proveedores=conn.execute("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre,rut) nombre FROM proveedores WHERE COALESCE(activo,1)=1 ORDER BY nombre").fetchall()
@@ -248,13 +333,11 @@ def oc_pantalla(conn):
                     neto=sum(d[4] for d in detalles)
                     iva=sum(clp_round(d[4]*0.19) for d in detalles if d[3])
                     try:
-                        with conn:
-                            cur=conn.execute('INSERT INTO ordenes_compra(proveedor_id,fecha,condicion_pago,observaciones,neto,iva,total,creado_en) VALUES(?,?,?,?,?,?,?,?)',(opciones[proveedor],fecha.isoformat(),condicion,observaciones,neto,iva,neto+iva,datetime.now().isoformat(timespec='seconds')))
-                            oc_id=cur.lastrowid; numero=f'OC-{oc_id:06d}'
-                            conn.execute('UPDATE ordenes_compra SET numero=? WHERE id=?',(numero,oc_id))
-                            conn.executemany('INSERT INTO ordenes_compra_detalle(oc_id,descripcion,cantidad,precio_unitario,afecto_iva,neto) VALUES(?,?,?,?,?,?)',[(oc_id,*d) for d in detalles])
+                        oc_id=oc_guardar(conn,opciones[proveedor],fecha.isoformat(),condicion,observaciones,
+                            [{'descripcion':d[0],'cantidad':d[1],'precio_unitario':d[2],'afecto_iva':d[3]} for d in detalles])
+                        numero=f'OC-{oc_id:06d}'
                         st.success(f'{numero} guardada. Total: {money(neto+iva)}. No se generó asiento contable.')
-                    except sqlite3.Error as ex: st.error(f'No se pudo guardar la OC: {ex}')
+                    except (sqlite3.Error,ValueError) as ex: st.error(f'No se pudo guardar la OC: {ex}')
     with t_listar:
         filas=conn.execute("""SELECT o.*,COALESCE(NULLIF(p.razon_social,''),p.nombre,p.rut) proveedor,
           COALESCE((SELECT SUM(monto_asociado) FROM ordenes_compra_facturas a WHERE a.oc_id=o.id),0) facturado
@@ -265,15 +348,37 @@ def oc_pantalla(conn):
             seleccion=st.selectbox('Selecciona OC',range(len(filas)),format_func=lambda i:f"{filas[i]['numero']} · {filas[i]['proveedor']}",key='oc_admin_sel')
             oc=filas[seleccion]
             st.dataframe(pd.read_sql_query('SELECT descripcion,cantidad,precio_unitario,afecto_iva,neto FROM ordenes_compra_detalle WHERE oc_id=?',conn,params=(oc['id'],)),hide_index=True,use_container_width=True)
+            if opciones and oc['estado']!='ANULADA' and not oc['facturado'] and sgci_puede_submodulo(conn,'cxp','Órdenes de compra','editar'):
+                with st.expander('Modificar orden de compra'):
+                    with st.form(f'oc_editar_{oc["id"]}'):
+                        proveedor_edicion=st.selectbox('Proveedor de la OC',list(opciones),
+                            index=next((i for i,k in enumerate(opciones) if opciones[k]==oc['proveedor_id']),0))
+                        fecha_edicion=st.date_input('Fecha de emisión de la OC',value=date.fromisoformat(oc['fecha']))
+                        condicion_edicion=st.text_input('Condición de pago de la OC',value=oc['condicion_pago'] or '')
+                        observacion_edicion=st.text_area('Observaciones de la OC',value=oc['observaciones'] or '')
+                        detalle_edicion=st.data_editor(pd.read_sql_query(
+                            'SELECT descripcion,cantidad,precio_unitario,afecto_iva FROM ordenes_compra_detalle WHERE oc_id=? ORDER BY id',
+                            conn,params=(oc['id'],)),num_rows='dynamic',hide_index=True,use_container_width=True,
+                            key=f'oc_editor_{oc["id"]}')
+                        guardar_edicion=st.form_submit_button('Guardar cambios de la OC')
+                    if guardar_edicion:
+                        try:
+                            oc_guardar(conn,opciones[proveedor_edicion],fecha_edicion.isoformat(),condicion_edicion,
+                                observacion_edicion,detalle_edicion.to_dict('records'),oc_id=oc['id'])
+                            st.success('Orden de compra modificada.');st.rerun()
+                        except (ValueError,sqlite3.Error) as exc:st.error(str(exc))
             estados=['BORRADOR','EMITIDA','ANULADA']
             estado=st.selectbox('Estado administrativo',estados,index=estados.index(oc['estado']) if oc['estado'] in estados else 0)
             if st.button('Actualizar estado',key='oc_estado'):
                 if oc['facturado'] and estado=='ANULADA': st.error('No se puede anular una OC con facturas asociadas.')
                 else:
-                    with conn:conn.execute('UPDATE ordenes_compra SET estado=? WHERE id=?',(estado,oc['id']))
-                    st.success('Estado actualizado.');st.rerun()
+                    try:
+                        oc_cambiar_estado(conn,oc['id'],estado)
+                        st.success('Estado actualizado.');st.rerun()
+                    except (ValueError,PermissionError) as exc:st.error(str(exc))
             try:
-                st.download_button('📄 Descargar OC en PDF',oc_pdf(conn,oc['id']),file_name=oc['numero']+'.pdf',mime='application/pdf')
+                if sgci_puede_submodulo(conn,'cxp','Órdenes de compra','exportar'):
+                    st.download_button('📄 Descargar OC en PDF',oc_pdf(conn,oc['id']),file_name=oc['numero']+'.pdf',mime='application/pdf')
             except ImportError:st.warning('Para generar PDF instala reportlab en requirements.txt.')
     with t_asociar:
         st.caption('La asociación es administrativa: no crea ni modifica asientos, pagos ni documentos del RCV.')
@@ -298,11 +403,7 @@ def oc_pantalla(conn):
                     monto=st.number_input('Monto a asociar (CLP, IVA incluido)',min_value=1,max_value=maximo,value=maximo,step=1,key='oc_monto_asoc')
                     if st.button('🔗 Asociar factura',type='primary'):
                         try:
-                            with conn:
-                                saldo_oc=conn.execute('SELECT total-COALESCE((SELECT SUM(monto_asociado) FROM ordenes_compra_facturas WHERE oc_id=?),0) FROM ordenes_compra WHERE id=?',(oc['id'],oc['id'])).fetchone()[0]
-                                saldo_fac=conn.execute('SELECT monto_total-COALESCE((SELECT SUM(monto_asociado) FROM ordenes_compra_facturas WHERE compra_id=?),0) FROM compras WHERE id=? AND proveedor_id=?',(factura['id'],factura['id'],oc['proveedor_id'])).fetchone()
-                                if not saldo_fac or monto>min(saldo_oc,saldo_fac[0]):raise ValueError('Saldo insuficiente o proveedor distinto.')
-                                conn.execute('INSERT INTO ordenes_compra_facturas(oc_id,compra_id,monto_asociado,creado_en) VALUES(?,?,?,?)',(oc['id'],factura['id'],monto,datetime.now().isoformat(timespec='seconds')))
+                            oc_asociar_factura(conn,oc['id'],factura['id'],monto)
                             st.success('Factura asociada sin generar asiento contable.');st.rerun()
                         except (sqlite3.Error,ValueError) as ex:st.error(str(ex))
             links=conn.execute('SELECT a.id,c.fecha,c.folio,a.monto_asociado FROM ordenes_compra_facturas a JOIN compras c ON c.id=a.compra_id WHERE a.oc_id=?',(oc['id'],)).fetchall()
@@ -311,8 +412,10 @@ def oc_pantalla(conn):
                 st.dataframe(pd.DataFrame([dict(x) for x in links]),hide_index=True,use_container_width=True)
                 borrar=st.selectbox('Desvincular asociación',range(len(links)),format_func=lambda i:f"Folio {links[i]['folio']} · {money(links[i]['monto_asociado'])}")
                 if st.button('Desvincular factura'):
-                    with conn:conn.execute('DELETE FROM ordenes_compra_facturas WHERE id=?',(links[borrar]['id'],))
-                    st.success('Asociación eliminada; factura y contabilidad intactas.');st.rerun()
+                    try:
+                        oc_desvincular_factura(conn,oc['id'],links[borrar]['id'])
+                        st.success('Asociación eliminada; factura y contabilidad intactas.');st.rerun()
+                    except (ValueError,PermissionError) as exc:st.error(str(exc))
 
 # ============================================================
 # INICIALIZACIÓN

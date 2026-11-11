@@ -15,7 +15,7 @@ if st.session_state.get('sgci_auth_tipo')=='supabase' and not sgci_es_propietari
     estado=conn.execute('SELECT activo,debe_cambiar_clave FROM sgci_usuarios WHERE email=?',(email_login,)).fetchone()
     if not estado or not estado['activo']:
         sgci_cerrar_sesion()
-        st.error('Cuenta no autorizada o deshabilitada en SGCI.')
+        st.error('Cuenta no autorizada o deshabilitada en CONTEM.')
         st.stop()
     if estado['debe_cambiar_clave']:
         st.title('🔐 Cambio obligatorio de contraseña')
@@ -173,12 +173,14 @@ if sgci_modulo_elegido is None:
     st.error('Módulo desconocido.')
     st.stop()
 sgci_exigir_permiso(conn, sgci_modulo_elegido, 'ver')
+if sgci_modulo_elegido in ('cxc','cxp','contabilidad','administracion'):
+    if sub != 'Usuarios y permisos':
+        sgci_exigir_permiso(conn, sgci_modulo_elegido, 'ver', sub)
 
 st.sidebar.divider()
 st.sidebar.caption("Respaldo de Datos")
 if sgci_es_propietario() and os.path.exists(DB_FILE):
-    with open(DB_FILE, "rb") as f:
-        db_bytes = f.read()
+    db_bytes = sgci_respaldo_consistente(conn)
     st.sidebar.download_button(
         label="💾 Descargar Respaldo BD",
         data=db_bytes,
@@ -718,9 +720,9 @@ elif menu == "👥 Recursos Humanos":
             pres=pd.read_sql_query("SELECT p.id,t.nombre,p.fecha,p.monto_original,p.numero_cuotas,p.cuota,p.saldo,p.estado,p.contabilizado,p.asiento_id FROM nomina_prestamos p JOIN nomina_trabajadores t ON t.id=p.trabajador_id ORDER BY p.id DESC",conn)
             st.dataframe(formatear_montos_df(ants),use_container_width=True,hide_index=True); st.dataframe(formatear_montos_df(pres),use_container_width=True,hide_index=True)
             if not ants.empty:
-                pdf_ant=nomina_pdf('Anticipos de remuneraciones','SGCI',['ID','Trabajador','Período','Fecha','Monto','Contabilizado','Asiento'],[[r.id,r.nombre,r.periodo,r.fecha,money(r.monto),'Sí' if r.contabilizado else 'No',r.asiento_id or ''] for r in ants.itertuples()]); st.download_button('🖨️ PDF anticipos',pdf_ant,'anticipos_remuneraciones.pdf','application/pdf',key='pdf_anticipos')
+                pdf_ant=nomina_pdf('Anticipos de remuneraciones','CONTEM',['ID','Trabajador','Período','Fecha','Monto','Contabilizado','Asiento'],[[r.id,r.nombre,r.periodo,r.fecha,money(r.monto),'Sí' if r.contabilizado else 'No',r.asiento_id or ''] for r in ants.itertuples()]); st.download_button('🖨️ PDF anticipos',pdf_ant,'anticipos_remuneraciones.pdf','application/pdf',key='pdf_anticipos')
             if not pres.empty:
-                pdf_pre=nomina_pdf('Préstamos a trabajadores','SGCI',['ID','Trabajador','Fecha','Monto','Cuotas','Cuota','Saldo','Estado'],[[r.id,r.nombre,r.fecha,money(r.monto_original),r.numero_cuotas,money(r.cuota),money(r.saldo),r.estado] for r in pres.itertuples()]); st.download_button('🖨️ PDF préstamos',pdf_pre,'prestamos_trabajadores.pdf','application/pdf',key='pdf_prestamos')
+                pdf_pre=nomina_pdf('Préstamos a trabajadores','CONTEM',['ID','Trabajador','Fecha','Monto','Cuotas','Cuota','Saldo','Estado'],[[r.id,r.nombre,r.fecha,money(r.monto_original),r.numero_cuotas,money(r.cuota),money(r.saldo),r.estado] for r in pres.itertuples()]); st.download_button('🖨️ PDF préstamos',pdf_pre,'prestamos_trabajadores.pdf','application/pdf',key='pdf_prestamos')
             st.markdown('#### Contabilizar entrega de anticipo/préstamo')
             bancos=pd.read_sql_query("SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 AND cuenta_contable IS NOT NULL",conn)
             pendientes=[]
@@ -818,7 +820,7 @@ elif menu == "👥 Recursos Humanos":
             filas=[]
             for r in vista.itertuples(index=False): filas.append([r[0],r[1]]+[money(x) for x in r[2:]])
             tot=['','TOTALES']+[money(vista[c].sum()) for c in cols[2:]]
-            pdf=nomina_pdf(f'Resumen de Nómina - {per}','SGCI - Sistema de Gestión Contable Integral',headers,filas,tot)
+            pdf=nomina_pdf(f'Resumen de Nómina - {per}','CONTEM - Sistema Contable y Empresarial',headers,filas,tot)
             st.download_button('🖨️ PDF resumen de nómina',pdf,f'resumen_nomina_{per}.pdf','application/pdf')
             st.markdown('#### Liquidación individual imprimible')
             lm={f"{r.rut} - {r.nombre}":r for r in df.itertuples()}; ls=st.selectbox('Trabajador para reporte',list(lm),key='rep_trab'); rr=lm[ls]
@@ -992,14 +994,14 @@ elif menu == "🏦 Bancos y Cartolas":
             banco_id = int(banco_label.split(" - ")[0])
             archivo = st.file_uploader("Cartola bancaria PDF, CSV o Excel", type=["pdf","csv","xlsx","xls"], key="cartola_file")
             password_pdf = st.text_input("Contraseña del PDF (solo si está protegido)", type="password", key="cartola_pwd")
-            st.caption("La contraseña se usa únicamente para abrir el PDF durante esta carga; SGCI no la guarda.")
+            st.caption("La contraseña se usa únicamente para abrir el PDF durante esta carga; CONTEM no la guarda.")
 
             if archivo:
                 try:
                     archivo_hash = hash_archivo(archivo)
                     previa = importacion_archivo_existente(conn, "CARTOLA", archivo_hash)
                     if previa:
-                        st.error(f"⚠️ Este mismo archivo ya fue importado el {previa['fecha_hora']}. Archivo: {previa['nombre_archivo']} · Lote: {previa['lote_id'] or 'sin lote'}. SGCI bloqueó la recarga.")
+                        st.error(f"⚠️ Este mismo archivo ya fue importado el {previa['fecha_hora']}. Archivo: {previa['nombre_archivo']} · Lote: {previa['lote_id'] or 'sin lote'}. CONTEM bloqueó la recarga.")
                     else:
                         if archivo.name.lower().endswith(".pdf"):
                             dfc = leer_cartola_pdf(archivo, password_pdf)
@@ -1267,7 +1269,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 if es_cargo and metodo_conc == "👤 Nómina":
                     st.divider()
                     st.subheader("👤 Nómina / trabajador")
-                    st.caption("Úsalo para conciliar anticipos quincenales pagados por cheque o transferencia. SGCI carga Anticipos de remuneraciones, acredita Banco y vincula el pago al trabajador y período.")
+                    st.caption("Úsalo para conciliar anticipos quincenales pagados por cheque o transferencia. CONTEM carga Anticipos de remuneraciones, acredita Banco y vincula el pago al trabajador y período.")
                     trabajadores_banco=pd.read_sql_query(
                         "SELECT id,rut,nombre,sueldo_base,anticipo_porcentaje FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",
                         conn
@@ -1307,7 +1309,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 if es_cargo and metodo_conc == "🏢 Proveedor":
                     st.divider()
                     st.subheader("🏢 Pago a proveedor")
-                    st.caption("Úsalo cuando el cargo bancario paga una factura ya contabilizada en RCV. SGCI rebaja Proveedores, acredita Banco y actualiza el auxiliar del proveedor y sus documentos.")
+                    st.caption("Úsalo cuando el cargo bancario paga una factura ya contabilizada en RCV. CONTEM rebaja Proveedores, acredita Banco y actualiza el auxiliar del proveedor y sus documentos.")
                     proveedores_pago = pd.read_sql_query("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM proveedores WHERE activo=1 ORDER BY nombre", conn)
                     if proveedores_pago.empty:
                         st.info("No hay proveedores registrados.")
@@ -1557,7 +1559,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 if metodo_conc == "✏️ Una cuenta":
                     st.divider()
                     st.subheader("Imputación manual del movimiento")
-                    st.caption("Úsala cuando no exista una coincidencia adecuada. Al confirmar, SGCI genera el asiento y marca el movimiento como conciliado. Si el gasto ya fue provisionado, selecciona la cuenta por pagar correspondiente; no vuelvas a seleccionar la cuenta de gasto.")
+                    st.caption("Úsala cuando no exista una coincidencia adecuada. Al confirmar, CONTEM genera el asiento y marca el movimiento como conciliado. Si el gasto ya fue provisionado, selecciona la cuenta por pagar correspondiente; no vuelvas a seleccionar la cuenta de gasto.")
                     cuentas_manual = cuentas_imputables(conn)
                     if cuentas_manual.empty:
                         st.info("No hay cuentas imputables disponibles en el plan de cuentas.")
@@ -1569,7 +1571,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         glosa_manual = st.text_input("Glosa del asiento", value=glosa_base, key=f"imputacion_glosa_{movimiento_id}")
                         monto_sel = float(mov_sel["cargo"] or 0) if float(mov_sel["cargo"] or 0) > 0 else float(mov_sel["abono"] or 0)
                         naturaleza_sel = "Cargo / salida" if float(mov_sel["cargo"] or 0) > 0 else "Abono / entrada"
-                        st.info(f"Movimiento: {naturaleza_sel} por {money(monto_sel)}. SGCI usará automáticamente la cuenta bancaria como la otra línea del asiento.")
+                        st.info(f"Movimiento: {naturaleza_sel} por {money(monto_sel)}. CONTEM usará automáticamente la cuenta bancaria como la otra línea del asiento.")
                         confirmar_manual = st.checkbox("Confirmo que revisé la cuenta contable y deseo contabilizar y conciliar este movimiento.", key=f"imputacion_confirma_{movimiento_id}")
                         if st.button("🧾 Contabilizar e imputar manualmente", type="primary", disabled=not confirmar_manual, key=f"imputacion_btn_{movimiento_id}"):
                             sgci_exigir_permiso(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
@@ -1588,7 +1590,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     glosa_multi_base = str(mov_sel["descripcion"] or "Movimiento bancario")
                     st.divider()
                     st.subheader("🧩 Distribuir movimiento entre varias cuentas")
-                    st.caption("Úsala cuando un solo cargo o abono bancario corresponde a conceptos distintos. SGCI generará un único asiento y exigirá que la suma distribuida sea exactamente igual al movimiento bancario.")
+                    st.caption("Úsala cuando un solo cargo o abono bancario corresponde a conceptos distintos. CONTEM generará un único asiento y exigirá que la suma distribuida sea exactamente igual al movimiento bancario.")
                     # La lista de cuentas debe existir también cuando "Una cuenta" no está seleccionada.
                     cuentas_multi = cuentas_imputables(conn)
                     mapa_multi = dict(zip(cuentas_multi["etiqueta"], cuentas_multi["codigo"])) if not cuentas_multi.empty else {}
@@ -1626,7 +1628,7 @@ elif menu == "🏦 Bancos y Cartolas":
 
     if banco_seccion == "Operaciones manuales":
         st.subheader("Servicios, nómina y otros pagos/abonos")
-        st.caption("Registra aquí operaciones que no provienen del RCV. Luego SGCI las buscará por coincidencia de monto contra la cartola.")
+        st.caption("Registra aquí operaciones que no provienen del RCV. Luego CONTEM las buscará por coincidencia de monto contra la cartola.")
         cuentas = cuentas_imputables(conn)
         mapa = dict(zip(cuentas.etiqueta,cuentas.codigo))
         with st.form("nueva_operacion_manual"):
@@ -1642,7 +1644,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     st.error("Completa descripción, monto y cuenta contable.")
                 else:
                     crear_obligacion_manual(conn,fecha_op.strftime("%Y-%m-%d"),tipo_op,descripcion_op,referencia_op,monto_op,mapa[cuenta_op])
-                    sgci_exito("Operación guardada. SGCI podrá encontrarla por coincidencia de monto.")
+                    sgci_exito("Operación guardada. CONTEM podrá encontrarla por coincidencia de monto.")
                     st.rerun()
 
         ops = pd.read_sql_query("""SELECT o.id,o.fecha,o.tipo,o.descripcion,o.referencia,o.monto,o.codigo_cuenta,
@@ -1741,7 +1743,7 @@ elif menu == "🏦 Bancos y Cartolas":
             if not corregibles.empty:
                 st.divider()
                 st.subheader("Corregir imputación manual")
-                st.caption("Si una imputación fue enviada a una cuenta equivocada, SGCI genera un asiento reverso y deja el movimiento pendiente para volver a conciliarlo. No elimina el asiento histórico.")
+                st.caption("Si una imputación fue enviada a una cuenta equivocada, CONTEM genera un asiento reverso y deja el movimiento pendiente para volver a conciliarlo. No elimina el asiento histórico.")
                 corr_map = {}
                 for r in corregibles.itertuples():
                     monto_corr = float(r.cargo or 0) if float(r.cargo or 0)>0 else float(r.abono or 0)
@@ -1843,7 +1845,7 @@ elif menu == "📥 RCV Compras":
                 archivo_hash = hash_archivo(archivo)
                 previa = importacion_archivo_existente(conn,"RCV_COMPRAS",archivo_hash)
                 if previa:
-                    st.error(f"⚠️ Este mismo RCV de Compras ya fue procesado el {previa['fecha_hora']} ({previa['nombre_archivo']}). SGCI bloqueó la recarga.")
+                    st.error(f"⚠️ Este mismo RCV de Compras ya fue procesado el {previa['fecha_hora']} ({previa['nombre_archivo']}). CONTEM bloqueó la recarga.")
                     st.session_state.pop("rcv_compras",None); st.session_state.pop("rcv_compras_archivo",None)
                 else:
                     df_original = leer_archivo_tabular(archivo)
@@ -1910,7 +1912,7 @@ elif menu == "📥 RCV Compras":
                 archivo_hash = hash_archivo(archivo_subido)
                 previa = importacion_archivo_existente(conn,"RCV_COMPRAS",archivo_hash)
                 if previa:
-                    st.error(f"⚠️ Esta misma plantilla ya fue procesada el {previa['fecha_hora']}. SGCI bloqueó la recarga.")
+                    st.error(f"⚠️ Esta misma plantilla ya fue procesada el {previa['fecha_hora']}. CONTEM bloqueó la recarga.")
                     st.session_state.pop("rcv_compras",None); st.session_state.pop("rcv_compras_archivo",None)
                 else:
                     df_procesado = preparar_documentos(conn,df_prep,"compras")
@@ -2082,7 +2084,7 @@ elif menu == "📥 RCV Compras":
         st.subheader("📚 Recuperar datos tributarios desde RCV histórico")
         st.caption(
             "Sube aquí un RCV Compras ORIGINAL del SII ya contabilizado. "
-            "SGCI lo cruza por RUT + tipo de documento + folio y recupera neto, "
+            "CONTEM lo cruza por RUT + tipo de documento + folio y recupera neto, "
             "exento, IVA recuperable, IVA no recuperable y activo fijo. "
             "Esta operación NO crea compras ni asientos y NO toca Proveedores, Banco o pagos."
         )
@@ -2100,14 +2102,14 @@ elif menu == "📥 RCV Compras":
                 encontrados=len(cruces_hist)
                 c1,c2,c3=st.columns(3)
                 c1.metric("Documentos en RCV",f"{total_archivo:,}".replace(",","."))
-                c2.metric("Coincidencias SGCI",f"{encontrados:,}".replace(",","."))
+                c2.metric("Coincidencias CONTEM",f"{encontrados:,}".replace(",","."))
                 c3.metric("Sin coincidencia",f"{len(faltantes_hist):,}".replace(",","."))
                 if not faltantes_hist.empty:
                     st.warning(
-                        f"⚠️ {len(faltantes_hist)} documento(s) del RCV no fueron encontrados en SGCI. "
+                        f"⚠️ {len(faltantes_hist)} documento(s) del RCV no fueron encontrados en CONTEM. "
                         "Estos documentos NO serán modificados ni recuperados automáticamente."
                     )
-                    st.markdown("#### ⚠️ Documentos del RCV no encontrados en SGCI")
+                    st.markdown("#### ⚠️ Documentos del RCV no encontrados en CONTEM")
                     columnas_faltantes=["rut","tipo_doc","folio","proveedor","neto_rcv","exento_rcv","iva_rcv","iva_no_rec_rcv","total_rcv"]
                     st.dataframe(
                         faltantes_hist[[c for c in columnas_faltantes if c in faltantes_hist.columns]],
@@ -2181,7 +2183,7 @@ elif menu == "📥 RCV Compras":
             if reconstruidos:
                 st.warning(
                     f"{reconstruidos} documento(s) no conservan el IVA histórico en la base y "
-                    "SGCI lo reconstruyó como 19/119 del total. Revísalos especialmente antes de confirmar."
+                    "CONTEM lo reconstruyó como 19/119 del total. Revísalos especialmente antes de confirmar."
                 )
             sin_cuenta = pendientes_iva[pendientes_iva.get("codigo_cuenta_actual","").astype(str).str.strip() == ""]
             if not sin_cuenta.empty:
@@ -2234,7 +2236,7 @@ elif menu == "📤 RCV Ventas":
             archivo_hash=hash_archivo(archivo)
             previa=importacion_archivo_existente(conn,"RCV_VENTAS",archivo_hash)
             if previa:
-                st.error(f"⚠️ Este mismo RCV de Ventas ya fue procesado el {previa['fecha_hora']} ({previa['nombre_archivo']}). SGCI bloqueó la recarga.")
+                st.error(f"⚠️ Este mismo RCV de Ventas ya fue procesado el {previa['fecha_hora']} ({previa['nombre_archivo']}). CONTEM bloqueó la recarga.")
                 st.session_state.pop("rcv_ventas",None); st.session_state.pop("rcv_ventas_archivo",None)
             else:
                 df_original=leer_archivo_tabular(archivo)
@@ -2376,7 +2378,7 @@ elif menu == "✍️ Asientos y Saldos":
             return "$" + f"{clp_round(valor):,.0f}".replace(",", ".")
 
         st.caption(
-            "Úsalo mes por mes para cerrar el IVA del período. SGCI debita IVA Débito Fiscal, "
+            "Úsalo mes por mes para cerrar el IVA del período. CONTEM debita IVA Débito Fiscal, "
             "abona IVA Crédito Fiscal utilizado y lleva la diferencia a IVA por pagar. "
             "No mueve Banco ni registra el pago del F29."
         )
@@ -2400,7 +2402,7 @@ elif menu == "✍️ Asientos y Saldos":
         if credito_f29 > debito_f29:
             st.warning("El crédito fiscal supera al débito. Este formulario está diseñado para períodos con IVA por pagar; no contabilices hasta revisar el remanente.")
         elif existe_f29:
-            st.warning(f"El período {periodo_f29} ya fue compensado en el asiento {existe_f29[1]}. SGCI bloquea una segunda contabilización.")
+            st.warning(f"El período {periodo_f29} ya fue compensado en el asiento {existe_f29[1]}. CONTEM bloquea una segunda contabilización.")
         elif debito_f29 > 0:
             st.info(
                 f"Asiento que se generará: Debe IVA Débito Fiscal {_f29_clp(debito_f29)} · "
@@ -2638,7 +2640,7 @@ elif menu == "✍️ Asientos y Saldos":
     if df_rep_asientos.empty:
         st.caption("Aún no existen asientos manuales o saldos iniciales para imprimir.")
     else:
-        pdf = pdf_desde_dataframe("Asientos Manuales y Saldos Iniciales","SGCI - Sistema de Gestión Contable Integral",df_rep_asientos,{"Debe","Haber"})
+        pdf = pdf_desde_dataframe("Asientos Manuales y Saldos Iniciales","CONTEM - Sistema Contable y Empresarial",df_rep_asientos,{"Debe","Haber"})
         st.download_button("🖨️ Imprimir / PDF Asientos y Saldos",pdf,"asientos_y_saldos.pdf","application/pdf",key="pdf_asientos_saldos")
 
     tipo_carga = st.radio("Seleccione el origen del lote", ["Saldo inicial", "Asiento manual"])
@@ -3237,7 +3239,7 @@ elif menu == "📚 Mayor":
 
 elif menu == "⚖️ Balance de Comprobación":
 
-    st.title("⚖ Balance de Comprobación")
+    st.title("⚖ Balance de Comprobación · 8 columnas")
 
     col1, col2 = st.columns(2)
 
@@ -3247,34 +3249,36 @@ elif menu == "⚖️ Balance de Comprobación":
     with col2:
         hasta = st.date_input("Hasta", date.today())
 
-    df = balance_comprobacion(
-        conn,
-        desde.strftime("%Y-%m-%d"),
-        hasta.strftime("%Y-%m-%d")
-    )
-
-    if not df.empty:
-        debe = df["Debe"].sum()
-        haber = df["Haber"].sum()
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Debe", money(debe))
-        c2.metric("Haber", money(haber))
-        c3.metric("Diferencia", money(debe - haber))
-
-        if abs(debe - haber) < 0.01:
-            sgci_exito("🟢 Balance cuadrado.")
+    try:
+        informe = balance_ocho_columnas(conn, desde.isoformat(), hasta.isoformat())
+        df = informe['detalle']
+        if not df.empty:
+            sumas = informe['resumen'].iloc[0]
+            c1, c2, c3 = st.columns(3)
+            c1.metric('Debe', money(sumas['Debe']))
+            c2.metric('Haber', money(sumas['Haber']))
+            c3.metric('Resultado del ejercicio', money(informe['resultado']))
+            if informe['cuadrado']:
+                sgci_exito('🟢 Balance cuadrado en sumas, saldos, inventario y resultados.')
+            else:
+                st.error('🔴 El balance presenta diferencias; revisa el libro diario.')
+            mostrar = pd.concat([df, informe['resumen']], ignore_index=True)
+            for columna in mostrar.columns[2:]:
+                mostrar[columna] = mostrar[columna].map(money)
+            st.dataframe(mostrar, use_container_width=True, hide_index=True)
+            st.caption('Sumas del intervalo seleccionado, incluidos los asientos de apertura registrados en él.')
+            if sgci_puede_submodulo(conn, 'contabilidad', 'Balance de Comprobación', 'exportar'):
+                st.download_button('🖨️ Imprimir / PDF Balance de Comprobación',
+                    exportar_balance_ocho(conn, desde.isoformat(), hasta.isoformat(), 'pdf'),
+                    f'balance_8_columnas_{hasta.strftime("%Y%m%d")}.pdf', 'application/pdf', key='pdf_balance_modulo')
+                st.download_button('Descargar balance Excel',
+                    exportar_balance_ocho(conn, desde.isoformat(), hasta.isoformat(), 'xlsx'),
+                    f'balance_8_columnas_{hasta.strftime("%Y%m%d")}.xlsx',
+                    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', key='xlsx_balance_modulo')
         else:
-            st.error("🔴 Existe diferencia.")
-
-        st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
-        pdf = pdf_desde_dataframe(
-            "Balance de Comprobación",
-            f"Desde {desde.strftime('%Y-%m-%d')} hasta {hasta.strftime('%Y-%m-%d')}",
-            df, {"Debe","Haber","Saldo"},
-            ["","TOTALES",money(debe),money(haber),money(df["Saldo"].sum())] if len(df.columns) >= 5 else None
-        )
-        st.download_button("🖨️ Imprimir / PDF Balance de Comprobación",pdf,f"balance_{hasta.strftime('%Y%m%d')}.pdf","application/pdf",key="pdf_balance_modulo")
+            st.info('No hay movimientos en el intervalo seleccionado.')
+    except ValueError as exc:
+        st.error(str(exc))
 
 
 # ============================================================
@@ -3368,7 +3372,7 @@ elif menu == "📊 Conciliación":
                             except Exception as exc: st.error(str(exc))
 
         st.subheader("Aplicar abonos de clientes")
-        st.caption("Relaciona abonos ya registrados con facturas pendientes. No vuelve a mover Banco. Si el saldo estaba contabilizado como anticipo de cliente, SGCI genera únicamente la reclasificación Anticipos → Clientes necesaria al aplicarlo.")
+        st.caption("Relaciona abonos ya registrados con facturas pendientes. No vuelve a mover Banco. Si el saldo estaba contabilizado como anticipo de cliente, CONTEM genera únicamente la reclasificación Anticipos → Clientes necesaria al aplicarlo.")
 
         clientes_aux=conn.execute("""
             SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre
@@ -3457,7 +3461,7 @@ elif menu == "📊 Conciliación":
                     st.info(f"Las facturas seleccionadas conservarán {money(saldo_docs_aux)} pendientes después de esta aplicación.")
 
                 confirma_aux=st.checkbox(
-                    "Confirmo la aplicación. Si corresponde a un anticipo, SGCI realizará automáticamente la reclasificación contable sin volver a mover Banco.",
+                    "Confirmo la aplicación. Si corresponde a un anticipo, CONTEM realizará automáticamente la reclasificación contable sin volver a mover Banco.",
                     key="aux_confirma_cliente"
                 )
                 if st.button("🔗 Aplicar abono a factura(s)",type="primary",
@@ -3700,7 +3704,7 @@ elif menu == "📋 Plan de Cuentas":
         )
         st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
         if not df.empty:
-            pdf = pdf_desde_dataframe("Plan de Cuentas","SGCI - Sistema de Gestión Contable Integral",df)
+            pdf = pdf_desde_dataframe("Plan de Cuentas","CONTEM - Sistema Contable y Empresarial",df)
             st.download_button("🖨️ Imprimir / PDF Plan de Cuentas",pdf,"plan_de_cuentas.pdf","application/pdf",key="pdf_plan_cuentas")
 
     with pestañas[1]:
@@ -3896,7 +3900,7 @@ elif menu == "⚙️ Reglas Contables":
     st.info(
         """
         Las reglas tienen prioridad sobre la cuenta habitual del cliente/proveedor. 
-        Esto permite que el SGCI aprenda la clasificación contable de cada empresa.
+        Esto permite que el CONTEM aprenda la clasificación contable de cada empresa.
         """
     )
 
@@ -4124,7 +4128,7 @@ elif menu == "🧰 Matriz Contable":
 # ============================================================
 
 st.sidebar.divider()
-st.sidebar.caption("SGCI • Sistema de Gestión Contable Integral")
+st.sidebar.caption("CONTEM • Sistema Contable y Empresarial")
 st.sidebar.caption("Motor contable + auxiliares + RCV + conciliación")
 
 conn.close()

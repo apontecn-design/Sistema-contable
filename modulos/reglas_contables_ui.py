@@ -9,7 +9,7 @@ def guardar_regla(
     prioridad,
     descripcion
 ):
-
+    sgci_autorizar_operacion(conn,'administracion','editar','Reglas Contables')
     conn.execute(
         """
         INSERT INTO reglas_contables

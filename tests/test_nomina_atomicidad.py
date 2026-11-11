@@ -25,6 +25,8 @@ def funcion_entorno(fallar=False):
 
     contexto = {
         "sgci_autorizar_operacion": lambda *a: None,
+        "sgci_rrhh_ids_autorizados": lambda *a: None,
+        "sgci_identidad_actual": lambda: 'administrador_prueba',
         "nomina_vista_previa": vista,
         "siguiente_asiento": lambda conn: 0,
         "nomina_asiento_linea": linea,

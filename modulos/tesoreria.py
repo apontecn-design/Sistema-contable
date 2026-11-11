@@ -1,5 +1,119 @@
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
 from datetime import datetime
+import hashlib
+from pathlib import PurePath
+
+
+def _tes_validar_adjunto(nombre, datos):
+    nombre = str(nombre or '').replace('\\', '/').rsplit('/', 1)[-1]
+    extension = PurePath(nombre).suffix.lower()
+    firmas = {'.pdf': (b'%PDF-',), '.jpg': (b'\xff\xd8\xff',), '.jpeg': (b'\xff\xd8\xff',),
+              '.png': (b'\x89PNG\r\n\x1a\n',), '.xlsx': (b'PK\x03\x04',),
+              '.xls': (b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1',)}
+    if extension not in firmas or not isinstance(datos, bytes) or not datos or len(datos) > 5*1024*1024:
+        raise ValueError('Adjunta PDF, imagen o Excel válido de hasta 5 MB.')
+    if not any(datos.startswith(firma) for firma in firmas[extension]):
+        raise ValueError('El contenido del adjunto no corresponde al tipo de archivo.')
+    return nombre, datos, hashlib.sha256(datos).hexdigest()
+
+
+def tes_guardar_solicitud(conn, fecha, beneficiario, proveedor_id, concepto, fecha_limite,
+                         observacion, detalles, adjunto=None):
+    sgci_autorizar_operacion(conn, 'tesoreria', 'crear', 'Solicitudes de fondos')
+    from datetime import date as _fecha
+    fecha, fecha_limite = _fecha.fromisoformat(str(fecha)), _fecha.fromisoformat(str(fecha_limite))
+    if fecha_limite < fecha or not str(beneficiario).strip() or not str(concepto).strip() or not detalles:
+        raise ValueError('Revisa beneficiario, concepto, fechas y detalle de la solicitud.')
+    lineas = []
+    for d in detalles:
+        monto = int(d['monto'])
+        if monto <= 0 or monto != d['monto'] or not str(d['descripcion']).strip():
+            raise ValueError('Cada línea necesita descripción y monto entero positivo en CLP.')
+        compra_id = d.get('compra_id')
+        if compra_id is not None:
+            compra = conn.execute('SELECT proveedor_id FROM compras WHERE id=?', (compra_id,)).fetchone()
+            if not compra or not proveedor_id or compra['proveedor_id'] != proveedor_id:
+                raise ValueError('La factura no corresponde al proveedor de la solicitud.')
+        lineas.append((str(d['tipo']), str(d.get('referencia') or ''), str(d['descripcion']).strip(),
+                       monto, compra_id, d.get('tratamiento')))
+    archivo = _tes_validar_adjunto(*adjunto) if adjunto else None
+    with conn:
+        cur = conn.execute('''INSERT INTO tes_solicitudes
+            (fecha,beneficiario,proveedor_id,concepto,fecha_limite,moneda,estado,observacion,fecha_creacion)
+            VALUES(?,?,?,?,?,'CLP','BORRADOR',?,?)''',
+            (fecha.isoformat(),str(beneficiario).strip(),proveedor_id,str(concepto).strip(),
+             fecha_limite.isoformat(),str(observacion).strip(),datetime.now().isoformat(timespec='seconds')))
+        sid = cur.lastrowid
+        conn.executemany('''INSERT INTO tes_solicitud_detalle
+            (solicitud_id,tipo,referencia,descripcion,monto,compra_id,tratamiento) VALUES(?,?,?,?,?,?,?)''',
+            [(sid,*d) for d in lineas])
+        if archivo:
+            conn.execute('INSERT INTO tes_adjuntos(solicitud_id,nombre,contenido,sha256,fecha) VALUES(?,?,?,?,?)',
+                         (sid,*archivo,datetime.now().isoformat(timespec='seconds')))
+        conn.execute('INSERT INTO tes_eventos(solicitud_id,fecha,accion,usuario) VALUES(?,?,?,?)',
+                     (sid,datetime.now().isoformat(timespec='seconds'),'CREAR',sgci_identidad_actual()))
+    return sid
+
+
+def tes_cambiar_estado(conn, sid, nuevo):
+    transiciones = {'ENVIADA': ('BORRADOR','crear','fecha_envio'),
+                    'APROBADA': ('ENVIADA','aprobar','fecha_aprobacion'),
+                    'RECHAZADA': ('ENVIADA','aprobar','fecha_rechazo')}
+    if nuevo not in transiciones:
+        raise ValueError('Transición de solicitud no permitida.')
+    anterior, accion, campo = transiciones[nuevo]
+    sgci_autorizar_operacion(conn, 'tesoreria', accion, 'Solicitudes de fondos')
+    with conn:
+        cur = conn.execute(f'UPDATE tes_solicitudes SET estado=?,{campo}=? WHERE id=? AND estado=?',
+                           (nuevo,datetime.now().isoformat(timespec='seconds'),sid,anterior))
+        if cur.rowcount != 1:
+            raise ValueError('La solicitud cambió de estado o no existe. Actualiza la pantalla.')
+        conn.execute('INSERT INTO tes_eventos(solicitud_id,fecha,accion,usuario) VALUES(?,?,?,?)',
+                     (sid,datetime.now().isoformat(timespec='seconds'),nuevo,sgci_identidad_actual()))
+
+
+def tes_guardar_clasificacion(conn, sid, seleccion):
+    sgci_autorizar_operacion(conn, 'tesoreria', 'contabilizar', 'Confirmación de pagos')
+    plan = Plan(conn).hojas
+    if not seleccion or any(codigo not in plan for codigo in seleccion.values()):
+        raise ValueError('Selecciona cuentas imputables para todas las líneas.')
+    with conn:
+        for did, codigo in seleccion.items():
+            cur = conn.execute('''UPDATE tes_solicitud_detalle SET cuenta_contable=?
+                WHERE id=? AND solicitud_id=? AND compra_id IS NULL AND EXISTS
+                (SELECT 1 FROM tes_solicitudes WHERE id=? AND estado IN
+                 ('BORRADOR','ENVIADA','APROBADA','PENDIENTE_CONTABILIZACION'))''', (codigo,did,sid,sid))
+            if cur.rowcount != 1:
+                raise ValueError('La línea no pertenece a una solicitud modificable.')
+
+
+def tes_confirmar_pago(conn, sid, medio, fecha_pago, banco_id, banco_descripcion,
+                       referencia, nombre, contenido, observaciones=''):
+    sgci_autorizar_operacion(conn, 'tesoreria', 'confirmar', 'Confirmación de pagos')
+    from datetime import date as _fecha
+    _fecha.fromisoformat(str(fecha_pago))
+    if medio not in ('TRANSFERENCIA','CHEQUE') or not str(referencia).strip():
+        raise ValueError('Selecciona el medio y la referencia de pago.')
+    nombre, contenido, _ = _tes_validar_adjunto(nombre,contenido)
+    if PurePath(nombre).suffix.lower() not in ('.pdf','.png','.jpg','.jpeg'):
+        raise ValueError('El comprobante de pago debe ser PDF o imagen.')
+    with conn:
+        cur = conn.execute("UPDATE tes_solicitudes SET estado='PENDIENTE_CONTABILIZACION' WHERE id=? AND estado='APROBADA'", (sid,))
+        if cur.rowcount != 1:
+            raise ValueError('La solicitud ya no está aprobada o el pago ya fue confirmado.')
+        banco = conn.execute('SELECT cuenta_contable FROM bancos WHERE id=? AND activo=1',(banco_id,)).fetchone()
+        if not banco or not banco['cuenta_contable']:
+            raise ValueError('Selecciona un banco activo con cuenta contable.')
+        faltan = conn.execute("SELECT COUNT(*) FROM tes_solicitud_detalle WHERE solicitud_id=? AND compra_id IS NULL AND COALESCE(cuenta_contable,'')=''",(sid,)).fetchone()[0]
+        if faltan:
+            raise ValueError('Guarda la cuenta contable de cada línea antes de confirmar.')
+        conn.execute('''INSERT INTO tes_confirmaciones_pago
+            (solicitud_id,medio,fecha_pago,banco_descripcion,referencia,nombre_comprobante,
+             comprobante,observaciones,fecha_registro,banco_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?)''', (sid,medio,str(fecha_pago),str(banco_descripcion),
+             str(referencia).strip(),nombre,contenido,str(observaciones),datetime.now().isoformat(timespec='seconds'),banco_id))
+        conn.execute('INSERT INTO tes_eventos(solicitud_id,fecha,accion,usuario) VALUES(?,?,?,?)',
+                     (sid,datetime.now().isoformat(timespec='seconds'),'CONFIRMAR',sgci_identidad_actual()))
 
 def tes_crear_tablas(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS tes_solicitudes (
@@ -57,6 +171,11 @@ def tes_crear_tablas(conn):
         usuario TEXT)""")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_tes_asiento ON tes_confirmaciones_pago(asiento_id) WHERE asiento_id IS NOT NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_tes_solicitudes_estado ON tes_solicitudes(estado)")
+    conn.execute('''CREATE TABLE IF NOT EXISTS tes_adjuntos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        solicitud_id INTEGER NOT NULL REFERENCES tes_solicitudes(id),
+        nombre TEXT NOT NULL, contenido BLOB NOT NULL, sha256 TEXT NOT NULL,
+        fecha TEXT NOT NULL, UNIQUE(solicitud_id,sha256))''')
     conn.commit()
 
 
@@ -104,6 +223,8 @@ def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
                 tratamiento=str(d['tratamiento'] or '').strip()
                 if not tratamiento:
                     raise ValueError('Indica el tratamiento contable del desembolso.')
+                if tratamiento == 'Obligación ya contabilizada':
+                    raise ValueError('Vincula el documento u obligación original antes de contabilizar para evitar duplicar el gasto.')
                 cuenta=str(d['cuenta_contable'] or cuenta_sin_dte or pago['cuenta_contrapartida'] or '').strip()
                 if not cuenta:
                     raise ValueError(f'Falta asignar la cuenta contable a la línea: {d["descripcion"]}.')
@@ -142,7 +263,18 @@ def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
         raise
 
 
+def tes_descargar_adjunto(conn, sid, adjunto_id):
+    sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Solicitudes de fondos')
+    sgci_autorizar_operacion(conn, 'tesoreria', 'exportar', 'Solicitudes de fondos')
+    fila = conn.execute('SELECT nombre,contenido FROM tes_adjuntos WHERE id=? AND solicitud_id=?',
+                        (adjunto_id,sid)).fetchone()
+    if not fila:
+        raise ValueError('Adjunto no disponible para esta solicitud.')
+    return fila['nombre'], bytes(fila['contenido'])
+
+
 def pantalla_tesoreria(conn):
+    sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Solicitudes de fondos')
     st.title('💼 Tesorería · Solicitudes de fondos')
     st.caption('Gestión de solicitudes, confirmación de pagos y trazabilidad contable y bancaria.')
     tes_crear_tablas(conn)
@@ -180,7 +312,7 @@ def pantalla_tesoreria(conn):
                     compra_elegida = opciones_docs[doc_label]
                     doc_elegido = docs.loc[docs.id == compra_elegida].iloc[0]
                     st.caption('Primera integración: una factura por solicitud. Posteriormente permitiremos varias facturas del mismo proveedor.')
-        elif tipo == 'Documento sin DTE':
+        elif tipo in ('Documento sin DTE','Otro'):
             tratamiento = st.radio('Tratamiento contable del documento',
                 ['Pendiente de reconocimiento contable', 'Obligación ya contabilizada'], key='tes2_tratamiento')
             st.caption('Si el gasto aún no se ha reconocido, elige pendiente de reconocimiento; si ya está contabilizado, debe identificarse la obligación de origen antes del pago.')
@@ -197,7 +329,7 @@ def pantalla_tesoreria(conn):
                 num_rows='dynamic', hide_index=True, use_container_width=True,
                 column_config={'Monto CLP':st.column_config.NumberColumn('Monto CLP',min_value=0,step=1)},
                 key='tes_partidas_editor')
-        with st.form('tes_nueva_solicitud', clear_on_submit=True):
+        with st.form('tes_nueva_solicitud', clear_on_submit=False):
             c1, c2 = st.columns(2)
             fecha = c1.date_input('Fecha de solicitud', value=date.today())
             fecha_limite = c2.date_input('Fecha límite de pago', value=date.today())
@@ -209,6 +341,8 @@ def pantalla_tesoreria(conn):
             monto = st.number_input('Monto solicitado (CLP)', min_value=0, step=1,
                 value=int(round(float(doc_elegido['pendiente']))) if doc_elegido is not None else 0)
             observacion = st.text_area('Observaciones', height=80)
+            archivo_solicitud = st.file_uploader('Adjunto de la solicitud (PDF, imagen o Excel; máximo 5 MB)',
+                type=['pdf','jpg','jpeg','png','xls','xlsx'], key='tes_adjunto_solicitud')
             guardar = st.form_submit_button('Guardar solicitud en borrador', type='primary')
         if guardar:
             sgci_exigir_permiso(conn, 'tesoreria', 'crear', 'Solicitudes de fondos')
@@ -234,17 +368,11 @@ def pantalla_tesoreria(conn):
                 st.error('La fecha límite no puede ser anterior a la solicitud.')
             else:
                 try:
-                    with conn:
-                        cur = conn.execute("""INSERT INTO tes_solicitudes
-                            (fecha, beneficiario, proveedor_id, concepto, fecha_limite, moneda, estado, observacion, fecha_creacion)
-                            VALUES (?,?,?,?,?,'CLP','BORRADOR',?,?)""",
-                            (fecha.isoformat(), beneficiario, pid, concepto.strip(), fecha_limite.isoformat(), observacion.strip(), datetime.now().isoformat(timespec='seconds')))
-                        sid = cur.lastrowid
-                        for descripcion_linea, referencia_linea, monto_linea in lineas_solicitud:
-                            conn.execute('''INSERT INTO tes_solicitud_detalle
-                                (solicitud_id,tipo,referencia,descripcion,monto,compra_id,tratamiento)
-                                VALUES (?,?,?,?,?,?,?)''',
-                                (sid,tipo,referencia_linea,descripcion_linea,monto_linea,compra_elegida,tratamiento))
+                    sid = tes_guardar_solicitud(conn,fecha.isoformat(),beneficiario,pid,concepto,
+                        fecha_limite.isoformat(),observacion,
+                        [{'tipo':tipo,'referencia':r,'descripcion':d,'monto':m,
+                          'compra_id':compra_elegida,'tratamiento':tratamiento} for d,r,m in lineas_solicitud],
+                        (archivo_solicitud.name,archivo_solicitud.getvalue()) if archivo_solicitud else None)
                     st.session_state['tes_preferir_listado']=True
                     sgci_exito(f'Solicitud SF-{sid:06d} guardada como borrador. No se generó ningún asiento.')
                     st.session_state['tes_preferir_listado']=True
@@ -266,7 +394,7 @@ def pantalla_tesoreria(conn):
             pendientes_imp=solicitudes[solicitudes.estado=='PENDIENTE_CONTABILIZACION']
             tes_boton_imprimir('Pendientes de contabilización',pendientes_imp,'pendientes_contabilizacion')
             ids = solicitudes.id.astype(int).tolist()
-            sid = st.selectbox('Selecciona una solicitud', ids, format_func=lambda n: f'SF-{n:06d}')
+            sid = st.selectbox('Selecciona una solicitud', ids, format_func=lambda n: f'SF-{n:06d}', key='tes_solicitud_actual')
             fila = conn.execute('SELECT * FROM tes_solicitudes WHERE id=?', (sid,)).fetchone()
             detalle = pd.read_sql_query('SELECT tipo, referencia, descripcion, monto, compra_id, tratamiento FROM tes_solicitud_detalle WHERE solicitud_id=?', conn, params=(sid,))
             st.write(f"**Beneficiario:** {fila['beneficiario']} · **Estado:** {fila['estado']}")
@@ -276,6 +404,11 @@ def pantalla_tesoreria(conn):
             st.dataframe(detalle_vista, hide_index=True, use_container_width=True)
             tes_boton_imprimir(f'Detalle SF-{sid:06d}',detalle_vista,f'detalle_{sid}')
             st.metric('Total solicitado', money(detalle.monto.sum()))
+            if sgci_puede_submodulo(conn,'tesoreria','Solicitudes de fondos','exportar'):
+                for adj in conn.execute('SELECT id,nombre FROM tes_adjuntos WHERE solicitud_id=? ORDER BY id',(sid,)):
+                    nombre_adjunto, contenido_adjunto = tes_descargar_adjunto(conn,sid,adj['id'])
+                    st.download_button('Descargar adjunto: '+nombre_adjunto,contenido_adjunto,
+                        file_name=nombre_adjunto,key=f'tes_adjunto_{adj["id"]}')
             if fila['estado'] in ('BORRADOR','ENVIADA','APROBADA','PENDIENTE_CONTABILIZACION'):
                 st.markdown('#### Clasificación contable por línea')
                 st.caption('Cada concepto se imputa a su propia cuenta. Una sola transferencia genera un asiento con varios débitos y un crédito bancario total.')
@@ -297,15 +430,12 @@ def pantalla_tesoreria(conn):
                     if fila['estado']=='CONTABILIZADA':
                         st.error('No se puede modificar un asiento contabilizado.')
                     else:
-                        with conn:
-                            for did,codigo in seleccion_tes.items():
-                                conn.execute('UPDATE tes_solicitud_detalle SET cuenta_contable=? WHERE id=? AND solicitud_id=?',(codigo,did,sid))
+                        tes_guardar_clasificacion(conn,sid,seleccion_tes)
                         st.success('Clasificación contable guardada para todas las líneas.')
             if fila['estado'] == 'BORRADOR':
                 if st.button('Marcar como enviada a Finanzas', key=f'tes_env_{sid}'):
                     sgci_exigir_permiso(conn, 'tesoreria', 'crear', 'Solicitudes de fondos')
-                    with conn:
-                        conn.execute("UPDATE tes_solicitudes SET estado='ENVIADA', fecha_envio=? WHERE id=? AND estado='BORRADOR'", (datetime.now().isoformat(timespec='seconds'), sid))
+                    tes_cambiar_estado(conn,sid,'ENVIADA')
                     st.session_state['tes_preferir_listado']=True
                     st.rerun()
             elif fila['estado'] == 'ENVIADA':
@@ -313,14 +443,12 @@ def pantalla_tesoreria(conn):
                 c1, c2 = st.columns(2)
                 if c1.button('Registrar aprobación externa', key=f'tes_ap_{sid}'):
                     sgci_exigir_permiso(conn, 'tesoreria', 'aprobar', 'Solicitudes de fondos')
-                    with conn:
-                        conn.execute("UPDATE tes_solicitudes SET estado='APROBADA', fecha_aprobacion=? WHERE id=? AND estado='ENVIADA'", (datetime.now().isoformat(timespec='seconds'), sid))
+                    tes_cambiar_estado(conn,sid,'APROBADA')
                     st.session_state['tes_preferir_listado']=True
                     st.rerun()
                 if c2.button('Registrar rechazo externo', key=f'tes_re_{sid}'):
                     sgci_exigir_permiso(conn, 'tesoreria', 'aprobar', 'Solicitudes de fondos')
-                    with conn:
-                        conn.execute("UPDATE tes_solicitudes SET estado='RECHAZADA', fecha_rechazo=? WHERE id=? AND estado='ENVIADA'", (datetime.now().isoformat(timespec='seconds'), sid))
+                    tes_cambiar_estado(conn,sid,'RECHAZADA')
                     st.session_state['tes_preferir_listado']=True
                     st.rerun()
             elif fila['estado'] == 'APROBADA':
@@ -329,7 +457,7 @@ def pantalla_tesoreria(conn):
                 faltan=conn.execute("SELECT COUNT(*) FROM tes_solicitud_detalle WHERE solicitud_id=? AND compra_id IS NULL AND COALESCE(cuenta_contable, '') = ''", (sid,)).fetchone()[0]
                 if faltan:
                     st.warning(f'Hay {faltan} línea(s) sin cuenta contable. Guarda la clasificación antes de confirmar el pago.')
-                st.info('Al guardar la confirmación, SGCI intentará contabilizar automáticamente. La conciliación se realiza después.')
+                st.info('Al guardar la confirmación, CONTEM intentará contabilizar automáticamente. La conciliación se realiza después.')
                 with st.form(f'tes_pago_{sid}'):
                     medio = st.selectbox('Medio de pago', ['TRANSFERENCIA', 'CHEQUE'])
                     fecha_pago = st.date_input('Fecha de pago informada por Finanzas', value=date.today(), key=f'tes_fp_{sid}')
@@ -343,7 +471,7 @@ def pantalla_tesoreria(conn):
                     conformidad = st.checkbox('Confirmo que recibí evidencia del pago y que los datos son correctos.', key=f'tes_ok_{sid}')
                     registrar = st.form_submit_button('Confirmar transferencia y contabilizar', type='primary')
                 if registrar:
-                    sgci_exigir_permiso(conn, 'tesoreria', 'contabilizar', 'Confirmación de pagos')
+                    sgci_exigir_permiso(conn, 'tesoreria', 'confirmar', 'Confirmación de pagos')
                     datos = respaldo.getvalue() if respaldo is not None else b''
                     if faltan:
                         st.error('Asigna y guarda una cuenta contable a cada línea antes de contabilizar.')
@@ -355,20 +483,9 @@ def pantalla_tesoreria(conn):
                         st.error('El comprobante supera el máximo de 5 MB.')
                     else:
                         try:
-                            with conn:
-                                actual = conn.execute('SELECT estado FROM tes_solicitudes WHERE id=?', (sid,)).fetchone()
-                                if not actual or actual['estado'] != 'APROBADA':
-                                    raise ValueError('La solicitud ya no está aprobada.')
-                                conn.execute('''INSERT INTO tes_confirmaciones_pago
-                                    (solicitud_id,medio,fecha_pago,banco_descripcion,referencia,nombre_comprobante,comprobante,observaciones,fecha_registro,banco_id,cuenta_contrapartida)
-                                    VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-                                    (sid, medio, fecha_pago.isoformat(), banco_etiqueta, referencia_pago.strip(),
-                                     respaldo.name, sqlite3.Binary(datos), observaciones_pago.strip(),
-                                     datetime.now().isoformat(timespec='seconds'),opciones_banco[banco_etiqueta],cuenta_ap))
-                                conn.execute("UPDATE tes_solicitudes SET estado='PENDIENTE_CONTABILIZACION' WHERE id=? AND estado='APROBADA'", (sid,))
+                            tes_confirmar_pago(conn,sid,medio,fecha_pago.isoformat(),opciones_banco[banco_etiqueta],
+                                banco_etiqueta,referencia_pago,respaldo.name,datos,observaciones_pago)
                             try:
-                                if sin_dte_ap and not cuenta_ap:
-                                    raise ValueError('Debes seleccionar una cuenta de contrapartida antes de contabilizar.')
                                 asiento_auto=tes_contabilizar_pago(conn,sid,opciones_banco[banco_etiqueta],cuenta_ap)
                                 sgci_exito(f'Pago confirmado y contabilizado automáticamente · Asiento {asiento_auto}.')
                             except Exception as error_auto:
@@ -441,7 +558,7 @@ def pantalla_tesoreria(conn):
         else:
             st.dataframe(formatear_montos_df(historial),hide_index=True,use_container_width=True)
             st.download_button('Descargar historial CSV',historial.to_csv(index=False).encode('utf-8-sig'),
-                file_name='SGCI_historial_tesoreria.csv',mime='text/csv')
+                file_name='CONTEM_historial_tesoreria.csv',mime='text/csv')
 
 
 # ============================================================
