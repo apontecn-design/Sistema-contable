@@ -94,6 +94,13 @@ sgci_nav_permitidos = [etiqueta for etiqueta,codigo in sgci_nav_modulos if sgci_
 if not sgci_nav_permitidos:
     st.error('Tu usuario no tiene módulos habilitados. Solicita permisos al administrador.')
     st.stop()
+modulo_principal = st.sidebar.radio(
+    "Navegación",
+    sgci_nav_permitidos,
+    label_visibility="collapsed",
+    key="nav_modulo_principal"
+)
+
 # Barra superior real: búsqueda navegable, empresa activa y usuario autenticado.
 # No se permite cambiar de empresa sin aislamiento multiempresa validado.
 from html import escape as _contem_escape
@@ -118,13 +125,6 @@ with _bar_empresa:
 with _bar_usuario:
     st.text_input('Sesión activa', value=sgci_identidad_actual() or 'Administrador',
                   disabled=True)
-modulo_principal = st.sidebar.radio(
-    "Navegación",
-    sgci_nav_permitidos,
-    label_visibility="collapsed",
-    key="nav_modulo_principal"
-)
-
 nav_context = None
 if modulo_principal == "🏠 Inicio":
     menu = "🏠 Inicio"
