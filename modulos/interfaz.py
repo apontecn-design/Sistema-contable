@@ -1771,7 +1771,6 @@ elif menu == "🔒 Cierre Mensual":
     periodo=st.text_input("Período a revisar (AAAA-MM)",date.today().strftime("%Y-%m"))
     try:
         datetime.strptime(periodo,"%Y-%m")
-        asegurar_periodo(conn,periodo)
         df=periodos.copy()
         desde=periodo+"-01"; ultimo=(pd.Period(periodo).end_time).strftime("%Y-%m-%d")
         diario=pd.read_sql_query("SELECT COALESCE(SUM(debe),0) debe,COALESCE(SUM(haber),0) haber FROM libro_diario WHERE fecha BETWEEN ? AND ?",conn,params=[desde,ultimo]).iloc[0]
@@ -1791,6 +1790,7 @@ elif menu == "🔒 Cierre Mensual":
                 sgci_exigir_permiso(conn, 'administracion', 'aprobar', 'Cierre Mensual')
                 if alertas: st.error("No se recomienda cerrar mientras existan alertas.")
                 else:
+                    asegurar_periodo(conn,periodo)
                     conn.execute("UPDATE periodos_contables SET estado='CERRADO',fecha_cierre=? WHERE periodo=?",(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),periodo)); conn.commit(); registrar_auditoria(conn,"CIERRE CONTABLE",periodo); sgci_exito("Período cerrado."); st.rerun()
         else:
             sgci_exito("🔒 Período cerrado")
