@@ -50,7 +50,13 @@ if "config_cuentas" not in st.session_state:
 from modulos.tema_contem import aplicar_tema_contem
 aplicar_tema_contem()
 st.sidebar.markdown(
-    '<div class="contem-brand"><div class="contem-brand-icon">C</div>'
+    '<div class="contem-brand"><div class="contem-brand-icon">'
+    '<svg viewBox="0 0 48 48" width="43" height="43" aria-label="CONTEM">'
+    '<defs><linearGradient id="cg" x1="0" y1="0" x2="1" y2="1">'
+    '<stop stop-color="#c4f943"/><stop offset="1" stop-color="#23c57a"/></linearGradient></defs>'
+    '<path d="M36 11 A17 17 0 1 0 36 37" fill="none" stroke="url(#cg)" '
+    'stroke-width="10" stroke-linecap="round"/>'
+    '<circle cx="37" cy="11" r="5" fill="#b7f64b"/></svg></div>'
     '<div><div class="contem-brand-name">CONTEM</div>'
     '<div class="contem-brand-sub">Sistema Contable y Empresarial</div></div></div>',
     unsafe_allow_html=True
@@ -88,6 +94,30 @@ sgci_nav_permitidos = [etiqueta for etiqueta,codigo in sgci_nav_modulos if sgci_
 if not sgci_nav_permitidos:
     st.error('Tu usuario no tiene módulos habilitados. Solicita permisos al administrador.')
     st.stop()
+# Barra superior real: búsqueda navegable, empresa activa y usuario autenticado.
+# No se permite cambiar de empresa sin aislamiento multiempresa validado.
+from html import escape as _contem_escape
+_perfil_cabecera = sgci_perfil(conn)
+_empresa_cabecera = _contem_escape(str(_perfil_cabecera.get('razon_social') or 'Empresa sin configurar'))
+_usuario_cabecera = _contem_escape(str(sgci_identidad_actual() or 'Administrador'))
+st.markdown('<div class="contem-topbar-title">CONTEM <span> / Centro de operaciones</span></div>', unsafe_allow_html=True)
+_bar_busqueda, _bar_empresa, _bar_usuario = st.columns([2.1, 1.25, 1.15], vertical_alignment='bottom')
+with _bar_busqueda:
+    _destinos_busqueda = ['🔎 Ir a un módulo...'] + sgci_nav_permitidos
+    _buscar_modulo = st.selectbox('Buscar en CONTEM', _destinos_busqueda,
+                                  key='contem_buscar_modulo',
+                                  help='Selecciona un módulo autorizado para navegar.')
+with _bar_empresa:
+    st.text_input('Empresa activa', value=_perfil_cabecera.get('razon_social') or 'Sin configurar',
+                  disabled=True, help='Empresa vinculada a esta base de datos. No se habilita selección multiempresa sin aislamiento.')
+with _bar_usuario:
+    st.text_input('Sesión activa', value=sgci_identidad_actual() or 'Administrador',
+                  disabled=True)
+if _buscar_modulo != _destinos_busqueda[0]:
+    st.session_state['nav_modulo_principal'] = _buscar_modulo
+    st.session_state['contem_buscar_modulo'] = _destinos_busqueda[0]
+    st.rerun()
+
 modulo_principal = st.sidebar.radio(
     "Navegación",
     sgci_nav_permitidos,
