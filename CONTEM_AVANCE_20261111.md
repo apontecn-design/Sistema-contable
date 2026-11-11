@@ -18,8 +18,9 @@ Se conserva la interfaz aprobada, Python, Streamlit, SQLite, módulos y el puent
 
 ## Evidencia local
 
-- 255 pruebas automatizadas correctas, sin omisiones, usando una copia privada del respaldo proporcionado por el propietario.
+- 263 pruebas automatizadas correctas, sin omisiones, usando una copia privada del respaldo proporcionado por el propietario.
 - 147 casos nuevos de autorización bancaria: sin permiso, perfil, excepción individual, denegación individual, usuario inactivo, permiso histórico insuficiente y submódulo incorrecto. Los casos permitidos se detienen al conceder autorización; no certifican el flujo contable completo de las 21 operaciones.
+- Ocho pruebas del comparador de históricos: detecta modificaciones aunque el número de registros no cambie, borrados, pérdida de tablas/columnas y preservación de archivos.
 - Nuevas comprobaciones de filtrado SQL y selección efectiva de la ruta aislada.
 - Arranque real con Streamlit AppTest: login sin credenciales y navegación administrativa de prueba por los nueve módulos principales sin excepciones. La sesión administrativa se preparó en el entorno local; no fue un login real en Supabase.
 - Integridad SQLite correcta y sin infracciones de claves foráneas en el respaldo.
