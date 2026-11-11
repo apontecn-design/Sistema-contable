@@ -54,6 +54,32 @@ def aplicar_tema_contem():
     .contem-brand {
         display:flex; align-items:center; gap:11px; margin:4px 0 15px;
     }
+    .contem-topbar-title {
+        font-size:15px;font-weight:750;color:#115d42;
+        border-bottom:1px solid #dcebe2;padding:0 0 10px;margin:-8px 0 6px;
+    }
+    .contem-topbar-title span {color:#7b9187;font-weight:450;}
+    [data-testid="stSidebar"] [role="radiogroup"] label [data-testid="stWidgetLabel"] {display:none;}
+    [data-testid="stSidebar"] [role="radiogroup"] label input[type="radio"] {
+        position:absolute;opacity:0;width:1px;height:1px;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label [data-baseweb="radio"] > div:first-child {
+        display:none;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+        cursor:pointer;min-height:39px;display:flex;align-items:center;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:focus-within {
+        outline:2px solid #c4f943;outline-offset:1px;
+    }
+    .contem-brand-icon {background:transparent!important;width:50px!important;height:50px!important;}
+    .contem-hero {
+        background:radial-gradient(circle at 83% 14%,rgba(191,245,77,.33),transparent 26%),
+        linear-gradient(110deg,#075c40 0%,#0c8a5e 66%,#38b46b 100%)!important;
+    }
+    [data-testid="stSelectbox"] > div {border-radius:10px;}
+    [data-testid="stTextInput"] input:disabled {background:#eef7f0;color:#285744;opacity:1;}
+    [data-testid="stMainBlockContainer"] {max-width:1500px;}
     .contem-brand-icon {
         width:42px;height:42px;display:grid;place-items:center;
         border-radius:12px;background:#c5f0d4;color:#075338;
