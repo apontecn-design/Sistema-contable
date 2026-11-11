@@ -402,7 +402,7 @@ elif menu == "👥 Recursos Humanos":
         from sgci_rrhh_guardia_68b import mostrar_portal_con_sesion
         mostrar_portal_con_sesion(st, conn, st.session_state, sgci_identidad_actual(), rrhh_pdf_liquidacion)
         st.stop()
-    st.caption("Expedientes laborales, documentos, vacaciones y remuneraciones, con la contabilización original de SGCI.")
+    st.caption("Expedientes laborales, documentos, vacaciones y remuneraciones, con la contabilización histórica de CONTEM.")
     # Navegación persistente: evita que las actualizaciones de Streamlit devuelvan
     # al usuario a la primera pestaña al cambiar trabajadores u otros controles.
     nomina_opciones = ["Trabajadores", "Vacaciones", "Anticipos y préstamos", "Liquidación mensual",
@@ -823,7 +823,7 @@ elif menu == "👥 Recursos Humanos":
                     st.success('Vista previa cuadrada. Revisa las cuentas antes de confirmar.')
                 else:
                     st.error('Asiento descuadrado. No se permite contabilizar.')
-                st.info('Las cotizaciones de cargo del empleador no están incluidas en este asiento y requieren su registro separado. El anticipo de febrero de Maricruz no se incluye en enero.')
+                st.info('Las cotizaciones de cargo del empleador no están incluidas en este asiento y requieren su registro separado. Los anticipos deben imputarse exclusivamente al período que corresponda.')
                 confirma=st.checkbox('Revisé las cuentas y los montos de la vista previa.',key=f'confirmar_nomina_{per}')
                 if st.button('🧾 Contabilizar nómina',type='primary',disabled=(not confirma or total_debe!=total_haber)):
                     sgci_exigir_permiso(conn, 'nomina', 'contabilizar', 'Contabilización')
