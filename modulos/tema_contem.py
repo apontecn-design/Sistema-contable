@@ -9,6 +9,19 @@ def aplicar_tema_contem():
     .stApp { background:#f5f8f6; }
     [data-testid="stSidebar"] { background:linear-gradient(180deg,#064c37 0%,#0c6247 100%); }
     [data-testid="stSidebar"] * { color:#f1fff6; }
+    [data-testid="stSidebar"] [role="radiogroup"] > label { color:#cce7d8; }
+    [data-testid="stSidebar"] [role="radiogroup"] label div[data-testid="stMarkdownContainer"] p {
+        font-size:14px; font-weight:550;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
+        background:linear-gradient(90deg,#14986b,#27b581);
+        box-shadow:0 3px 10px rgba(0,0,0,.13);
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) p {color:white;}
+    [data-testid="stMainBlockContainer"] { padding-top:2.1rem; }
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {font-weight:760;}
+    [data-testid="stMetric"] { min-height:112px; }
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] {padding-top:1.3rem;}
     [data-testid="stSidebar"] [role="radiogroup"] label {
         border-radius:10px; padding:8px 10px; margin:2px 0;
     }
