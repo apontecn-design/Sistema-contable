@@ -30,6 +30,18 @@ class TestConservacionPlanOriginal(unittest.TestCase):
             self.assertIsNotNone(db.execute(
                 "SELECT 1 FROM plan_cuentas WHERE codigo='4.1.01'"
             ).fetchone())
+            # Las cuentas exigidas por Nómina deben existir y conservar su jerarquía.
+            for codigo in ("2.1.02.01", "2.1.02.02", "2.1.02.03",
+                           "2.1.02.04", "2.1.02.05"):
+                cuenta = db.execute(
+                    "SELECT padre_codigo, categoria FROM plan_cuentas WHERE codigo=?",
+                    (codigo,)
+                ).fetchone()
+                self.assertEqual(cuenta, ("2.1.02", "Pasivo"))
+            # Una segunda instalación tampoco altera datos ni denominaciones.
+            instalar_plan_base(db)
+            self.assertEqual(db.execute("SELECT * FROM libro_diario").fetchall(), antes)
+
 
 
 if __name__ == "__main__":
