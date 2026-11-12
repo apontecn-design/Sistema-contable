@@ -1169,6 +1169,9 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
 def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_id, periodo, observacion=""):
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
     """Vincula un cargo real de cartola con un anticipo de nómina y lo contabiliza una sola vez."""
+    ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
+    if ids is not None and int(trabajador_id) not in ids:
+        raise PermissionError('El trabajador está fuera de tu alcance de Recursos Humanos.')
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov:
         raise ValueError("Movimiento bancario no encontrado.")
@@ -1225,12 +1228,20 @@ def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_i
 def revertir_anticipo_nomina_cartola(conn, movimiento_id):
     # Revierte exclusivamente anticipos creados desde cartola.
     sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+    ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
+    if ids is not None and not ids:
+        raise PermissionError('No tienes trabajadores autorizados para esta operación.')
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
     if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo']!='NOMINA_ANTICIPO':
         raise ValueError('El movimiento no es un anticipo de nómina conciliado.')
     if not mov['asiento_id'] or not mov['match_id']:
         raise ValueError('Falta la vinculación contable del anticipo.')
-    ant = conn.execute('SELECT * FROM nomina_anticipos WHERE id=?', (mov['match_id'],)).fetchone()
+    parametros = [mov['match_id']]
+    filtro = ''
+    if ids is not None:
+        filtro = ' AND trabajador_id IN (' + ','.join('?' for _ in ids) + ')'
+        parametros.extend(sorted(ids))
+    ant = conn.execute('SELECT * FROM nomina_anticipos WHERE id=?' + filtro, parametros).fetchone()
     if not ant or int(ant['anulado'] or 0)!=0 or int(ant['contabilizado'] or 0)!=1:
         raise ValueError('El anticipo no existe, ya fue anulado o no está contabilizado.')
     if int(ant['asiento_id'] or 0)!=int(mov['asiento_id']):
@@ -1280,7 +1291,7 @@ def revertir_anticipo_nomina_cartola(conn, movimiento_id):
         if actualizado.rowcount!=1:
             raise ValueError('La conciliación cambió durante la operación.')
         conn.execute('''INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)''',
-            (datetime.now().isoformat(timespec='seconds'),st.session_state.get('sgci_sb_email') or 'SGCI',
+            (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),
              'REVERSO ANTICIPO NOMINA',
              f"Cartola {movimiento_id}; anticipo {ant['id']}; asiento original {mov['asiento_id']}; reverso {nuevo}; monto {monto}"))
         conn.commit()
