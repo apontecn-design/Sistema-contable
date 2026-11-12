@@ -797,8 +797,12 @@ elif menu == "👥 Recursos Humanos":
             if st.button('💾 Guardar / recalcular liquidación',type='primary'):
                 sgci_exigir_permiso(conn, 'nomina', 'editar', 'Liquidación mensual')
                 vals=(periodo,tr.id,dias,sueldo_base,sueldo_periodo,grat,horas,bonos,otros_imp,bono_noimp,noimp,otros_noimp,total_imp,total_noimp,clp_round(total_imp+total_noimp),afp_vig,comision,calc['afp'],salud_tipo_vig,mod,sval,calc['salud'],afc,impuesto,pre_desc,otros_desc,calc['total_desc'],calc['liquido'],ant,calc['saldo'],uf_valor,calc['salud_plan_pesos'],'CALCULADO',obs)
-                conn.execute("""INSERT INTO nomina_liquidaciones(periodo,trabajador_id,dias_trabajados,sueldo_base,sueldo_periodo,gratificacion,horas_extras,bonos_imponibles,otros_imponibles,bono_no_imponible,asignacion_no_imponible,otros_no_imponibles,total_imponible,total_no_imponible,total_haberes,afp_nombre,afp_comision,afp_descuento,salud_tipo,salud_modalidad,salud_valor,salud_descuento,afc_descuento,impuesto_unico,prestamo_descuento,otros_descuentos,total_descuentos,liquido_periodo,anticipo,saldo_pagar,uf_valor,salud_plan_pesos,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(periodo,trabajador_id) DO UPDATE SET dias_trabajados=excluded.dias_trabajados,sueldo_base=excluded.sueldo_base,sueldo_periodo=excluded.sueldo_periodo,gratificacion=excluded.gratificacion,horas_extras=excluded.horas_extras,bonos_imponibles=excluded.bonos_imponibles,otros_imponibles=excluded.otros_imponibles,bono_no_imponible=excluded.bono_no_imponible,asignacion_no_imponible=excluded.asignacion_no_imponible,otros_no_imponibles=excluded.otros_no_imponibles,total_imponible=excluded.total_imponible,total_no_imponible=excluded.total_no_imponible,total_haberes=excluded.total_haberes,afp_nombre=excluded.afp_nombre,afp_comision=excluded.afp_comision,afp_descuento=excluded.afp_descuento,salud_tipo=excluded.salud_tipo,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,salud_descuento=excluded.salud_descuento,afc_descuento=excluded.afc_descuento,impuesto_unico=excluded.impuesto_unico,prestamo_descuento=excluded.prestamo_descuento,otros_descuentos=excluded.otros_descuentos,total_descuentos=excluded.total_descuentos,liquido_periodo=excluded.liquido_periodo,anticipo=excluded.anticipo,saldo_pagar=excluded.saldo_pagar,uf_valor=excluded.uf_valor,salud_plan_pesos=excluded.salud_plan_pesos,estado=CASE WHEN nomina_liquidaciones.estado='CONTABILIZADO' THEN nomina_liquidaciones.estado ELSE 'CALCULADO' END,observacion=excluded.observacion""",vals)
-                conn.execute("INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)",(periodo,)); conn.commit(); sgci_exito('Liquidación guardada.'); st.rerun()
+                try:
+                    nomina_guardar_liquidacion(conn, vals)
+                except (ValueError, PermissionError, RuntimeError, sqlite3.Error) as exc:
+                    st.error(str(exc))
+                else:
+                    sgci_exito('Liquidación guardada.'); st.rerun()
 
     if nomina_seccion == 'Resumen y reportes':
         # Etapa 6.4: este reporte agrega datos de TODOS los trabajadores.
@@ -3752,6 +3756,10 @@ elif menu == "📋 Plan de Cuentas":
                 nombre_editar = st.text_input("Nombre", value=str(fila_editar["nombre"] or ""))
                 categoria_actual = str(fila_editar["categoria"] or "Activo")
                 tipo_actual = str(fila_editar["tipo"] or "Activo")
+                if categoria_actual not in categorias:
+                    categorias.append(categoria_actual)
+                if tipo_actual not in tipos:
+                    tipos.append(tipo_actual)
                 categoria_editar = st.selectbox(
                     "Categoría",
                     categorias,

@@ -106,7 +106,7 @@ def sgci_guardar_cuenta(conn, codigo, nombre, categoria, tipo, padre_codigo, niv
     padre_codigo = str(padre_codigo or '').strip() or None
     if not codigo or not nombre:
         raise ValueError('Debe indicar código y nombre de cuenta.')
-    if categoria not in ('Activo','Pasivo','Patrimonio','Nominal') or tipo not in ('Activo','Pasivo','Patrimonio','Ingresos','Gastos'):
+    if categoria not in ('Activo','Pasivo','Patrimonio','Nominal','Ingresos','Gastos') or tipo not in ('Activo','Pasivo','Patrimonio','Ingresos','Gastos'):
         raise ValueError('Categoría o tipo de cuenta inválido.')
     if isinstance(nivel,bool) or str(nivel) not in tuple(str(n) for n in range(1,11)):
         raise ValueError('El nivel debe ser un entero entre 1 y 10.')

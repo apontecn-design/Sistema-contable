@@ -1346,6 +1346,53 @@ def nomina_vista_previa(conn, periodo):
     return fecha,filas,debe,haber
 
 
+
+NOMINA_CAMPOS_LIQUIDACION = ('periodo', 'trabajador_id', 'dias_trabajados', 'sueldo_base', 'sueldo_periodo', 'gratificacion', 'horas_extras', 'bonos_imponibles', 'otros_imponibles', 'bono_no_imponible', 'asignacion_no_imponible', 'otros_no_imponibles', 'total_imponible', 'total_no_imponible', 'total_haberes', 'afp_nombre', 'afp_comision', 'afp_descuento', 'salud_tipo', 'salud_modalidad', 'salud_valor', 'salud_descuento', 'afc_descuento', 'impuesto_unico', 'prestamo_descuento', 'otros_descuentos', 'total_descuentos', 'liquido_periodo', 'anticipo', 'saldo_pagar', 'uf_valor', 'salud_plan_pesos', 'estado', 'observacion')
+
+def nomina_guardar_liquidacion(conn, valores):
+    sgci_autorizar_operacion(conn, 'nomina', 'editar', 'Liquidación mensual')
+    if len(valores) != len(NOMINA_CAMPOS_LIQUIDACION):
+        raise ValueError('Datos de liquidación incompletos.')
+    datos = dict(zip(NOMINA_CAMPOS_LIQUIDACION, valores))
+    periodo = str(datos['periodo'])
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])',periodo):
+        raise ValueError('El período debe tener formato AAAA-MM.')
+    if datos['estado'] != 'CALCULADO':
+        raise ValueError('El guardado solo admite liquidaciones calculadas.')
+    no_numericos = {'periodo','afp_nombre','salud_tipo','salud_modalidad','estado','observacion'}
+    for campo,valor in datos.items():
+        if campo not in no_numericos:
+            try:
+                if not Decimal(str(valor)).is_finite():
+                    raise ValueError('Los importes de la liquidación deben ser finitos.')
+            except (ArithmeticError,TypeError):
+                raise ValueError('Valor numérico inválido en la liquidación.') from None
+    trabajador = int(datos['trabajador_id'])
+    if trabajador <= 0 or Decimal(str(datos['trabajador_id'])) != trabajador:
+        raise ValueError('Trabajador inválido.')
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'nomina', 'editar', 'Liquidación mensual')
+        ids = sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual())
+        if ids is not None and trabajador not in ids:
+            raise PermissionError('El trabajador está fuera de tu alcance de Recursos Humanos.')
+        if not conn.execute('SELECT 1 FROM nomina_trabajadores WHERE id=?',(trabajador,)).fetchone():
+            raise ValueError('Trabajador no encontrado.')
+        previo = conn.execute('SELECT estado,asiento_id FROM nomina_periodos WHERE periodo=?',(periodo,)).fetchone()
+        if previo and (previo['estado'] in ('CONTABILIZADO','CERRADO') or previo['asiento_id'] is not None):
+            raise ValueError('La nómina del período ya está contabilizada o cerrada.')
+        liquidacion = conn.execute('SELECT estado FROM nomina_liquidaciones WHERE periodo=? AND trabajador_id=?',(periodo,trabajador)).fetchone()
+        if liquidacion and liquidacion['estado'] in ('CONTABILIZADO','CERRADO'):
+            raise ValueError('La liquidación ya está contabilizada o cerrada.')
+        if periodo_cerrado(conn,periodo+'-01'):
+            raise ValueError('El período contable está cerrado.')
+        conn.execute("INSERT INTO nomina_liquidaciones(periodo,trabajador_id,dias_trabajados,sueldo_base,sueldo_periodo,gratificacion,horas_extras,bonos_imponibles,otros_imponibles,bono_no_imponible,asignacion_no_imponible,otros_no_imponibles,total_imponible,total_no_imponible,total_haberes,afp_nombre,afp_comision,afp_descuento,salud_tipo,salud_modalidad,salud_valor,salud_descuento,afc_descuento,impuesto_unico,prestamo_descuento,otros_descuentos,total_descuentos,liquido_periodo,anticipo,saldo_pagar,uf_valor,salud_plan_pesos,estado,observacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(periodo,trabajador_id) DO UPDATE SET dias_trabajados=excluded.dias_trabajados,sueldo_base=excluded.sueldo_base,sueldo_periodo=excluded.sueldo_periodo,gratificacion=excluded.gratificacion,horas_extras=excluded.horas_extras,bonos_imponibles=excluded.bonos_imponibles,otros_imponibles=excluded.otros_imponibles,bono_no_imponible=excluded.bono_no_imponible,asignacion_no_imponible=excluded.asignacion_no_imponible,otros_no_imponibles=excluded.otros_no_imponibles,total_imponible=excluded.total_imponible,total_no_imponible=excluded.total_no_imponible,total_haberes=excluded.total_haberes,afp_nombre=excluded.afp_nombre,afp_comision=excluded.afp_comision,afp_descuento=excluded.afp_descuento,salud_tipo=excluded.salud_tipo,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,salud_descuento=excluded.salud_descuento,afc_descuento=excluded.afc_descuento,impuesto_unico=excluded.impuesto_unico,prestamo_descuento=excluded.prestamo_descuento,otros_descuentos=excluded.otros_descuentos,total_descuentos=excluded.total_descuentos,liquido_periodo=excluded.liquido_periodo,anticipo=excluded.anticipo,saldo_pagar=excluded.saldo_pagar,uf_valor=excluded.uf_valor,salud_plan_pesos=excluded.salud_plan_pesos,estado=CASE WHEN nomina_liquidaciones.estado='CONTABILIZADO' THEN nomina_liquidaciones.estado ELSE 'CALCULADO' END,observacion=excluded.observacion",tuple(valores))
+        conn.execute('INSERT OR IGNORE INTO nomina_periodos(periodo) VALUES(?)',(periodo,))
+        _sgci_auditar_auxiliar(conn,'GUARDAR LIQUIDACION',f'{periodo}; trabajador:{trabajador}')
+    return periodo,trabajador
+
+
 def nomina_contabilizar_periodo(conn, periodo):
     """Contabilización atómica: evita duplicados y períodos parcialmente contabilizados."""
     sgci_autorizar_operacion(conn, 'nomina', 'contabilizar', 'Contabilización')

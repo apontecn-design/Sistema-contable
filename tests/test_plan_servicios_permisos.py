@@ -24,6 +24,11 @@ class TestPlanAutorizado(unittest.TestCase):
         self.assertEqual(self.db.execute('SELECT count(*) FROM auditoria').fetchone()[0],2)
         self.assertEqual(self.db.execute('SELECT count(*) FROM libro_diario').fetchone()[0],0)
 
+    def test_categoria_historica_de_gastos_se_conserva_al_editar_nombre(self):
+        self.guardar(codigo='5.2.99',categoria='Gastos',tipo='Gastos',padre_codigo='5.2',nivel=3)
+        self.guardar(False,codigo='5.2.99',nombre='Nombre corregido',categoria='Gastos',tipo='Gastos',padre_codigo='5.2',nivel=3)
+        self.assertEqual(tuple(self.db.execute("SELECT categoria,tipo FROM plan_cuentas WHERE codigo='5.2.99'").fetchone()),('Gastos','Gastos'))
+
     def test_denegacion_crear_precede_validacion_y_consultas_plan(self):
         self.negar('crear')
         consultas=[];self.db.set_trace_callback(consultas.append)
