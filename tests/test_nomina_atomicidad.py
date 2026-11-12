@@ -30,6 +30,8 @@ def funcion_entorno(fallar=False):
         "nomina_vista_previa": vista,
         "siguiente_asiento": lambda conn: 0,
         "nomina_asiento_linea": linea,
+        "_sgci_auditar_auxiliar": lambda conn,accion,detalle: conn.execute(
+            'INSERT INTO auditoria(accion,detalle) VALUES(?,?)',(accion,detalle)),
     }
     exec(compile(ast.Module(body=[FUNCTION], type_ignores=[]), str(SOURCE), "exec"),
          contexto)
@@ -46,6 +48,7 @@ def db():
             estado TEXT);
         CREATE TABLE libro_diario (asiento_id INTEGER, codigo_cuenta TEXT,
             debe INTEGER, haber INTEGER, fecha TEXT);
+        CREATE TABLE auditoria (accion TEXT,detalle TEXT);
         INSERT INTO nomina_liquidaciones VALUES (1,'2026-11','PENDIENTE');
     """)
     return conn
@@ -57,6 +60,7 @@ class TestNominaAtomica(unittest.TestCase):
             f = funcion_entorno()
             self.assertEqual(f(conn, "2026-11"), 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM libro_diario").fetchone()[0], 2)
+            self.assertEqual(conn.execute('SELECT count(*) FROM auditoria').fetchone()[0],1)
             with self.assertRaises(ValueError):
                 f(conn, "2026-11")
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM libro_diario").fetchone()[0], 2)
@@ -68,6 +72,14 @@ class TestNominaAtomica(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM libro_diario").fetchone()[0], 0)
             self.assertEqual(conn.execute(
                 "SELECT estado FROM nomina_liquidaciones WHERE id=1").fetchone()[0], "PENDIENTE")
+
+    def test_fallo_auditoria_revierte_asiento_y_estados(self):
+        with db() as conn:
+            conn.execute("CREATE TRIGGER fallo_auditoria BEFORE INSERT ON auditoria BEGIN SELECT RAISE(ABORT,'Fallo de prueba'); END")
+            conn.commit()
+            antes=list(conn.iterdump())
+            with self.assertRaises(sqlite3.IntegrityError):funcion_entorno()(conn,'2026-11')
+            self.assertEqual(list(conn.iterdump()),antes)
 
 
 if __name__ == "__main__":

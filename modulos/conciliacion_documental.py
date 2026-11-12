@@ -1348,6 +1348,67 @@ def rrhh_exportar_ficha(conn, trabajador_id):
         [[r.vigente_desde,money(r.sueldo_base),r.afp,r.salud_tipo,r.isapre or '',r.salud_modalidad,r.salud_valor] for r in hist.itertuples()])
 
 
+def _rrhh_exigir_global(conn, submodulo, accion='ver'):
+    if submodulo not in ('Resumen y reportes','Contabilización') or accion not in ('ver','exportar'):
+        raise ValueError('Consulta global de nómina inválida.')
+    sgci_autorizar_operacion(conn,'nomina','ver',submodulo)
+    if accion=='exportar':sgci_autorizar_operacion(conn,'nomina','exportar',submodulo)
+    if sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual()) is not None:
+        raise PermissionError('El reporte global requiere autorización expresa para todos los trabajadores.')
+
+
+def rrhh_periodos_nomina(conn, submodulo='Resumen y reportes'):
+    _rrhh_exigir_global(conn,submodulo)
+    if submodulo=='Contabilización':
+        return pd.read_sql_query('SELECT periodo,estado,fecha_cierre,asiento_id FROM nomina_periodos ORDER BY periodo DESC',conn)
+    return pd.read_sql_query('SELECT DISTINCT periodo FROM nomina_liquidaciones ORDER BY periodo DESC',conn)
+
+
+def rrhh_pendientes_nomina(conn):
+    _rrhh_exigir_global(conn,'Contabilización')
+    return pd.read_sql_query("SELECT DISTINCT periodo FROM nomina_liquidaciones WHERE estado<>'CONTABILIZADO' ORDER BY periodo DESC",conn)
+
+
+def rrhh_resumen_nomina(conn, periodo, accion='ver'):
+    _rrhh_exigir_global(conn,'Resumen y reportes',accion)
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])',str(periodo)):
+        raise ValueError('Período inválido.')
+    return pd.read_sql_query('SELECT l.*,t.rut,t.nombre,t.cargo FROM nomina_liquidaciones l JOIN nomina_trabajadores t ON t.id=l.trabajador_id WHERE l.periodo=? ORDER BY t.nombre',conn,params=(periodo,))
+
+
+def rrhh_totales_nomina(conn, periodo):
+    _rrhh_exigir_global(conn,'Contabilización')
+    return pd.read_sql_query('SELECT COUNT(*) n,COALESCE(SUM(total_haberes),0) haberes,COALESCE(SUM(total_descuentos),0) descuentos,COALESCE(SUM(anticipo),0) anticipos,COALESCE(SUM(saldo_pagar),0) saldo FROM nomina_liquidaciones WHERE periodo=?',conn,params=(periodo,))
+
+
+def rrhh_historial_nomina(conn, trabajador_id, accion='ver'):
+    if accion not in ('ver','exportar'):raise ValueError('Acción de consulta inválida.')
+    _rrhh_autorizar_trabajador(conn,trabajador_id,'ver','Resumen y reportes')
+    if accion=='exportar':_rrhh_autorizar_trabajador(conn,trabajador_id,'exportar','Resumen y reportes')
+    return pd.read_sql_query('SELECT periodo,total_haberes,total_descuentos,liquido_periodo,anticipo,saldo_pagar,estado FROM nomina_liquidaciones WHERE trabajador_id=? ORDER BY periodo DESC',conn,params=(int(trabajador_id),))
+
+
+RRHH_COLUMNAS_RESUMEN=('rut','nombre','sueldo_periodo','gratificacion','bono_no_imponible','asignacion_no_imponible','otros_no_imponibles','total_imponible','total_no_imponible','afp_descuento','salud_descuento','afc_descuento','impuesto_unico','prestamo_descuento','anticipo','saldo_pagar')
+
+
+def rrhh_exportar_resumen_nomina(conn, periodo, formato='pdf'):
+    if formato not in ('pdf','csv'):raise ValueError('Formato de exportación inválido.')
+    vista=rrhh_resumen_nomina(conn,periodo,accion='exportar')[list(RRHH_COLUMNAS_RESUMEN)]
+    if formato=='csv':return vista.to_csv(index=False,sep=';').encode('utf-8-sig')
+    headers=['RUT','Trabajador','Sueldo','Gratif.','Bono no impon.','Otras asig. no impon.','Otros no impon.','Imponible','No impon.','AFP','Salud','AFC','Impuesto','Préstamo','Anticipo','Saldo final']
+    filas=[[r[0],r[1]]+[money(x) for x in r[2:]] for r in vista.itertuples(index=False)]
+    tot=['','TOTALES']+[money(vista[c].sum()) for c in RRHH_COLUMNAS_RESUMEN[2:]]
+    return nomina_pdf(f'Resumen de Nómina - {periodo}','CONTEM - Sistema Contable y Empresarial',headers,filas,tot)
+
+
+def rrhh_exportar_historial_nomina(conn, trabajador_id):
+    hist=rrhh_historial_nomina(conn,trabajador_id,accion='exportar')
+    trabajador=conn.execute('SELECT nombre,rut FROM nomina_trabajadores WHERE id=?',(int(trabajador_id),)).fetchone()
+    return nomina_pdf('Historial de Remuneraciones',f"{trabajador['nombre']} · RUT {trabajador['rut']}",
+        ['Período','Haberes','Descuentos','Líquido','Anticipo','Saldo final','Estado'],
+        [[r.periodo,money(r.total_haberes),money(r.total_descuentos),money(r.liquido_periodo),money(r.anticipo),money(r.saldo_pagar),r.estado] for r in hist.itertuples()])
+
+
 def _nomina_autorizar_alta_movimiento(conn, trabajador_id):
     sgci_autorizar_operacion(conn, 'nomina', 'crear', 'Anticipos y préstamos')
     trabajador_id = _sgci_monto_auxiliar(trabajador_id)
@@ -1671,6 +1732,7 @@ def nomina_calcular(total_imponible, total_no_imponible, afp_comision, salud_tip
 
 def nomina_vista_previa(conn, periodo):
     """Construye exactamente las partidas que usará la contabilización, sin escribir en BD."""
+    _rrhh_exigir_global(conn,'Contabilización')
     liq=pd.read_sql_query("SELECT * FROM nomina_liquidaciones WHERE periodo=?",conn,params=(periodo,))
     if liq.empty: raise ValueError('No existen liquidaciones para el período.')
     if (liq['estado']=='CONTABILIZADO').any():
@@ -1757,6 +1819,9 @@ def nomina_contabilizar_periodo(conn, periodo):
     try:
         # Bloquea otros escritores hasta registrar asiento y estados en una sola transacción.
         conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'nomina', 'contabilizar', 'Contabilización')
+        if sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual()) is not None:
+            raise PermissionError('La contabilización general requiere autorización para todos los trabajadores.')
         previo = conn.execute(
             "SELECT estado, asiento_id FROM nomina_periodos WHERE periodo=?", (periodo,)
         ).fetchone()
@@ -1780,6 +1845,7 @@ def nomina_contabilizar_periodo(conn, periodo):
             "UPDATE nomina_periodos SET estado='CONTABILIZADO',fecha_cierre=?,asiento_id=? "
             "WHERE periodo=?", (fecha, asiento, periodo)
         )
+        _sgci_auditar_auxiliar(conn,'CONTABILIZAR NÓMINA',f'{periodo} asiento {asiento}')
         conn.commit()
         return asiento
     except Exception:

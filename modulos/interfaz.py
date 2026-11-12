@@ -456,6 +456,7 @@ elif menu == "👥 Recursos Humanos":
                       "Resumen y reportes", "Parámetros", "Contabilización"]
     nomina_seccion = st.selectbox("Sección de Recursos Humanos", nomina_opciones,
                                   key="sgci_nomina_seccion")
+    sgci_exigir_permiso(conn,'nomina','ver',nomina_seccion)
 
     if nomina_seccion == 'Trabajadores':
         st.subheader("Ficha del trabajador")
@@ -802,29 +803,28 @@ elif menu == "👥 Recursos Humanos":
             st.error('Acceso restringido: los reportes globales de Nómina son exclusivos del administrador.')
             st.stop()
         st.subheader('Resumen de nómina y reportes')
-        periodos=pd.read_sql_query("SELECT DISTINCT periodo FROM nomina_liquidaciones ORDER BY periodo DESC",conn)['periodo'].tolist()
+        periodos=rrhh_periodos_nomina(conn)['periodo'].tolist()
         if not periodos: st.info('Aún no existen liquidaciones.')
         else:
             per=st.selectbox('Período',periodos,key='rep_per')
-            df=pd.read_sql_query("""SELECT l.*,t.rut,t.nombre,t.cargo FROM nomina_liquidaciones l JOIN nomina_trabajadores t ON t.id=l.trabajador_id WHERE l.periodo=? ORDER BY t.nombre""",conn,params=(per,))
+            df=rrhh_resumen_nomina(conn,per)
             cols=['rut','nombre','sueldo_periodo','gratificacion','bono_no_imponible','asignacion_no_imponible','otros_no_imponibles','total_imponible','total_no_imponible','afp_descuento','salud_descuento','afc_descuento','impuesto_unico','prestamo_descuento','anticipo','saldo_pagar']
             vista=df[cols].copy(); st.dataframe(formatear_montos_df(vista),use_container_width=True,hide_index=True)
-            st.download_button('📥 Exportar resumen CSV',vista.to_csv(index=False,sep=';').encode('utf-8-sig'),f'nomina_{per}.csv','text/csv')
-            headers=['RUT','Trabajador','Sueldo','Gratif.','Bono no impon.','Otras asig. no impon.','Otros no impon.','Imponible','No impon.','AFP','Salud','AFC','Impuesto','Préstamo','Anticipo','Saldo final']
-            filas=[]
-            for r in vista.itertuples(index=False): filas.append([r[0],r[1]]+[money(x) for x in r[2:]])
-            tot=['','TOTALES']+[money(vista[c].sum()) for c in cols[2:]]
-            pdf=nomina_pdf(f'Resumen de Nómina - {per}','CONTEM - Sistema Contable y Empresarial',headers,filas,tot)
-            st.download_button('🖨️ PDF resumen de nómina',pdf,f'resumen_nomina_{per}.pdf','application/pdf')
+            if sgci_puede_submodulo(conn,'nomina','Resumen y reportes','exportar'):
+                st.download_button('📥 Exportar resumen CSV',rrhh_exportar_resumen_nomina(conn,per,'csv'),f'nomina_{per}.csv','text/csv')
+                pdf=rrhh_exportar_resumen_nomina(conn,per)
+                st.download_button('🖨️ PDF resumen de nómina',pdf,f'resumen_nomina_{per}.pdf','application/pdf')
             st.markdown('#### Liquidación individual imprimible')
             lm={f"{r.rut} - {r.nombre}":r for r in df.itertuples()}; ls=st.selectbox('Trabajador para reporte',list(lm),key='rep_trab'); rr=lm[ls]
             detalle=[['Sueldo período',money(rr.sueldo_periodo)],['Gratificación',money(rr.gratificacion)],['Horas extras',money(rr.horas_extras)],['Bonos imponibles',money(rr.bonos_imponibles)],['Bono no imponible',money(getattr(rr,'bono_no_imponible',0))],['Otras asignaciones no imponibles',money(rr.asignacion_no_imponible)],['Otros no imponibles',money(rr.otros_no_imponibles)],['Total imponible',money(rr.total_imponible)],['Total no imponible',money(rr.total_no_imponible)],['AFP',money(rr.afp_descuento)],['Salud 7% legal',money(clp_round(rr.total_imponible*0.07))],['Adicional Isapre',money(max(0,clp_round(rr.salud_descuento)-clp_round(rr.total_imponible*0.07)) if rr.salud_tipo=='Isapre' else 0)],['Total Salud',money(rr.salud_descuento)],['Plan salud equivalente',money(getattr(rr,'salud_plan_pesos',0))],['UF utilizada',f"{float(getattr(rr,'uf_valor',0) or 0):,.2f}"],['AFC',money(rr.afc_descuento)],['Impuesto Único',money(rr.impuesto_unico)],['Préstamo',money(rr.prestamo_descuento)],['Otros descuentos',money(rr.otros_descuentos)],['Líquido período',money(rr.liquido_periodo)],['Anticipo quincenal',money(rr.anticipo)],['SALDO A PAGAR',money(rr.saldo_pagar)]]
-            pdfi=rrhh_pdf_liquidacion(conn,rr)
-            st.download_button('🖨️ PDF liquidación individual',pdfi,f'liquidacion_{rr.rut}_{per}.pdf','application/pdf')
+            if sgci_puede_submodulo(conn,'nomina','Liquidación mensual','exportar'):
+                pdfi=rrhh_pdf_liquidacion(conn,rr)
+                st.download_button('🖨️ PDF liquidación individual',pdfi,f'liquidacion_{rr.rut}_{per}.pdf','application/pdf')
             st.markdown('#### Historial del trabajador')
-            hist=pd.read_sql_query("SELECT periodo,total_haberes,total_descuentos,liquido_periodo,anticipo,saldo_pagar,estado FROM nomina_liquidaciones WHERE trabajador_id=? ORDER BY periodo DESC",conn,params=(rr.trabajador_id,)); st.dataframe(formatear_montos_df(hist),use_container_width=True,hide_index=True)
-            pdfh=nomina_pdf('Historial de Remuneraciones',f'{rr.nombre} · RUT {rr.rut}',['Período','Haberes','Descuentos','Líquido','Anticipo','Saldo final','Estado'],[[x.periodo,money(x.total_haberes),money(x.total_descuentos),money(x.liquido_periodo),money(x.anticipo),money(x.saldo_pagar),x.estado] for x in hist.itertuples()])
-            st.download_button('🖨️ PDF historial trabajador',pdfh,f'historial_nomina_{rr.rut}.pdf','application/pdf')
+            hist=rrhh_historial_nomina(conn,rr.trabajador_id); st.dataframe(formatear_montos_df(hist),use_container_width=True,hide_index=True)
+            if sgci_puede_submodulo(conn,'nomina','Resumen y reportes','exportar'):
+                pdfh=rrhh_exportar_historial_nomina(conn,rr.trabajador_id)
+                st.download_button('🖨️ PDF historial trabajador',pdfh,f'historial_nomina_{rr.rut}.pdf','application/pdf')
 
     if nomina_seccion == 'Parámetros':
         st.subheader('Parámetros previsionales')
@@ -855,12 +855,12 @@ elif menu == "👥 Recursos Humanos":
 
     if nomina_seccion == 'Contabilización':
         st.subheader('Contabilización de nómina')
-        periodos=pd.read_sql_query("SELECT periodo,estado,fecha_cierre,asiento_id FROM nomina_periodos ORDER BY periodo DESC",conn)
+        periodos=rrhh_periodos_nomina(conn,'Contabilización')
         st.dataframe(periodos,use_container_width=True,hide_index=True)
-        candidatos=pd.read_sql_query("SELECT DISTINCT periodo FROM nomina_liquidaciones WHERE estado<>'CONTABILIZADO' ORDER BY periodo DESC",conn)['periodo'].tolist()
+        candidatos=rrhh_pendientes_nomina(conn)['periodo'].tolist()
         if candidatos:
             per=st.selectbox('Período a contabilizar',candidatos,key='cont_nom_per')
-            df=pd.read_sql_query("SELECT COUNT(*) n,COALESCE(SUM(total_haberes),0) haberes,COALESCE(SUM(total_descuentos),0) descuentos,COALESCE(SUM(anticipo),0) anticipos,COALESCE(SUM(saldo_pagar),0) saldo FROM nomina_liquidaciones WHERE periodo=?",conn,params=(per,)).iloc[0]
+            df=rrhh_totales_nomina(conn,per).iloc[0]
             a,b,c,d=st.columns(4); a.metric('Trabajadores',int(df.n)); b.metric('Haberes',money(df.haberes)); c.metric('Anticipos',money(df.anticipos)); d.metric('Saldo fin de mes',money(df.saldo))
             st.warning('Al contabilizar, el período queda marcado como CONTABILIZADO. Revisa primero el resumen y las liquidaciones.')
             try:
@@ -880,7 +880,6 @@ elif menu == "👥 Recursos Humanos":
                     sgci_exigir_permiso(conn, 'nomina', 'contabilizar', 'Contabilización')
                     try:
                         asi=nomina_contabilizar_periodo(conn,per)
-                        registrar_auditoria(conn,'CONTABILIZAR NÓMINA',f'{per} asiento {asi}')
                         sgci_exito(f'Nómina {per} contabilizada correctamente. Asiento N° {asi}.')
                         st.rerun()
                     except Exception as e: st.error(f'No se contabilizó la nómina: {e}')
