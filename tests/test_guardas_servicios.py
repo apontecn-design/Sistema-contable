@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import unittest
 from unittest.mock import patch
 from modulos import usuarios, reportes_contables, compras_reclasificacion, compras_iva
-from modulos import plan_cuentas, reglas_contables_ui, conciliacion_documental, contabilidad_reportes
+from modulos import plan_cuentas, reglas_contables_ui, conciliacion_documental, contabilidad_reportes, empresa
 from tests.soporte_flujos import preparar
 
 
@@ -51,6 +51,66 @@ class TestGuardasServicios(unittest.TestCase):
         self.db.execute("DELETE FROM sgci_perfil_permisos WHERE accion='exportar'");self.db.commit()
         with patch.dict(reportes_contables.exportar_balance_ocho.__globals__,{'sgci_autorizar_operacion':usuarios.sgci_autorizar_operacion}):
             with self.assertRaises(PermissionError):reportes_contables.exportar_balance_ocho(self.db)
+
+
+class TestAltaTercerosAutorizada(unittest.TestCase):
+    def setUp(self):self.db=preparar(self)
+
+    def crear(self,tipo='cliente',**cambios):
+        datos=dict(rut='12.345.678-5',nombre='Tercero sintético',email='prueba@example.com',telefono='123')
+        datos.update(cambios)
+        return empresa.sgci_crear_tercero(self.db,tipo,**datos)
+
+    def test_cliente_y_proveedor_conservan_campos_y_auditan_sin_asiento(self):
+        for tipo,tabla in [('cliente','clientes'),('proveedor','proveedores')]:
+            nuevo=self.crear(tipo)
+            fila=self.db.execute(f'SELECT rut,nombre,razon_social,email,telefono,activo FROM {tabla} WHERE id=?',(nuevo,)).fetchone()
+            self.assertEqual(tuple(fila),('12345678-5','Tercero sintético','Tercero sintético','prueba@example.com','123',1))
+        self.assertEqual(self.db.execute('SELECT count(*) FROM auditoria').fetchone()[0],2)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM libro_diario').fetchone()[0],0)
+
+    def test_denegacion_individual_bloquea_antes_de_validar_o_escribir(self):
+        self.db.execute("INSERT INTO sgci_usuario_permisos_detalle VALUES('finanzas@example.com','cxc','Clientes y estados de cuenta','crear',0)")
+        self.db.commit()
+        antes=list(self.db.iterdump())
+        with self.assertRaises(PermissionError):self.crear(rut='inválido')
+        self.assertEqual(list(self.db.iterdump()),antes)
+
+    def test_permiso_de_compras_no_concede_alta_cliente(self):
+        self.db.execute("DELETE FROM sgci_perfil_permisos WHERE modulo='cxc'");self.db.commit()
+        self.crear('proveedor')
+        with self.assertRaises(PermissionError):self.crear('cliente')
+
+    def test_revocacion_de_perfil_impide_siguiente_alta(self):
+        self.crear()
+        self.db.execute("DELETE FROM sgci_perfil_permisos WHERE modulo='cxc' AND accion='crear'")
+        self.db.commit()
+        with self.assertRaises(PermissionError):self.crear(rut='11.111.111-1')
+
+    def test_error_de_auditoria_revierte_alta(self):
+        self.db.execute("CREATE TRIGGER fallo_auditoria BEFORE INSERT ON auditoria BEGIN SELECT RAISE(ABORT,'Fallo de prueba'); END")
+        self.db.commit()
+        with self.assertRaises(sqlite3.IntegrityError):self.crear()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM clientes').fetchone()[0],0)
+
+    def test_duplicado_no_inserta_otra_fila_ni_auditoria(self):
+        self.crear()
+        with self.assertRaises(sqlite3.IntegrityError):self.crear()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM clientes').fetchone()[0],1)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM auditoria').fetchone()[0],1)
+
+    def test_transaccion_pendiente_no_se_confirma(self):
+        self.db.execute("UPDATE bancos SET nombre='Pendiente' WHERE id=1")
+        with self.assertRaises(RuntimeError):self.crear()
+        self.assertTrue(self.db.in_transaction)
+        self.db.rollback()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM clientes').fetchone()[0],0)
+
+    def test_datos_invalidos_y_tabla_no_permitida_no_escriben(self):
+        for cambio in ({'rut':'inválido'},{'nombre':'   '}):
+            with self.subTest(cambio=cambio),self.assertRaises(ValueError):self.crear(**cambio)
+        with self.assertRaises(ValueError):self.crear('auditoria')
+        self.assertEqual(self.db.execute('SELECT count(*) FROM clientes').fetchone()[0],0)
 
 
 class TestEntregaNominaAutorizada(unittest.TestCase):

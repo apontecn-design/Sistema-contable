@@ -29,6 +29,7 @@ def preparar(test):
                 'armar_asiento':reglas_contables.armar_asiento,
                 'obtener_entidad':contabilidad_asientos.obtener_entidad,
                 'nombre_documento':utilidades.nombre_documento,
+                'validar_rut':utilidades.validar_rut,
                 'normalizar_rut':utilidades.normalizar_rut,
                 'cargar_roles':plan_cuentas.cargar_roles}
     simbolos.update({n:getattr(utilidades,n) for n in ('clp_round','limpiar_texto','fecha_iso','numero','normalizar_columnas')})

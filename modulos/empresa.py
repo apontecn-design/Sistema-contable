@@ -1,5 +1,37 @@
 from contextlib import closing
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
+
+def sgci_crear_tercero(conn, tipo, rut, nombre, email='', telefono=''):
+    destinos = {
+        'cliente': ('clientes', 'cxc', 'Clientes y estados de cuenta'),
+        'proveedor': ('proveedores', 'cxp', 'Proveedores y estados de cuenta'),
+    }
+    if tipo not in destinos:
+        raise ValueError('Tipo de tercero inválido.')
+    tabla, modulo, submodulo = destinos[tipo]
+    sgci_autorizar_operacion(conn, modulo, 'crear', submodulo)
+    if not validar_rut(rut):
+        raise ValueError('RUT inválido.')
+    nombre = str(nombre or '').strip()
+    if not nombre:
+        raise ValueError('Debe indicar razón social.')
+    if conn.in_transaction:
+        raise RuntimeError('Guarda o revierte la operación pendiente antes de crear el tercero.')
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, modulo, 'crear', submodulo)
+        cursor = conn.execute(f'''INSERT INTO {tabla}
+            (rut,nombre,razon_social,email,telefono,activo,fecha_creacion)
+            VALUES(?,?,?,?,?,1,?)''',
+            (normalizar_rut(rut),nombre,nombre,str(email or '').strip(),
+             str(telefono or '').strip(),datetime.now().isoformat()))
+        tercero_id = cursor.lastrowid
+        conn.execute('INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)',
+            (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),
+             'CREAR '+tipo.upper(),f'{tipo}:{tercero_id}'))
+    return tercero_id
+
+
 def sgci_empresa_esquema(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS sgci_perfil_empresa (
         id INTEGER PRIMARY KEY CHECK (id=1), razon_social TEXT NOT NULL DEFAULT '',

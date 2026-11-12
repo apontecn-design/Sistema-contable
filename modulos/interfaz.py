@@ -2878,30 +2878,7 @@ elif menu == "👥 Clientes":
                     st.error("Debe indicar razón social.")
                 else:
                     try:
-                        conn.execute(
-                            """
-                            INSERT INTO clientes
-                            (
-                                rut,
-                                nombre,
-                                razon_social,
-                                email,
-                                telefono,
-                                activo,
-                                fecha_creacion
-                            )
-                            VALUES (?, ?, ?, ?, ?, 1, ?)
-                            """,
-                            (
-                                normalizar_rut(rut),
-                                nombre,
-                                nombre,
-                                email,
-                                telefono,
-                                datetime.now().isoformat()
-                            )
-                        )
-                        conn.commit()
+                        sgci_crear_tercero(conn, 'cliente', rut, nombre, email, telefono)
                         sgci_exito("Cliente creado.")
                     except Exception as e:
                         st.error(str(e))
@@ -2997,30 +2974,7 @@ elif menu == "🏢 Proveedores":
                     st.error("Debe indicar razón social.")
                 else:
                     try:
-                        conn.execute(
-                            """
-                            INSERT INTO proveedores
-                            (
-                                rut,
-                                nombre,
-                                razon_social,
-                                email,
-                                telefono,
-                                activo,
-                                fecha_creacion
-                            )
-                            VALUES (?, ?, ?, ?, ?, 1, ?)
-                            """,
-                            (
-                                normalizar_rut(rut),
-                                nombre,
-                                nombre,
-                                email,
-                                telefono,
-                                datetime.now().isoformat()
-                            )
-                        )
-                        conn.commit()
+                        sgci_crear_tercero(conn, 'proveedor', rut, nombre, email, telefono)
                         sgci_exito("Proveedor creado.")
                     except Exception as e:
                         st.error(str(e))
