@@ -1169,41 +1169,44 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
 def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_id, periodo, observacion=""):
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
     """Vincula un cargo real de cartola con un anticipo de nómina y lo contabiliza una sola vez."""
-    ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
-    if ids is not None and int(trabajador_id) not in ids:
-        raise PermissionError('El trabajador está fuera de tu alcance de Recursos Humanos.')
-    mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
-    if not mov:
-        raise ValueError("Movimiento bancario no encontrado.")
-    if int(mov["conciliado"] or 0)==1:
-        raise ValueError("Este movimiento ya está conciliado.")
-    monto=clp_round(float(mov["cargo"] or 0))
-    if monto<=0:
-        raise ValueError("El anticipo de remuneración debe corresponder a un cargo/salida bancaria.")
-    if periodo_cerrado(conn,mov["fecha"]):
-        raise ValueError("El período contable de este movimiento está cerrado.")
-    if not re.fullmatch(r"\d{4}-\d{2}",str(periodo or "")):
-        raise ValueError("El período debe tener formato AAAA-MM.")
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+        ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
+        if ids is not None and int(trabajador_id) not in ids:
+            raise PermissionError('El trabajador está fuera de tu alcance de Recursos Humanos.')
+        mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
+        if not mov:
+            raise ValueError("Movimiento bancario no encontrado.")
+        if int(mov["conciliado"] or 0)==1:
+            raise ValueError("Este movimiento ya está conciliado.")
+        monto=clp_round(float(mov["cargo"] or 0))
+        if monto<=0:
+            raise ValueError("El anticipo de remuneración debe corresponder a un cargo/salida bancaria.")
+        if periodo_cerrado(conn,mov["fecha"]):
+            raise ValueError("El período contable de este movimiento está cerrado.")
+        if not re.fullmatch(r"\d{4}-\d{2}",str(periodo or "")):
+            raise ValueError("El período debe tener formato AAAA-MM.")
 
-    tr=conn.execute("SELECT id,rut,nombre FROM nomina_trabajadores WHERE id=? AND activo=1",(int(trabajador_id),)).fetchone()
-    if not tr:
-        raise ValueError("Trabajador activo no encontrado.")
-    banco=conn.execute("SELECT cuenta_contable FROM bancos WHERE id=?",(mov["banco_id"],)).fetchone()
-    if not banco or not banco["cuenta_contable"]:
-        raise ValueError("La cuenta bancaria no tiene cuenta contable vinculada.")
+        tr=conn.execute("SELECT id,rut,nombre FROM nomina_trabajadores WHERE id=? AND activo=1",(int(trabajador_id),)).fetchone()
+        if not tr:
+            raise ValueError("Trabajador activo no encontrado.")
+        banco=conn.execute("SELECT cuenta_contable FROM bancos WHERE id=?",(mov["banco_id"],)).fetchone()
+        if not banco or not banco["cuenta_contable"]:
+            raise ValueError("La cuenta bancaria no tiene cuenta contable vinculada.")
 
-    # Evita duplicar el mismo anticipo si por error se vuelve a procesar el movimiento.
-    marca=f"CARTOLA:{int(movimiento_id)}"
-    dup=conn.execute("SELECT id FROM nomina_anticipos WHERE COALESCE(anulado,0)=0 AND observacion LIKE ?",(f"%{marca}%",)).fetchone()
-    if dup:
-        raise ValueError("Este movimiento de cartola ya fue vinculado previamente a un anticipo de nómina.")
+        # Evita duplicar el mismo anticipo si por error se vuelve a procesar el movimiento.
+        marca=f"CARTOLA:{int(movimiento_id)}"
+        dup=conn.execute("SELECT id FROM nomina_anticipos WHERE COALESCE(anulado,0)=0 AND instr(' | ' || COALESCE(observacion,'') || ' | ', ?) > 0",(f" | {marca} | ",)).fetchone()
+        if dup:
+            raise ValueError("Este movimiento de cartola ya fue vinculado previamente a un anticipo de nómina.")
 
-    cuenta_activo="1.1.07.01"
-    asiento=siguiente_asiento(conn)+1
-    glosa=f"Anticipo remuneración {tr['nombre']} - {periodo}"
-    obs=limpiar_texto(observacion) or glosa
-    obs=f"{obs} | {marca}"
-    try:
+        cuenta_activo="1.1.07.01"
+        asiento=siguiente_asiento(conn)+1
+        glosa=f"Anticipo remuneración {tr['nombre']} - {periodo}"
+        obs=limpiar_texto(observacion) or glosa
+        obs=f"{obs} | {marca}"
         nomina_asiento_linea(conn,mov["fecha"],cuenta_activo,monto,0,glosa,asiento,'NOMINA_ANTICIPO_CARTOLA')
         nomina_asiento_linea(conn,mov["fecha"],banco["cuenta_contable"],0,monto,glosa,asiento,'NOMINA_ANTICIPO_CARTOLA')
         cur=conn.execute("""INSERT INTO nomina_anticipos
@@ -1215,62 +1218,59 @@ def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_i
                         SET conciliado=1,observacion=?,asiento_id=?,match_tipo='NOMINA_ANTICIPO',match_id=?,match_confianza=100
                         WHERE id=?""",
                      (glosa,asiento,int(anticipo_id),int(movimiento_id)))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    registrar_auditoria(conn,"ANTICIPO NOMINA DESDE CARTOLA",
-                        f"Movimiento {movimiento_id} -> trabajador {trabajador_id}, período {periodo}, monto {monto}, asiento {asiento}")
+        _sgci_auditar_auxiliar(conn,"ANTICIPO NOMINA DESDE CARTOLA",
+                            f"Movimiento {movimiento_id} -> trabajador {trabajador_id}, período {periodo}, monto {monto}, asiento {asiento}")
     return asiento, anticipo_id
-
 
 
 def revertir_anticipo_nomina_cartola(conn, movimiento_id):
     # Revierte exclusivamente anticipos creados desde cartola.
     sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
-    ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
-    if ids is not None and not ids:
-        raise PermissionError('No tienes trabajadores autorizados para esta operación.')
-    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
-    if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo']!='NOMINA_ANTICIPO':
-        raise ValueError('El movimiento no es un anticipo de nómina conciliado.')
-    if not mov['asiento_id'] or not mov['match_id']:
-        raise ValueError('Falta la vinculación contable del anticipo.')
-    parametros = [mov['match_id']]
-    filtro = ''
-    if ids is not None:
-        filtro = ' AND trabajador_id IN (' + ','.join('?' for _ in ids) + ')'
-        parametros.extend(sorted(ids))
-    ant = conn.execute('SELECT * FROM nomina_anticipos WHERE id=?' + filtro, parametros).fetchone()
-    if not ant or int(ant['anulado'] or 0)!=0 or int(ant['contabilizado'] or 0)!=1:
-        raise ValueError('El anticipo no existe, ya fue anulado o no está contabilizado.')
-    if int(ant['asiento_id'] or 0)!=int(mov['asiento_id']):
-        raise ValueError('El asiento del anticipo no coincide con la cartola.')
-    if periodo_cerrado(conn,mov['fecha']):
-        raise ValueError('El período contable está cerrado. Requiere revisión contable.')
-    if conn.execute("SELECT 1 FROM nomina_liquidaciones WHERE trabajador_id=? AND periodo=? AND ABS(COALESCE(anticipo,0))>0.01", (ant['trabajador_id'],ant['periodo'])).fetchone():
-        raise ValueError('Existe una liquidación con anticipo aplicado a este trabajador y período. Revisar antes de revertir.')
-    if conn.execute("SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?", (mov['asiento_id'],movimiento_id)).fetchone():
-        raise ValueError('El asiento está asociado a más de un movimiento bancario.')
-    lineas=conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id', (mov['asiento_id'],)).fetchall()
-    banco=conn.execute('SELECT cuenta_contable FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
-    monto=clp_round(mov['cargo'] or 0)
-    if not banco or not banco['cuenta_contable'] or monto<=0 or len(lineas)!=2:
-        raise ValueError('La estructura bancaria del anticipo requiere revisión manual.')
-    if any(l['origen']!='NOMINA_ANTICIPO_CARTOLA' for l in lineas):
-        raise ValueError('El asiento contiene líneas ajenas al anticipo de cartola.')
-    debitos=sum(float(l['debe'] or 0) for l in lineas)
-    creditos=sum(float(l['haber'] or 0) for l in lineas)
-    if abs(debitos-creditos)>0.01 or abs(debitos-monto)>0.01:
-        raise ValueError('El asiento original no coincide con el cargo bancario.')
-    if not any(l['codigo_cuenta']=='1.1.07.01' and abs(float(l['debe'] or 0)-monto)<0.01 and abs(float(l['haber'] or 0))<0.01 for l in lineas):
-        raise ValueError('No coincide el débito a anticipos del personal.')
-    if not any(l['codigo_cuenta']==banco['cuenta_contable'] and abs(float(l['haber'] or 0)-monto)<0.01 and abs(float(l['debe'] or 0))<0.01 for l in lineas):
-        raise ValueError('No coincide el crédito a la cuenta bancaria.')
-    nuevo=siguiente_asiento(conn)+1
-    lote='REV-NOMINA-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-    try:
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
         conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+        ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
+        if ids is not None and not ids:
+            raise PermissionError('No tienes trabajadores autorizados para esta operación.')
+        mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+        if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo']!='NOMINA_ANTICIPO':
+            raise ValueError('El movimiento no es un anticipo de nómina conciliado.')
+        if not mov['asiento_id'] or not mov['match_id']:
+            raise ValueError('Falta la vinculación contable del anticipo.')
+        parametros = [mov['match_id']]
+        filtro = ''
+        if ids is not None:
+            filtro = ' AND trabajador_id IN (' + ','.join('?' for _ in ids) + ')'
+            parametros.extend(sorted(ids))
+        ant = conn.execute('SELECT * FROM nomina_anticipos WHERE id=?' + filtro, parametros).fetchone()
+        if not ant or int(ant['anulado'] or 0)!=0 or int(ant['contabilizado'] or 0)!=1:
+            raise ValueError('El anticipo no existe, ya fue anulado o no está contabilizado.')
+        if int(ant['asiento_id'] or 0)!=int(mov['asiento_id']):
+            raise ValueError('El asiento del anticipo no coincide con la cartola.')
+        if periodo_cerrado(conn,mov['fecha']):
+            raise ValueError('El período contable está cerrado. Requiere revisión contable.')
+        if conn.execute("SELECT 1 FROM nomina_liquidaciones WHERE trabajador_id=? AND periodo=? AND ABS(COALESCE(anticipo,0))>0.01", (ant['trabajador_id'],ant['periodo'])).fetchone():
+            raise ValueError('Existe una liquidación con anticipo aplicado a este trabajador y período. Revisar antes de revertir.')
+        if conn.execute("SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?", (mov['asiento_id'],movimiento_id)).fetchone():
+            raise ValueError('El asiento está asociado a más de un movimiento bancario.')
+        lineas=conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id', (mov['asiento_id'],)).fetchall()
+        banco=conn.execute('SELECT cuenta_contable FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
+        monto=clp_round(mov['cargo'] or 0)
+        if not banco or not banco['cuenta_contable'] or monto<=0 or len(lineas)!=2:
+            raise ValueError('La estructura bancaria del anticipo requiere revisión manual.')
+        if any(l['origen']!='NOMINA_ANTICIPO_CARTOLA' for l in lineas):
+            raise ValueError('El asiento contiene líneas ajenas al anticipo de cartola.')
+        debitos=sum(float(l['debe'] or 0) for l in lineas)
+        creditos=sum(float(l['haber'] or 0) for l in lineas)
+        if abs(debitos-creditos)>0.01 or abs(debitos-monto)>0.01:
+            raise ValueError('El asiento original no coincide con el cargo bancario.')
+        if not any(l['codigo_cuenta']=='1.1.07.01' and abs(float(l['debe'] or 0)-monto)<0.01 and abs(float(l['haber'] or 0))<0.01 for l in lineas):
+            raise ValueError('No coincide el débito a anticipos del personal.')
+        if not any(l['codigo_cuenta']==banco['cuenta_contable'] and abs(float(l['haber'] or 0)-monto)<0.01 and abs(float(l['debe'] or 0))<0.01 for l in lineas):
+            raise ValueError('No coincide el crédito a la cuenta bancaria.')
+        nuevo=siguiente_asiento(conn)+1
+        lote='REV-NOMINA-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         for l in lineas:
             conn.execute('''INSERT INTO libro_diario
                 (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
@@ -1294,10 +1294,6 @@ def revertir_anticipo_nomina_cartola(conn, movimiento_id):
             (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),
              'REVERSO ANTICIPO NOMINA',
              f"Cartola {movimiento_id}; anticipo {ant['id']}; asiento original {mov['asiento_id']}; reverso {nuevo}; monto {monto}"))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
     return nuevo
 
 

@@ -1,5 +1,11 @@
 """Alcance laboral en creación y reversión bancaria, con servicios y SQLite reales."""
 import unittest
+import sqlite3
+import tempfile
+import threading
+from pathlib import Path
+from contextlib import closing
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 from modulos import conciliacion_documental as servicios, contabilidad_reportes, usuarios
 from tests.soporte_flujos import preparar
@@ -68,3 +74,81 @@ class TestAnticiposCartolaAlcance(unittest.TestCase):
         self.db.commit()
         with self.assertRaises(PermissionError):self.crear()
         self.assertEqual(self.db.execute('SELECT count(*) FROM nomina_anticipos').fetchone()[0],0)
+
+    def fallo_auditoria(self):
+        self.db.execute("CREATE TRIGGER fallo_auditoria BEFORE INSERT ON auditoria BEGIN SELECT RAISE(ABORT,'Fallo de prueba'); END")
+        self.db.commit()
+
+    def test_fallo_auditoria_revierte_anticipo_asiento_y_cartola(self):
+        self.fallo_auditoria()
+        antes=list(self.db.iterdump())
+        with self.assertRaises(sqlite3.IntegrityError):self.crear()
+        self.assertEqual(list(self.db.iterdump()),antes)
+
+    def test_fallo_auditoria_revierte_reverso_completo(self):
+        self.crear();self.fallo_auditoria()
+        antes=list(self.db.iterdump())
+        with self.assertRaises(sqlite3.IntegrityError):servicios.revertir_anticipo_nomina_cartola(self.db,1)
+        self.assertEqual(list(self.db.iterdump()),antes)
+
+    def test_creacion_no_confirma_transaccion_ajena(self):
+        self.db.execute("UPDATE bancos SET nombre='Cambio pendiente' WHERE id=1")
+        with self.assertRaises(RuntimeError):self.crear()
+        self.assertTrue(self.db.in_transaction)
+        self.db.rollback()
+        self.assertNotEqual(self.db.execute('SELECT nombre FROM bancos WHERE id=1').fetchone()[0],'Cambio pendiente')
+
+    def test_reverso_no_revierte_transaccion_ajena(self):
+        self.crear()
+        self.db.execute("UPDATE bancos SET nombre='Cambio pendiente' WHERE id=1")
+        with self.assertRaises(RuntimeError):servicios.revertir_anticipo_nomina_cartola(self.db,1)
+        self.assertTrue(self.db.in_transaction)
+        self.db.rollback()
+        self.assertEqual(self.db.execute('SELECT conciliado FROM cartola_bancaria WHERE id=1').fetchone()[0],1)
+
+    def test_marca_cartola_10_no_bloquea_cartola_1(self):
+        self.db.execute("INSERT INTO nomina_anticipos(trabajador_id,periodo,fecha,monto,observacion) VALUES(1,'2026-11','2026-11-10',100,'Previo | CARTOLA:10')")
+        self.db.commit()
+        self.crear()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM nomina_anticipos').fetchone()[0],2)
+
+    def ejecutar_dos_sesiones(self,operacion):
+        with tempfile.TemporaryDirectory() as carpeta:
+            ruta=Path(carpeta)/'concurrencia.db'
+            with closing(sqlite3.connect(ruta)) as db:self.db.backup(db)
+            barrera=threading.Barrier(2)
+            def ejecutar(indice):
+                with closing(sqlite3.connect(ruta,timeout=10)) as db:
+                    db.row_factory=sqlite3.Row
+                    barrera.wait(timeout=10)
+                    try:return ('correcto',operacion(db,indice))
+                    except ValueError:return ('rechazado',None)
+            with ThreadPoolExecutor(max_workers=2) as ejecutor:
+                futuros=[ejecutor.submit(ejecutar,i) for i in range(2)]
+                resultados=[f.result(timeout=20) for f in futuros]
+            with closing(sqlite3.connect(ruta)) as db:
+                conteos={tabla:db.execute('SELECT count(*) FROM '+tabla).fetchone()[0]
+                         for tabla in ('nomina_anticipos','libro_diario','auditoria')}
+            return resultados,conteos
+
+    def test_dos_sesiones_no_crean_dos_anticipos_del_mismo_movimiento(self):
+        resultados,conteos=self.ejecutar_dos_sesiones(lambda db,i:
+            servicios.contabilizar_anticipo_nomina_desde_cartola(db,1,1,'2026-11'))
+        self.assertCountEqual([r[0] for r in resultados],['correcto','rechazado'])
+        self.assertEqual(conteos,dict(nomina_anticipos=1,libro_diario=2,auditoria=1))
+
+    def test_dos_movimientos_concurrentes_generan_asientos_distintos(self):
+        self.db.execute("INSERT INTO cartola_bancaria(id,banco_id,fecha,cargo,abono) VALUES(2,1,'2026-11-11',100,0)")
+        self.db.commit()
+        resultados,conteos=self.ejecutar_dos_sesiones(lambda db,i:
+            servicios.contabilizar_anticipo_nomina_desde_cartola(db,i+1,1,'2026-11'))
+        self.assertEqual([r[0] for r in resultados],['correcto','correcto'])
+        self.assertNotEqual(resultados[0][1][0],resultados[1][1][0])
+        self.assertEqual(conteos,dict(nomina_anticipos=2,libro_diario=4,auditoria=2))
+
+    def test_dos_sesiones_no_duplican_reverso(self):
+        self.crear()
+        resultados,conteos=self.ejecutar_dos_sesiones(lambda db,i:
+            servicios.revertir_anticipo_nomina_cartola(db,1))
+        self.assertCountEqual([r[0] for r in resultados],['correcto','rechazado'])
+        self.assertEqual(conteos,dict(nomina_anticipos=1,libro_diario=4,auditoria=2))
