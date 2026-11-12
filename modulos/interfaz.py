@@ -665,7 +665,12 @@ elif menu == "👥 Recursos Humanos":
                 obs_ant=st.text_input('Observación',key='ant_obs')
                 if st.button('Registrar anticipo',key='ant_save'):
                     sgci_exigir_permiso(conn, 'nomina', 'crear', 'Anticipos y préstamos')
-                    conn.execute("INSERT INTO nomina_anticipos(trabajador_id,periodo,fecha,monto,observacion) VALUES(?,?,?,?,?)",(tr.id,periodo,fecha_ant.isoformat(),monto_ant,obs_ant)); conn.commit(); sgci_exito('Anticipo registrado.'); st.rerun()
+                    try:
+                        nomina_crear_anticipo(conn,tr.id,periodo,fecha_ant.isoformat(),monto_ant,obs_ant)
+                    except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                        st.error(str(exc))
+                    else:
+                        sgci_exito('Anticipo registrado.'); st.rerun()
             with c2:
                 st.markdown('#### Préstamo al trabajador')
                 quienp=st.selectbox('Trabajador',list(mapa),key='pre_trab'); tp=mapa[quienp]
@@ -684,7 +689,7 @@ elif menu == "👥 Recursos Humanos":
                     restante=int(round(monto_p))
                     for ix in range(int(cuotas)):
                         colf,colm=st.columns(2)
-                        sugerida=date(2026,9,30) if ix==0 else (date(2026,10,15) if ix==1 else (date(2026,10,30) if ix==2 else date(2026,11,15)+timedelta(days=15*(ix-3))))
+                        sugerida=fecha_p+timedelta(days=15*(ix+1))
                         fecha_c=colf.date_input(f'Fecha descuento {ix+1}',value=sugerida,key=f'pre_fecha_c_{ix}')
                         valor_sug=importe_base if ix<int(cuotas)-1 else restante
                         valor_c=colm.number_input(f'Monto descuento {ix+1}',min_value=0,value=max(0,valor_sug),step=1000,key=f'pre_monto_c_{ix}')
@@ -693,28 +698,15 @@ elif menu == "👥 Recursos Humanos":
                     st.caption(f'Total programado: {money(sum(x[1] for x in fechas_cuotas))} / Préstamo: {money(monto_p)}')
                 if st.button('Registrar préstamo',key='pre_save'):
                     sgci_exigir_permiso(conn, 'nomina', 'crear', 'Anticipos y préstamos')
-                    if monto_p<=0:
-                        st.error('El préstamo debe ser mayor que cero.')
-                    elif modalidad=='Fechas específicas / quincenal' and (sum(x[1] for x in fechas_cuotas)!=int(round(monto_p)) or any(x[1]<=0 for x in fechas_cuotas) or len(set(x[0] for x in fechas_cuotas))!=len(fechas_cuotas) or any(x[0]<fecha_p.isoformat() for x in fechas_cuotas)):
-                        st.error('Las cuotas deben sumar exactamente el préstamo, tener fechas distintas posteriores a la entrega y montos positivos.')
-                    elif modalidad=='Mensual (actual)' and not re.fullmatch(r'\\d{4}-(0[1-9]|1[0-2])',primera):
-                        st.error('Primera cuota debe tener formato AAAA-MM.')
+                    try:
+                        nomina_crear_prestamo(conn,tp.id,fecha_p.isoformat(),monto_p,int(cuotas),
+                                              cuota if modalidad=='Mensual (actual)' else 0,
+                                              primera if modalidad=='Mensual (actual)' else '',obs_p,
+                                              fechas_cuotas if modalidad=='Fechas específicas / quincenal' else None)
+                    except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                        st.error(str(exc))
                     else:
-                        if modalidad=='Mensual (actual)':
-                            cuota_final=cuota or (monto_p/cuotas if cuotas else monto_p)
-                            primera_final=primera
-                        else:
-                            cuota_final=0
-                            primera_final=min(f[:7] for f,_ in fechas_cuotas)
-                        try:
-                            cursor=conn.execute("INSERT INTO nomina_prestamos(trabajador_id,fecha,monto_original,numero_cuotas,cuota,primera_cuota,saldo,observacion) VALUES(?,?,?,?,?,?,?,?)",(tp.id,fecha_p.isoformat(),monto_p,int(cuotas),cuota_final,primera_final,monto_p,obs_p))
-                            if modalidad=='Fechas específicas / quincenal':
-                                conn.executemany("INSERT INTO nomina_prestamo_cuotas_programadas(prestamo_id,fecha,monto) VALUES(?,?,?)",[(cursor.lastrowid,f,v) for f,v in fechas_cuotas])
-                            conn.commit()
-                            sgci_exito('Préstamo y calendario registrados.'); st.rerun()
-                        except Exception:
-                            conn.rollback()
-                            raise
+                        sgci_exito('Préstamo y calendario registrados.'); st.rerun()
             st.divider(); st.markdown('#### Movimientos registrados')
             ants=pd.read_sql_query("SELECT a.id,t.nombre,a.periodo,a.fecha,a.monto,a.contabilizado,a.asiento_id FROM nomina_anticipos a JOIN nomina_trabajadores t ON t.id=a.trabajador_id WHERE COALESCE(a.anulado,0)=0 ORDER BY a.id DESC",conn)
             pres=pd.read_sql_query("SELECT p.id,t.nombre,p.fecha,p.monto_original,p.numero_cuotas,p.cuota,p.saldo,p.estado,p.contabilizado,p.asiento_id FROM nomina_prestamos p JOIN nomina_trabajadores t ON t.id=p.trabajador_id ORDER BY p.id DESC",conn)
@@ -843,13 +835,23 @@ elif menu == "👥 Recursos Humanos":
         amap={r.afp:r for r in afpdf.itertuples()}; aa=st.selectbox('AFP a modificar',list(amap)); ar=amap[aa]; nueva=st.number_input('Comisión %',min_value=0.0,max_value=10.0,value=float(ar.comision),step=.01); vig=st.text_input('Vigente desde',value=ar.vigente_desde or '')
         if st.button('Guardar parámetro AFP'):
             sgci_exigir_permiso(conn, 'nomina', 'editar', 'Parámetros')
-            conn.execute("UPDATE nomina_parametros_afp SET comision=?,vigente_desde=? WHERE afp=?",(nueva,vig,aa)); conn.commit(); sgci_exito('Parámetro actualizado.'); st.rerun()
+            try:
+                nomina_guardar_parametro_afp(conn,aa,nueva,vig)
+            except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                st.error(str(exc))
+            else:
+                sgci_exito('Parámetro actualizado.'); st.rerun()
         st.info('Salud: Fonasa usa 7% legal. Isapre admite 7%, porcentaje pactado, plan en UF o monto pactado en pesos; la liquidación conserva el valor UF utilizado y permite ajuste manual.')
         st.markdown('#### Valor UF por período')
         pu=st.text_input('Período UF (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='uf_per'); vu=st.number_input('Valor UF del período',min_value=0.0,value=0.0,step=1.0,key='uf_val')
         if st.button('Guardar valor UF',key='uf_save'):
             sgci_exigir_permiso(conn, 'nomina', 'editar', 'Parámetros')
-            conn.execute("INSERT INTO nomina_parametros_mensuales(periodo,valor_uf) VALUES(?,?) ON CONFLICT(periodo) DO UPDATE SET valor_uf=excluded.valor_uf",(pu,vu)); conn.commit(); sgci_exito('UF guardada para el período.'); st.rerun()
+            try:
+                nomina_guardar_valor_uf(conn,pu,vu)
+            except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                st.error(str(exc))
+            else:
+                sgci_exito('UF guardada para el período.'); st.rerun()
         ufdf=pd.read_sql_query("SELECT periodo,valor_uf FROM nomina_parametros_mensuales ORDER BY periodo DESC",conn)
         if not ufdf.empty: st.dataframe(ufdf,use_container_width=True,hide_index=True)
 

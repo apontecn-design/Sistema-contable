@@ -1120,6 +1120,132 @@ def nomina_asiento_linea(conn, fecha, codigo, debe, haber, glosa, asiento_id, or
                  (fecha,nombre,float(debe or 0),float(haber or 0),glosa,codigo,asiento_id,None,origen))
 
 
+def _nomina_autorizar_alta_movimiento(conn, trabajador_id):
+    sgci_autorizar_operacion(conn, 'nomina', 'crear', 'Anticipos y préstamos')
+    trabajador_id = _sgci_monto_auxiliar(trabajador_id)
+    ids = sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual())
+    if ids is not None and int(trabajador_id) not in ids:
+        raise PermissionError('El trabajador está fuera de tu alcance de Recursos Humanos.')
+    if not conn.execute('SELECT 1 FROM nomina_trabajadores WHERE id=? AND activo=1',(int(trabajador_id),)).fetchone():
+        raise ValueError('Trabajador activo no encontrado.')
+
+
+def _nomina_validar_fecha_movimiento(fecha):
+    try:
+        return date.fromisoformat(str(fecha)).isoformat()
+    except (ValueError,TypeError):
+        raise ValueError('Fecha de movimiento inválida.') from None
+
+
+def nomina_crear_anticipo(conn, trabajador_id, periodo, fecha, monto, observacion=''):
+    sgci_autorizar_operacion(conn, 'nomina', 'crear', 'Anticipos y préstamos')
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])',str(periodo)):
+        raise ValueError('El período debe tener formato AAAA-MM.')
+    fecha = _nomina_validar_fecha_movimiento(fecha)
+    monto = _sgci_monto_auxiliar(monto)
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _nomina_autorizar_alta_movimiento(conn,trabajador_id)
+        if periodo_cerrado(conn,fecha) or periodo_cerrado(conn,str(periodo)+'-01'):
+            raise ValueError('El período contable está cerrado.')
+        nomina = conn.execute('SELECT estado,asiento_id FROM nomina_periodos WHERE periodo=?',(periodo,)).fetchone()
+        liq = conn.execute('SELECT estado FROM nomina_liquidaciones WHERE periodo=? AND trabajador_id=?',(periodo,int(trabajador_id))).fetchone()
+        if (nomina and (nomina['estado'] in ('CONTABILIZADO','CERRADO') or nomina['asiento_id'] is not None)) or (liq and liq['estado'] in ('CONTABILIZADO','CERRADO')):
+            raise ValueError('La liquidación o nómina del período ya está contabilizada o cerrada.')
+        cursor=conn.execute('INSERT INTO nomina_anticipos(trabajador_id,periodo,fecha,monto,observacion) VALUES(?,?,?,?,?)',
+                            (int(trabajador_id),periodo,fecha,monto,str(observacion or '')))
+        nuevo=cursor.lastrowid
+        _sgci_auditar_auxiliar(conn,'CREAR ANTICIPO NOMINA',f'anticipo:{nuevo}; trabajador:{trabajador_id}; período:{periodo}')
+    return nuevo
+
+
+def nomina_crear_prestamo(conn, trabajador_id, fecha, monto, numero_cuotas, cuota=0, primera_cuota='', observacion='', fechas_cuotas=None):
+    sgci_autorizar_operacion(conn, 'nomina', 'crear', 'Anticipos y préstamos')
+    fecha = _nomina_validar_fecha_movimiento(fecha)
+    monto = _sgci_monto_auxiliar(monto)
+    if isinstance(numero_cuotas,bool) or str(numero_cuotas) not in tuple(str(n) for n in range(1,121)):
+        raise ValueError('El número de cuotas debe ser un entero entre 1 y 120.')
+    numero_cuotas=int(numero_cuotas)
+    calendario=None
+    if fechas_cuotas is not None:
+        calendario=[(_nomina_validar_fecha_movimiento(f),_sgci_monto_auxiliar(v)) for f,v in fechas_cuotas]
+        if not calendario or len(calendario)>48 or len(calendario)!=numero_cuotas or sum(v for _,v in calendario)!=monto or len({f for f,_ in calendario})!=len(calendario) or any(f<fecha for f,_ in calendario):
+            raise ValueError('Las cuotas deben sumar el préstamo, tener fechas distintas desde la entrega y montos positivos.')
+        primera_cuota=min(f[:7] for f,_ in calendario)
+        cuota=0.0
+    else:
+        if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])',str(primera_cuota)):
+            raise ValueError('Primera cuota debe tener formato AAAA-MM.')
+        try:
+            cuota_decimal=Decimal(str(cuota))
+            if not cuota_decimal.is_finite() or cuota_decimal<0:
+                raise ValueError('La cuota debe ser un monto finito no negativo.')
+        except (ArithmeticError,TypeError):
+            raise ValueError('Cuota inválida.') from None
+        cuota=float(cuota_decimal) if cuota_decimal else monto/numero_cuotas
+        if not Decimal(str(cuota)).is_finite():
+            raise ValueError('La cuota excede el rango admitido.')
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _nomina_autorizar_alta_movimiento(conn,trabajador_id)
+        if periodo_cerrado(conn,fecha):
+            raise ValueError('El período contable está cerrado.')
+        cursor=conn.execute('INSERT INTO nomina_prestamos(trabajador_id,fecha,monto_original,numero_cuotas,cuota,primera_cuota,saldo,observacion) VALUES(?,?,?,?,?,?,?,?)',
+                            (int(trabajador_id),fecha,monto,numero_cuotas,cuota,primera_cuota,monto,str(observacion or '')))
+        nuevo=cursor.lastrowid
+        if calendario is not None:
+            conn.executemany('INSERT INTO nomina_prestamo_cuotas_programadas(prestamo_id,fecha,monto) VALUES(?,?,?)',
+                             [(nuevo,f,v) for f,v in calendario])
+        _sgci_auditar_auxiliar(conn,'CREAR PRESTAMO NOMINA',f'préstamo:{nuevo}; trabajador:{trabajador_id}; cuotas:{numero_cuotas}')
+    return nuevo
+
+
+def nomina_guardar_parametro_afp(conn, afp, comision, vigente_desde=''):
+    sgci_autorizar_operacion(conn, 'nomina', 'editar', 'Parámetros')
+    try:
+        valor=Decimal(str(comision))
+        if not valor.is_finite() or not 0<=valor<=10:
+            raise ValueError('La comisión debe estar entre 0 y 10.')
+    except (ArithmeticError,TypeError):
+        raise ValueError('Comisión inválida.') from None
+    vigente_desde=_nomina_validar_fecha_movimiento(vigente_desde) if vigente_desde else ''
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'nomina', 'editar', 'Parámetros')
+        cursor=conn.execute('UPDATE nomina_parametros_afp SET comision=?,vigente_desde=? WHERE afp=?',
+                            (float(valor),vigente_desde,str(afp)))
+        if cursor.rowcount!=1:
+            raise ValueError('AFP no encontrada.')
+        _sgci_auditar_auxiliar(conn,'EDITAR PARAMETRO AFP',str(afp))
+
+
+def nomina_guardar_valor_uf(conn, periodo, valor_uf):
+    sgci_autorizar_operacion(conn, 'nomina', 'editar', 'Parámetros')
+    if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])',str(periodo)):
+        raise ValueError('El período debe tener formato AAAA-MM.')
+    try:
+        valor=Decimal(str(valor_uf))
+        if not valor.is_finite() or valor<=0:
+            raise ValueError('El valor UF debe ser finito y mayor que cero.')
+        if not Decimal(str(float(valor))).is_finite():
+            raise ValueError('El valor UF excede el rango admitido.')
+    except (ArithmeticError,TypeError):
+        raise ValueError('Valor UF inválido.') from None
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'nomina', 'editar', 'Parámetros')
+        estado=conn.execute('SELECT estado,asiento_id FROM nomina_periodos WHERE periodo=?',(periodo,)).fetchone()
+        if periodo_cerrado(conn,str(periodo)+'-01') or (estado and (estado['estado'] in ('CONTABILIZADO','CERRADO') or estado['asiento_id'] is not None)):
+            raise ValueError('El período ya está contabilizado o cerrado.')
+        conn.execute('INSERT INTO nomina_parametros_mensuales(periodo,valor_uf) VALUES(?,?) ON CONFLICT(periodo) DO UPDATE SET valor_uf=excluded.valor_uf',
+                     (periodo,float(valor)))
+        _sgci_auditar_auxiliar(conn,'EDITAR VALOR UF',str(periodo))
+
+
 def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_activo, cuenta_banco, glosa):
     sgci_autorizar_operacion(conn, 'nomina', 'contabilizar', 'Contabilización')
     tipos = {'nomina_anticipos': ('monto', '1.1.07.01'),
