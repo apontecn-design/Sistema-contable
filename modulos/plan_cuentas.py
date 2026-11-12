@@ -99,6 +99,52 @@ def reorganizar_plan_2026_seguro(conn):
     conn.commit()
 
 
+def sgci_guardar_cuenta(conn, codigo, nombre, categoria, tipo, padre_codigo, nivel, *, crear=False):
+    accion = 'crear' if crear else 'editar'
+    sgci_autorizar_operacion(conn, 'contabilidad', accion, 'Plan de Cuentas')
+    codigo, nombre = str(codigo or '').strip(), str(nombre or '').strip()
+    padre_codigo = str(padre_codigo or '').strip() or None
+    if not codigo or not nombre:
+        raise ValueError('Debe indicar código y nombre de cuenta.')
+    if categoria not in ('Activo','Pasivo','Patrimonio','Nominal') or tipo not in ('Activo','Pasivo','Patrimonio','Ingresos','Gastos'):
+        raise ValueError('Categoría o tipo de cuenta inválido.')
+    if isinstance(nivel,bool) or str(nivel) not in tuple(str(n) for n in range(1,11)):
+        raise ValueError('El nivel debe ser un entero entre 1 y 10.')
+    if conn.in_transaction:
+        raise RuntimeError('Guarda o revierte la operación pendiente antes de modificar el plan.')
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'contabilidad', accion, 'Plan de Cuentas')
+        if not crear and not conn.execute('SELECT 1 FROM plan_cuentas WHERE codigo=?',(codigo,)).fetchone():
+            raise ValueError('Cuenta no encontrada.')
+        ancestro,visitados = padre_codigo,set()
+        while ancestro:
+            if ancestro == codigo or ancestro in visitados:
+                raise ValueError('La cuenta padre generaría una jerarquía circular.')
+            visitados.add(ancestro)
+            fila=conn.execute('SELECT padre_codigo FROM plan_cuentas WHERE codigo=?',(ancestro,)).fetchone()
+            if fila is None:
+                raise ValueError('La cuenta padre no existe en el plan.')
+            ancestro=fila[0]
+        if crear:
+            conn.execute('INSERT INTO plan_cuentas(codigo,nombre,categoria,tipo,padre_codigo,nivel) VALUES(?,?,?,?,?,?)',
+                         (codigo,nombre,categoria,tipo,padre_codigo,int(nivel)))
+        else:
+            conn.execute('UPDATE plan_cuentas SET nombre=?,categoria=?,tipo=?,padre_codigo=?,nivel=? WHERE codigo=?',
+                         (nombre,categoria,tipo,padre_codigo,int(nivel),codigo))
+        conn.execute('INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)',
+            (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),
+             'CREAR CUENTA' if crear else 'EDITAR CUENTA',codigo))
+    return codigo
+
+
+def sgci_exportar_plan(conn):
+    sgci_autorizar_operacion(conn, 'contabilidad', 'ver', 'Plan de Cuentas')
+    sgci_autorizar_operacion(conn, 'contabilidad', 'exportar', 'Plan de Cuentas')
+    df=pd.read_sql_query('SELECT codigo AS Código,nombre AS Cuenta,categoria AS Categoría,tipo AS Tipo,padre_codigo AS Padre,nivel AS Nivel FROM plan_cuentas ORDER BY codigo',conn)
+    return pdf_desde_dataframe('Plan de Cuentas','CONTEM - Sistema Contable y Empresarial',df)
+
+
 class Plan:
 
     def __init__(self, conn):

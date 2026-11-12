@@ -3657,8 +3657,8 @@ elif menu == "📋 Plan de Cuentas":
             conn
         )
         st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
-        if not df.empty:
-            pdf = pdf_desde_dataframe("Plan de Cuentas","CONTEM - Sistema Contable y Empresarial",df)
+        if not df.empty and sgci_puede_submodulo(conn, 'contabilidad', 'Plan de Cuentas', 'exportar'):
+            pdf = sgci_exportar_plan(conn)
             st.download_button("🖨️ Imprimir / PDF Plan de Cuentas",pdf,"plan_de_cuentas.pdf","application/pdf",key="pdf_plan_cuentas")
 
     with pestañas[1]:
@@ -3703,29 +3703,7 @@ elif menu == "📋 Plan de Cuentas":
 
             if st.form_submit_button("Crear cuenta"):
                 try:
-                    conn.execute(
-                        """
-                        INSERT INTO plan_cuentas
-                        (
-                            codigo,
-                            nombre,
-                            categoria,
-                            tipo,
-                            padre_codigo,
-                            nivel
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            codigo.strip(),
-                            nombre.strip(),
-                            categoria,
-                            tipo,
-                            padre.strip() or None,
-                            nivel
-                        )
-                    )
-                    conn.commit()
+                    sgci_guardar_cuenta(conn, codigo, nombre, categoria, tipo, padre, int(nivel), crear=True)
                     sgci_exito("Cuenta creada.")
                 except Exception as e:
                     st.error(str(e))
@@ -3802,45 +3780,11 @@ elif menu == "📋 Plan de Cuentas":
             if guardar_edicion:
                 nuevo_padre = None if padre_editar == "Sin cuenta padre" else padre_editar.split(" - ", 1)[0]
                 try:
-                    if nuevo_padre == codigo_editar:
-                        raise ValueError("Una cuenta no puede ser padre de sí misma.")
-
-                    ancestro = nuevo_padre
-                    visitados = set()
-                    while ancestro:
-                        if ancestro == codigo_editar:
-                            raise ValueError("La cuenta padre seleccionada generaría una jerarquía circular.")
-                        if ancestro in visitados:
-                            break
-                        visitados.add(ancestro)
-                        row_padre = conn.execute(
-                            "SELECT padre_codigo FROM plan_cuentas WHERE codigo = ?",
-                            (ancestro,)
-                        ).fetchone()
-                        if not row_padre:
-                            break
-                        ancestro = row_padre[0]
-
-                    conn.execute(
-                        """
-                        UPDATE plan_cuentas
-                        SET nombre = ?, categoria = ?, tipo = ?, padre_codigo = ?, nivel = ?
-                        WHERE codigo = ?
-                        """,
-                        (
-                            nombre_editar.strip(),
-                            categoria_editar,
-                            tipo_editar,
-                            nuevo_padre,
-                            int(nivel_editar),
-                            codigo_editar
-                        )
-                    )
-                    conn.commit()
+                    sgci_guardar_cuenta(conn, codigo_editar, nombre_editar, categoria_editar,
+                                        tipo_editar, nuevo_padre, int(nivel_editar))
                     sgci_exito(f"Cuenta {codigo_editar} actualizada correctamente.")
                     st.rerun()
                 except Exception as e:
-                    conn.rollback()
                     st.error(f"No se pudo actualizar la cuenta: {e}")
 
 
