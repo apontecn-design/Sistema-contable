@@ -1121,14 +1121,49 @@ def nomina_asiento_linea(conn, fecha, codigo, debe, haber, glosa, asiento_id, or
 
 
 def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_activo, cuenta_banco, glosa):
-    asiento=siguiente_asiento(conn)+1
-    try:
+    sgci_autorizar_operacion(conn, 'nomina', 'contabilizar', 'Contabilización')
+    tipos = {'nomina_anticipos': ('monto', '1.1.07.01'),
+             'nomina_prestamos': ('monto_original', '1.1.07.02')}
+    if tabla not in tipos:
+        raise ValueError('Tipo de movimiento de nómina inválido.')
+    ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
+    if ids is not None and not ids:
+        raise PermissionError('No tienes trabajadores autorizados para esta operación.')
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        parametros = [int(registro_id)]
+        filtro = ''
+        if ids is not None:
+            filtro = ' AND trabajador_id IN (' + ','.join('?' for _ in ids) + ')'
+            parametros.extend(sorted(ids))
+        registro = conn.execute(f'SELECT * FROM {tabla} WHERE id=?' + filtro, parametros).fetchone()
+        if registro is None:
+            raise ValueError('Movimiento no disponible para esta operación.')
+        if registro['contabilizado'] or registro['asiento_id']:
+            raise ValueError('El movimiento ya está contabilizado.')
+        if tabla == 'nomina_anticipos' and registro['anulado']:
+            raise ValueError('El anticipo está anulado.')
+        if tabla == 'nomina_prestamos' and registro['estado'] != 'VIGENTE':
+            raise ValueError('El préstamo no está vigente.')
+        campo_monto, cuenta_esperada = tipos[tabla]
+        monto_guardado = _sgci_monto_auxiliar(registro[campo_monto])
+        if str(fecha) != registro['fecha'] or _sgci_monto_auxiliar(monto) != monto_guardado:
+            raise ValueError('El movimiento cambió. Actualiza la selección antes de contabilizar.')
+        if cuenta_activo != cuenta_esperada:
+            raise ValueError('La cuenta de anticipo o préstamo no corresponde al movimiento.')
+        if periodo_cerrado(conn, registro['fecha']):
+            raise ValueError('El período contable está cerrado.')
+        banco = conn.execute('SELECT 1 FROM bancos WHERE activo=1 AND cuenta_contable=?',
+                             (cuenta_banco,)).fetchone()
+        if not banco or cuenta_banco not in Plan(conn).hojas:
+            raise ValueError('La cuenta bancaria debe estar activa y ser imputable.')
+        asiento=siguiente_asiento(conn)+1
         nomina_asiento_linea(conn,fecha,cuenta_activo,monto,0,glosa,asiento,'NOMINA_PAGO')
         nomina_asiento_linea(conn,fecha,cuenta_banco,0,monto,glosa,asiento,'NOMINA_PAGO')
         conn.execute(f"UPDATE {tabla} SET asiento_id=?, contabilizado=1 WHERE id=?",(asiento,registro_id))
-        conn.commit(); return asiento
-    except Exception:
-        conn.rollback(); raise
+        _sgci_auditar_auxiliar(conn, 'CONTABILIZAR ENTREGA NOMINA', f'{tabla}:{registro_id}; asiento:{asiento}')
+    return asiento
 
 
 def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_id, periodo, observacion=""):

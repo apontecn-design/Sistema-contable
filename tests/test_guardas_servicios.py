@@ -18,7 +18,8 @@ class TestGuardasServicios(unittest.TestCase):
         self.db=preparar(self)
 
     def test_denegacion_individual_bloquea_antes_de_escribir(self):
-        casos=[(compras_iva.registrar_pago_cliente,'cxc','crear','Pagos de clientes'),
+        casos=[(conciliacion_documental.nomina_registrar_pago_activo,'nomina','contabilizar','Contabilización'),
+            (compras_iva.registrar_pago_cliente,'cxc','crear','Pagos de clientes'),
             (compras_iva.registrar_pago_proveedor,'cxp','crear','Pagos de proveedores'),
             (reportes_contables.deshacer_lote,'administracion','anular','Lotes'),
             (compras_reclasificacion.reclasificar_compras,'cxp','contabilizar','RCV Compras'),
@@ -50,6 +51,60 @@ class TestGuardasServicios(unittest.TestCase):
         self.db.execute("DELETE FROM sgci_perfil_permisos WHERE accion='exportar'");self.db.commit()
         with patch.dict(reportes_contables.exportar_balance_ocho.__globals__,{'sgci_autorizar_operacion':usuarios.sgci_autorizar_operacion}):
             with self.assertRaises(PermissionError):reportes_contables.exportar_balance_ocho(self.db)
+
+
+class TestEntregaNominaAutorizada(unittest.TestCase):
+    def setUp(self):
+        self.db=preparar(self)
+        self.db.execute("INSERT INTO nomina_anticipos(id,trabajador_id,periodo,fecha,monto) VALUES(1,1,'2026-11','2026-11-10',100)")
+        self.db.commit()
+        p=patch.dict(vars(conciliacion_documental),{
+            'sgci_rrhh_ids_autorizados':lambda *a:{1}})
+        p.start();self.addCleanup(p.stop)
+
+    def contabilizar(self,**cambios):
+        datos=dict(tabla='nomina_anticipos',registro_id=1,fecha='2026-11-10',monto=100,
+                   cuenta_activo='1.1.07.01',cuenta_banco='1.1.02',glosa='Entrega de prueba')
+        datos.update(cambios)
+        return conciliacion_documental.nomina_registrar_pago_activo(self.db,**datos)
+
+    def test_entrega_autorizada_cuadra_y_no_admite_reintento(self):
+        asiento=self.contabilizar()
+        fila=self.db.execute('SELECT SUM(debe),SUM(haber) FROM libro_diario WHERE asiento_id=?',(asiento,)).fetchone()
+        self.assertEqual(tuple(fila),(100,100))
+        with self.assertRaises(ValueError):self.contabilizar()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM libro_diario').fetchone()[0],2)
+
+    def test_trabajador_ajeno_no_se_consulta_ni_contabiliza(self):
+        with patch.dict(vars(conciliacion_documental),{'sgci_rrhh_ids_autorizados':lambda *a:{2}}):
+            with self.assertRaises(ValueError):self.contabilizar()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM libro_diario').fetchone()[0],0)
+
+    def test_tabla_no_permitida_se_rechaza(self):
+        with self.assertRaises(ValueError):self.contabilizar(tabla='libro_diario')
+
+    def test_datos_desactualizados_o_cuenta_incorrecta_se_rechazan(self):
+        for cambio in ({'monto':101},{'fecha':'2026-11-11'},{'cuenta_activo':'1.1.07.02'},{'cuenta_banco':'inexistente'}):
+            with self.subTest(cambio=cambio),self.assertRaises(ValueError):self.contabilizar(**cambio)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM libro_diario').fetchone()[0],0)
+
+    def test_periodo_cerrado_bloquea_salida(self):
+        with patch.dict(vars(conciliacion_documental),{'periodo_cerrado':lambda *a:True}):
+            with self.assertRaises(ValueError):self.contabilizar()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM libro_diario').fetchone()[0],0)
+
+    def test_error_de_auditoria_revierte_asiento_y_estado(self):
+        self.db.execute("CREATE TRIGGER fallo_auditoria BEFORE INSERT ON auditoria BEGIN SELECT RAISE(ABORT,'Fallo de prueba'); END")
+        self.db.commit()
+        with self.assertRaises(sqlite3.IntegrityError):self.contabilizar()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM libro_diario').fetchone()[0],0)
+        self.assertEqual(self.db.execute('SELECT contabilizado FROM nomina_anticipos WHERE id=1').fetchone()[0],0)
+
+    def test_prestamo_usa_cuenta_y_monto_del_registro(self):
+        self.db.execute("INSERT INTO nomina_prestamos(id,trabajador_id,fecha,monto_original) VALUES(1,1,'2026-11-10',100)")
+        self.db.commit()
+        self.contabilizar(tabla='nomina_prestamos',cuenta_activo='1.1.07.02')
+        self.assertEqual(self.db.execute('SELECT contabilizado FROM nomina_prestamos WHERE id=1').fetchone()[0],1)
 
 
 class TestAuxiliaresAutorizados(unittest.TestCase):
