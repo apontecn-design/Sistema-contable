@@ -1,5 +1,6 @@
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
 def sgci_conc_esquema(conn):
+    transaccion_previa = conn.in_transaction
     conn.execute("""CREATE TABLE IF NOT EXISTS sgci_compensaciones_documentos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         modulo TEXT NOT NULL CHECK(modulo IN ('VENTAS','COMPRAS')),
@@ -35,9 +36,43 @@ def sgci_conc_esquema(conn):
         UNIQUE(saldo_id,pago_id)
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_sgci_comp_doc ON sgci_compensaciones_documentos(modulo,tercero_id,anulada)")
-    conn.commit()
+    if not transaccion_previa:
+        conn.commit()
+
+
+def sgci_autorizar_auxiliar(conn, modulo, accion='ver', pagos=False):
+    """Validar el auxiliar antes de consultar datos o ejecutar migraciones."""
+    if modulo not in ('VENTAS','COMPRAS'):
+        raise ValueError('Módulo auxiliar inválido.')
+    codigo = 'cxc' if modulo == 'VENTAS' else 'cxp'
+    sub = ('Pagos de clientes' if modulo == 'VENTAS' else 'Pagos de proveedores') if pagos else (
+        'Clientes y estados de cuenta' if modulo == 'VENTAS' else 'Proveedores y estados de cuenta')
+    sgci_autorizar_operacion(conn,codigo,accion,sub)
+
+
+def _sgci_monto_auxiliar(valor):
+    from decimal import Decimal as _D, InvalidOperation as _Invalido
+    try:
+        monto = _D(str(valor))
+        if not monto.is_finite() or monto <= 0 or monto != monto.to_integral_value():
+            raise ValueError('El monto debe ser un entero positivo en CLP.')
+    except (_Invalido,TypeError):
+        raise ValueError('El monto debe ser un entero positivo en CLP.') from None
+    return int(monto)
+
+
+def _sgci_auditar_auxiliar(conn, accion, detalle):
+    # Participa en la misma transacción: un error de auditoría revierte el cambio.
+    conn.execute('INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)',
+        (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),accion,detalle))
+
+
+def _sgci_exigir_sin_transaccion(conn):
+    if conn.in_transaction:
+        raise RuntimeError('Guarda o revierte la operación pendiente antes de modificar el auxiliar.')
 
 def sgci_nc_disponibles(conn, modulo, tercero_id):
+    sgci_autorizar_auxiliar(conn,modulo)
     sgci_conc_esquema(conn)
     tabla, tercero = ('ventas','cliente_id') if modulo=='VENTAS' else ('compras','proveedor_id')
     return pd.read_sql_query(f"""SELECT d.id,d.fecha,d.tipo_doc,d.folio,ABS(d.monto_total) total,
@@ -51,6 +86,7 @@ def sgci_nc_disponibles(conn, modulo, tercero_id):
        ORDER BY d.fecha,d.id""",conn,params=(modulo,modulo,int(tercero_id),modulo))
 
 def sgci_facturas_compensables(conn, modulo, tercero_id):
+    sgci_autorizar_auxiliar(conn,modulo)
     sgci_conc_esquema(conn)
     tabla, tercero, apps, docid = ('ventas','cliente_id','aplicaciones_clientes','venta_id') if modulo=='VENTAS' else ('compras','proveedor_id','aplicaciones_proveedores','compra_id')
     return pd.read_sql_query(f"""SELECT d.id,d.fecha,d.tipo_doc,d.folio,ABS(d.monto_total) total,
@@ -67,12 +103,13 @@ def sgci_facturas_compensables(conn, modulo, tercero_id):
        ORDER BY d.fecha,d.id""",conn,params=(modulo,modulo,int(tercero_id),modulo))
 
 def sgci_compensar_nc(conn,modulo,tercero_id,nc_id,factura_id,monto,observacion=''):
+    sgci_autorizar_auxiliar(conn,modulo,'editar')
+    _sgci_exigir_sin_transaccion(conn)
     sgci_conc_esquema(conn)
-    if modulo not in ('VENTAS','COMPRAS'): raise ValueError('Módulo inválido.')
-    monto=int(monto)
-    if monto<=0: raise ValueError('El monto debe ser positivo.')
+    monto=_sgci_monto_auxiliar(monto)
     if int(nc_id)==int(factura_id): raise ValueError('Los documentos deben ser diferentes.')
     with conn:
+        conn.execute('BEGIN IMMEDIATE')
         nc=sgci_nc_disponibles(conn,modulo,tercero_id)
         fac=sgci_facturas_compensables(conn,modulo,tercero_id)
         nc=nc[nc.id==int(nc_id)];fac=fac[fac.id==int(factura_id)]
@@ -84,20 +121,31 @@ def sgci_compensar_nc(conn,modulo,tercero_id,nc_id,factura_id,monto,observacion=
         conn.execute("""INSERT INTO sgci_compensaciones_documentos
             (modulo,tercero_id,documento_credito_id,documento_factura_id,monto,fecha,observacion)
             VALUES(?,?,?,?,?,?,?)""",(modulo,int(tercero_id),int(nc_id),int(factura_id),monto,fecha,observacion.strip()))
-    registrar_auditoria(conn,'COMPENSACION DOCUMENTAL',f'{modulo} tercero {tercero_id}: NC {nc_id} -> factura {factura_id} por {monto}')
+        _sgci_auditar_auxiliar(conn,'COMPENSACION DOCUMENTAL',f'{modulo} tercero {tercero_id}: NC {nc_id} -> factura {factura_id} por {monto}')
 
 def sgci_anular_compensacion(conn,identificador,motivo):
+    permitidos = [modulo for modulo,codigo,sub in (
+        ('VENTAS','cxc','Clientes y estados de cuenta'),('COMPRAS','cxp','Proveedores y estados de cuenta'))
+        if sgci_puede_submodulo(conn,codigo,sub,'anular')]
+    if not permitidos:
+        raise PermissionError('No tienes autorización para revertir compensaciones.')
+    _sgci_exigir_sin_transaccion(conn)
     sgci_conc_esquema(conn)
     if not motivo.strip(): raise ValueError('Indica el motivo de reversión.')
     with conn:
-        fila=conn.execute('SELECT * FROM sgci_compensaciones_documentos WHERE id=? AND anulada=0',(int(identificador),)).fetchone()
+        conn.execute('BEGIN IMMEDIATE')
+        marcas=','.join('?' for _ in permitidos)
+        fila=conn.execute(f'SELECT * FROM sgci_compensaciones_documentos WHERE id=? AND anulada=0 AND modulo IN ({marcas})',
+                          (int(identificador),*permitidos)).fetchone()
         if not fila: raise ValueError('Compensación inexistente o ya anulada.')
+        sgci_autorizar_auxiliar(conn,fila['modulo'],'anular')
         if periodo_cerrado(conn,date.today().isoformat()): raise ValueError('Período actual cerrado.')
         conn.execute('UPDATE sgci_compensaciones_documentos SET anulada=1,anulada_en=?,motivo_anulacion=? WHERE id=?',
                      (datetime.now().isoformat(timespec='seconds'),motivo.strip(),int(identificador)))
-    registrar_auditoria(conn,'REVERSO COMPENSACION',f'ID {identificador}: {motivo.strip()}')
+        _sgci_auditar_auxiliar(conn,'REVERSO COMPENSACION',f'ID {identificador}: {motivo.strip()}')
 
 def sgci_saldos_ejercicio_disponibles(conn,modulo,tercero_id):
+    sgci_autorizar_auxiliar(conn,modulo)
     sgci_conc_esquema(conn)
     return pd.read_sql_query("""SELECT s.id,s.ejercicio,s.referencia,s.monto,
         COALESCE((SELECT SUM(a.monto) FROM sgci_aplicaciones_ejercicios a WHERE a.saldo_id=s.id),0) aplicado,
@@ -107,21 +155,30 @@ def sgci_saldos_ejercicio_disponibles(conn,modulo,tercero_id):
         ORDER BY s.ejercicio,s.id""",conn,params=(modulo,int(tercero_id)))
 
 def sgci_registrar_saldo_ejercicio(conn,modulo,tercero_id,ejercicio,referencia,monto):
+    sgci_autorizar_auxiliar(conn,modulo,'crear')
+    _sgci_exigir_sin_transaccion(conn)
     sgci_conc_esquema(conn)
-    if modulo not in ('VENTAS','COMPRAS') or not referencia.strip() or int(monto)<=0:
+    monto=_sgci_monto_auxiliar(monto)
+    if not referencia.strip():
         raise ValueError('Completa un ejercicio, referencia y monto válido.')
     if int(ejercicio)>=date.today().year: raise ValueError('El ejercicio debe ser anterior al actual.')
     # El asiento de apertura debe existir previamente: esta tabla no crea contabilidad.
     with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        tabla = 'clientes' if modulo=='VENTAS' else 'proveedores'
+        if not conn.execute(f'SELECT 1 FROM {tabla} WHERE id=?',(int(tercero_id),)).fetchone():
+            raise ValueError('El tercero no existe en el auxiliar seleccionado.')
         conn.execute("""INSERT INTO sgci_saldos_ejercicios(modulo,tercero_id,ejercicio,referencia,monto,fecha)
                         VALUES(?,?,?,?,?,?)""",(modulo,int(tercero_id),int(ejercicio),referencia.strip(),int(monto),date.today().isoformat()))
-    registrar_auditoria(conn,'SALDO EJERCICIO',f'{modulo} tercero {tercero_id}, {ejercicio}, {referencia}, {monto}')
+        _sgci_auditar_auxiliar(conn,'SALDO EJERCICIO',f'{modulo} tercero {tercero_id}, {ejercicio}, {referencia}, {monto}')
 
 def sgci_aplicar_pago_ejercicio(conn,modulo,tercero_id,saldo_id,pago_id,monto):
+    sgci_autorizar_auxiliar(conn,modulo,'editar',pagos=True)
+    _sgci_exigir_sin_transaccion(conn)
     sgci_conc_esquema(conn)
-    monto=int(monto)
-    if monto<=0: raise ValueError('El monto debe ser positivo.')
+    monto=_sgci_monto_auxiliar(monto)
     with conn:
+        conn.execute('BEGIN IMMEDIATE')
         saldo=sgci_saldos_ejercicio_disponibles(conn,modulo,tercero_id)
         saldo=saldo[saldo.id==int(saldo_id)]
         if saldo.empty or monto>int(saldo.iloc[0].disponible): raise ValueError('Saldo histórico insuficiente.')
@@ -144,7 +201,7 @@ def sgci_aplicar_pago_ejercicio(conn,modulo,tercero_id,saldo_id,pago_id,monto):
         if periodo_cerrado(conn,date.today().isoformat()): raise ValueError('Período actual cerrado.')
         conn.execute('INSERT INTO sgci_aplicaciones_ejercicios(saldo_id,pago_id,monto,fecha) VALUES(?,?,?,?)',
                      (int(saldo_id),int(pago_id),monto,date.today().isoformat()))
-    registrar_auditoria(conn,'APLICACION EJERCICIO',f'{modulo} saldo {saldo_id}, pago {pago_id}, {monto}')
+        _sgci_auditar_auxiliar(conn,'APLICACION EJERCICIO',f'{modulo} saldo {saldo_id}, pago {pago_id}, {monto}')
 
 def abonos_disponibles_cliente(conn, cliente_id):
     """Anticipos/cobros recibidos todavía disponibles para aplicar a facturas."""

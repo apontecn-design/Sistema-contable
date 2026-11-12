@@ -1,4 +1,4 @@
-# CONTEM V1.0 — candidata de entrega, 11 de noviembre de 2026
+# CONTEM V1.0 — candidata de entrega, 12 de noviembre de 2026
 
 **Estado: candidata con avances funcionales verificados; todavía no es una entrega final certificada.** El acceso empresarial general de empleados y la validación real de staging siguen pendientes. Se conserva la barrera de empleados, no se modifica `main` y no se publica producción.
 
@@ -13,7 +13,7 @@
 7. **RR. HH. y nómina:** se conserva la implementación existente. Se refuerzan exportación por trabajador y contabilización general por alcance. Se mantiene el resultado de auditoría de nueve períodos históricos cuadrados. No se afirma haber probado sesiones reales de empleados en Supabase.
 8. **Históricos:** las 57 tablas de negocio conservan sus columnas y registros originales después de la navegación y migraciones de esta candidata. Solo se añaden estructuras necesarias, como la tabla de adjuntos de Tesorería. La copia original del propietario queda fuera de las pruebas de escritura y fuera de GitHub.
 9. **Identidad:** se sustituyen referencias visibles SGCI en pantallas, subtítulos de informes y exportación de historial por CONTEM. Se preservan nombres técnicos de tablas, variables, claves de widgets y archivos de compatibilidad.
-10. **Pruebas integrales:** 324 pruebas locales correctas, sin omisiones, ejecutadas con una copia privada del respaldo y datos sintéticos. Se repite navegación real por 34 pantallas con AppTest y comparación histórica sin modificaciones. Estas pruebas no sustituyen la validación funcional en Render ni las sesiones reales de Supabase.
+10. **Pruebas integrales:** 336 pruebas locales correctas, sin omisiones, ejecutadas con una copia privada del respaldo y datos sintéticos. Se repite navegación real por 34 pantallas con AppTest y comparación histórica sin modificaciones. Estas pruebas no sustituyen la validación funcional en Render ni las sesiones reales de Supabase.
 11. **Preparación de producción:** respaldo descargable consistente mediante SQLite Backup API, incluido WAL; comprobación de integridad; ensayo de recuperación que compara también el contenido; preflight de configuración productiva sin mostrar secretos; procedimiento de despliegue, persistencia, recuperación y reversión en `CONTEM_OPERACION_PRODUCCION.md`. La ejecución operativa y aprobación de publicación siguen pendientes.
 
 ## Bloqueantes para declarar la entrega definitiva
@@ -27,3 +27,9 @@
 ## Referencia contable del formato
 
 La estructura y tratamiento de signos se contrastaron con las [instrucciones del balance de ocho columnas del SII](https://www.sii.cl/declaraciones_juradas/suplemento/2012/form1847.htm) y el [formato publicado por SUSESO](https://www.suseso.gob.cl/621/w3-propertyvalue-754069.html). Se implementa un reporte contable; no se genera ni presenta automáticamente una declaración jurada tributaria.
+
+## Revisión del 12 de noviembre
+
+Se añaden doce pruebas de auxiliares: autorización antes de consultas, separación entre Compras y Ventas, anulación con filtro de módulo, montos CLP sin truncamiento, auditoría en la misma transacción, reversión ante fallos y dos sesiones concurrentes que no pueden consumir dos veces el saldo. La inicialización de tablas respeta transacciones pendientes del llamador. Se repiten las 34 pantallas y la comparación de 57 tablas históricas sin cambios.
+
+GitHub mantiene en cola las ejecuciones del commit 0544b7c; el intento de cancelación del propietario fue rechazado por GitHub. Las pruebas locales no sustituyen esa validación. No se modificaron variables ni se desplegó esta candidata en Render.

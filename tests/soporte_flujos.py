@@ -1,5 +1,5 @@
 """Dependencias reales de servicios y SQLite sintético; sin red ni Streamlit."""
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal, ROUND_HALF_UP
 import sqlite3
 import re
@@ -15,11 +15,13 @@ def preparar(test):
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA foreign_keys=ON')
     test.addCleanup(db.close)
-    simbolos = {'pd':pd, 're':re, 'datetime':datetime, 'Decimal':Decimal,'ROUND_HALF_UP':ROUND_HALF_UP,
+    simbolos = {'pd':pd, 're':re, 'datetime':datetime, 'date':date, 'Decimal':Decimal,'ROUND_HALF_UP':ROUND_HALF_UP,
                 'ROLES':contabilidad.ROLES, 'Plan':plan_cuentas.Plan,
                 'DOC_NOTA_CREDITO':utilidades.DOC_NOTA_CREDITO,
                 'agregar_columna':esquema.agregar_columna,
                 'sgci_autorizar_operacion':usuarios.sgci_autorizar_operacion,
+                'sgci_puede_submodulo':usuarios.sgci_puede_submodulo,
+                'tabla_existe':esquema.tabla_existe,
                 'sgci_identidad_actual':lambda:'finanzas@example.com',
                 'periodo_cerrado':contabilidad_reportes.periodo_cerrado,
                 'siguiente_asiento':reglas_contables.siguiente_asiento,
