@@ -1120,6 +1120,234 @@ def nomina_asiento_linea(conn, fecha, codigo, debe, haber, glosa, asiento_id, or
                  (fecha,nombre,float(debe or 0),float(haber or 0),glosa,codigo,asiento_id,None,origen))
 
 
+def _rrhh_autorizar_trabajador(conn, trabajador_id, accion, submodulo):
+    sgci_autorizar_operacion(conn,'nomina',accion,submodulo)
+    trabajador_id=_sgci_monto_auxiliar(trabajador_id)
+    ids=sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual())
+    if ids is not None and trabajador_id not in ids:
+        raise PermissionError('El trabajador está fuera de tu alcance de Recursos Humanos.')
+    if not conn.execute('SELECT 1 FROM nomina_trabajadores WHERE id=?',(trabajador_id,)).fetchone():
+        raise ValueError('Trabajador no encontrado.')
+    return trabajador_id
+
+
+RRHH_CAMPOS_FICHA=('rut','nombre','fecha_ingreso','cargo','tipo_contrato','sueldo_base','gratificacion_tipo','gratificacion_valor','afp','salud_tipo','isapre','salud_modalidad','salud_valor','afc','anticipo_quincenal','anticipo_porcentaje','banco','tipo_cuenta','numero_cuenta','activo','fecha_creacion')
+
+
+def nomina_guardar_ficha(conn, valores, vigente_desde, trabajador_id=None):
+    accion='crear' if trabajador_id is None else 'editar'
+    sgci_autorizar_operacion(conn,'nomina',accion,'Trabajadores')
+    if len(valores)!=len(RRHH_CAMPOS_FICHA):
+        raise ValueError('Ficha incompleta.')
+    datos=dict(zip(RRHH_CAMPOS_FICHA,valores))
+    datos['rut']=str(datos['rut'] or '').strip()
+    datos['nombre']=str(datos['nombre'] or '').strip()
+    if not datos['rut'] or not datos['nombre']:
+        raise ValueError('RUT y nombre son obligatorios.')
+    datos['fecha_ingreso']=_nomina_validar_fecha_movimiento(datos['fecha_ingreso'])
+    vigente_desde=_nomina_validar_fecha_movimiento(vigente_desde)
+    for campo in ('sueldo_base','gratificacion_valor','salud_valor','anticipo_porcentaje'):
+        try:
+            valor=Decimal(str(datos[campo]))
+            if not valor.is_finite() or valor<0 or not Decimal(str(float(valor))).is_finite():
+                raise ValueError('Los importes y porcentajes deben ser finitos y no negativos.')
+        except (ArithmeticError,TypeError):
+            raise ValueError('Valor numérico inválido en la ficha.') from None
+    if Decimal(str(datos['anticipo_porcentaje']))>100:
+        raise ValueError('El porcentaje de anticipo debe estar entre 0 y 100.')
+    if any(datos[c] not in (0,1) for c in ('afc','anticipo_quincenal','activo')):
+        raise ValueError('Estado de ficha inválido.')
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn,'nomina',accion,'Trabajadores')
+        if trabajador_id is None:
+            if sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual()) is not None:
+                raise PermissionError('Crear trabajadores requiere alcance autorizado para todos los trabajadores.')
+            datos['fecha_creacion']=datetime.now().isoformat(timespec='seconds')
+        else:
+            trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,'editar','Trabajadores')
+            datos['fecha_creacion']=conn.execute('SELECT fecha_creacion FROM nomina_trabajadores WHERE id=?',(trabajador_id,)).fetchone()[0]
+        campos_hist=('sueldo_base','gratificacion_tipo','gratificacion_valor','afp','salud_tipo','isapre','salud_modalidad','salud_valor')
+        condiciones=tuple(datos[c] for c in campos_hist)
+        anterior=conn.execute('SELECT '+','.join(campos_hist)+' FROM nomina_historial_condiciones WHERE trabajador_id=? AND vigente_desde=?',(trabajador_id,vigente_desde)).fetchone() if trabajador_id is not None else None
+        cambia_historia=anterior is None or tuple(anterior)!=condiciones
+        if cambia_historia:
+            if periodo_cerrado(conn,vigente_desde):
+                raise ValueError('La vigencia corresponde a un período contable cerrado.')
+            if trabajador_id is not None and conn.execute("SELECT 1 FROM nomina_liquidaciones WHERE trabajador_id=? AND periodo>=? AND estado IN ('CONTABILIZADO','CERRADO') LIMIT 1",(trabajador_id,vigente_desde[:7])).fetchone():
+                raise ValueError('Las condiciones afectan liquidaciones ya contabilizadas o cerradas.')
+        if trabajador_id is None:
+            columnas=','.join(RRHH_CAMPOS_FICHA)
+            trabajador_id=conn.execute('INSERT INTO nomina_trabajadores('+columnas+') VALUES('+','.join('?' for _ in RRHH_CAMPOS_FICHA)+')',tuple(datos[c] for c in RRHH_CAMPOS_FICHA)).lastrowid
+        else:
+            conn.execute('UPDATE nomina_trabajadores SET '+','.join(c+'=?' for c in RRHH_CAMPOS_FICHA)+' WHERE id=?',tuple(datos[c] for c in RRHH_CAMPOS_FICHA)+(trabajador_id,))
+        if cambia_historia:
+            conn.execute('INSERT INTO nomina_historial_condiciones(trabajador_id,vigente_desde,'+','.join(campos_hist)+',observacion,fecha_registro) VALUES('+','.join('?' for _ in range(12))+') ON CONFLICT(trabajador_id,vigente_desde) DO UPDATE SET '+','.join(c+'=excluded.'+c for c in campos_hist)+',fecha_registro=excluded.fecha_registro',
+                (trabajador_id,vigente_desde)+condiciones+('Cambio desde ficha',datetime.now().isoformat(timespec='seconds')))
+        _sgci_auditar_auxiliar(conn,'CREAR FICHA RRHH' if accion=='crear' else 'EDITAR FICHA RRHH',f'trabajador:{trabajador_id}; vigencia:{vigente_desde}')
+    return trabajador_id
+
+
+def _rrhh_dias_positivos(dias):
+    try:
+        valor=Decimal(str(dias))
+        if not valor.is_finite() or valor<=0 or not Decimal(str(float(valor))).is_finite():
+            raise ValueError('La cantidad de días debe ser finita y mayor que cero.')
+    except (ArithmeticError,TypeError):
+        raise ValueError('Cantidad de días inválida.') from None
+    return float(valor)
+
+
+def rrhh_registrar_vacaciones(conn, trabajador_id, fecha, tipo, dias, observacion=''):
+    sgci_autorizar_operacion(conn,'nomina','crear','Vacaciones')
+    if tipo not in ('ASIGNACION','DESCUENTO','AJUSTE'):
+        raise ValueError('Tipo de movimiento de vacaciones inválido.')
+    fecha=_nomina_validar_fecha_movimiento(fecha);dias=_rrhh_dias_positivos(dias)
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,'crear','Vacaciones')
+        saldo=conn.execute("SELECT COALESCE(SUM(CASE WHEN tipo='DESCUENTO' THEN -dias ELSE dias END),0) FROM rrhh_vacaciones_movimientos WHERE trabajador_id=?",(trabajador_id,)).fetchone()[0]
+        if tipo=='DESCUENTO' and Decimal(str(dias))>Decimal(str(saldo)):
+            raise ValueError('El descuento supera el saldo disponible.')
+        nuevo=conn.execute('INSERT INTO rrhh_vacaciones_movimientos(trabajador_id,fecha,tipo,dias,observacion,creado_en) VALUES(?,?,?,?,?,?)',(trabajador_id,fecha,tipo,dias,str(observacion or ''),datetime.now().isoformat(timespec='seconds'))).lastrowid
+        _sgci_auditar_auxiliar(conn,'MOVIMIENTO VACACIONES',f'movimiento:{nuevo}; trabajador:{trabajador_id}; tipo:{tipo}')
+    return nuevo
+
+
+def rrhh_solicitar_vacaciones(conn, trabajador_id, desde, hasta, dias, observacion=''):
+    sgci_autorizar_operacion(conn,'nomina','crear','Vacaciones')
+    desde=_nomina_validar_fecha_movimiento(desde);hasta=_nomina_validar_fecha_movimiento(hasta)
+    dias=_rrhh_dias_positivos(dias)
+    if hasta<desde:
+        raise ValueError('La fecha final no puede ser anterior a la inicial.')
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,'crear','Vacaciones')
+        nuevo=conn.execute("INSERT INTO rrhh_vacaciones_solicitudes(trabajador_id,fecha_solicitud,desde,hasta,dias_solicitados,estado,observacion,creado_en) VALUES(?,?,?,?,?,'PENDIENTE',?,?)",(trabajador_id,date.today().isoformat(),desde,hasta,dias,str(observacion or ''),datetime.now().isoformat(timespec='seconds'))).lastrowid
+        _sgci_auditar_auxiliar(conn,'SOLICITAR VACACIONES',f'solicitud:{nuevo}; trabajador:{trabajador_id}')
+    return nuevo
+
+
+def rrhh_resolver_vacaciones(conn, trabajador_id, solicitud_id, decision, responsable, observacion=''):
+    if decision not in ('APROBADA','RECHAZADA','ANULADA'):
+        raise ValueError('Decisión de vacaciones inválida.')
+    accion='anular' if decision=='ANULADA' else 'aprobar'
+    sgci_autorizar_operacion(conn,'nomina',accion,'Vacaciones')
+    if not str(responsable or '').strip():
+        raise ValueError('Indica quién resuelve.')
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,accion,'Vacaciones')
+        cur=conn.execute("UPDATE rrhh_vacaciones_solicitudes SET estado=?,revisado_por=?,fecha_revision=?,observacion_revision=? WHERE id=? AND trabajador_id=? AND estado='PENDIENTE'",(decision,str(responsable).strip(),datetime.now().isoformat(timespec='seconds'),str(observacion or ''),int(solicitud_id),trabajador_id))
+        if cur.rowcount!=1:
+            raise ValueError('La solicitud no está disponible o ya no está pendiente.')
+        _sgci_auditar_auxiliar(conn,'RESOLVER VACACIONES',f'solicitud:{solicitud_id}; trabajador:{trabajador_id}; decisión:{decision}')
+
+
+def rrhh_exportar_vacaciones(conn, trabajador_id):
+    _rrhh_autorizar_trabajador(conn,trabajador_id,'ver','Vacaciones')
+    _rrhh_autorizar_trabajador(conn,trabajador_id,'exportar','Vacaciones')
+    datos=pd.read_sql_query('SELECT id,fecha,tipo,dias,observacion FROM rrhh_vacaciones_movimientos WHERE trabajador_id=? ORDER BY fecha DESC,id DESC',conn,params=(int(trabajador_id),))
+    return datos.to_csv(index=False,sep=';').encode('utf-8-sig')
+
+
+def rrhh_adjuntar_documento(conn, trabajador_id, tipo, nombre_archivo, fecha, observacion, contenido):
+    sgci_autorizar_operacion(conn,'nomina','editar','Trabajadores')
+    if tipo not in ('Contrato de trabajo','Anexo de contrato','Otro documento laboral'):
+        raise ValueError('Tipo de documento laboral inválido.')
+    if not isinstance(contenido,(bytes,bytearray,memoryview)) or len(contenido)>8*1024*1024 or not bytes(contenido).startswith(b'%PDF-'):
+        raise ValueError('El archivo debe ser un PDF válido de hasta 8 MB.')
+    nombre_archivo=str(nombre_archivo or '').replace('\\','/').rsplit('/',1)[-1]
+    if not nombre_archivo or not nombre_archivo.lower().endswith('.pdf'):
+        raise ValueError('Nombre de archivo PDF inválido.')
+    fecha=_nomina_validar_fecha_movimiento(fecha)
+    contenido=bytes(contenido)
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,'editar','Trabajadores')
+        nuevo=conn.execute('INSERT INTO rrhh_documentos(trabajador_id,tipo,nombre_archivo,fecha_documento,observacion,contenido,sha256,creado_en) VALUES(?,?,?,?,?,?,?,?)',
+            (trabajador_id,tipo,nombre_archivo,fecha,str(observacion or ''),contenido,sha256(contenido).hexdigest(),datetime.now().isoformat(timespec='seconds'))).lastrowid
+        _sgci_auditar_auxiliar(conn,'ADJUNTAR DOCUMENTO RRHH',f'documento:{nuevo}; trabajador:{trabajador_id}')
+    return nuevo
+
+
+def rrhh_descargar_documento(conn, trabajador_id, documento_id):
+    _rrhh_autorizar_trabajador(conn,trabajador_id,'ver','Trabajadores')
+    _rrhh_autorizar_trabajador(conn,trabajador_id,'exportar','Trabajadores')
+    doc=conn.execute('SELECT contenido,nombre_archivo FROM rrhh_documentos WHERE id=? AND trabajador_id=? AND activo=1',(int(documento_id),int(trabajador_id))).fetchone()
+    return dict(doc) if doc is not None else None
+
+
+def rrhh_listar_trabajadores(conn, submodulo='Trabajadores', activos=False):
+    proyecciones={'Trabajadores':'*','Vacaciones':'id,rut,nombre',
+                  'Anticipos y préstamos':'id,rut,nombre,sueldo_base,anticipo_porcentaje','Liquidación mensual':'*'}
+    if submodulo not in proyecciones:
+        raise ValueError('Consulta de trabajadores inválida.')
+    sgci_autorizar_operacion(conn,'nomina','ver',submodulo)
+    ids=sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual())
+    filtros=[];parametros=[]
+    if activos:filtros.append('activo=1')
+    if ids is not None:
+        filtros.append('id IN ('+','.join('?' for _ in ids)+')' if ids else '0')
+        parametros.extend(sorted(ids))
+    sql='SELECT '+proyecciones[submodulo]+' FROM nomina_trabajadores'
+    if filtros:sql+=' WHERE '+' AND '.join(filtros)
+    return pd.read_sql_query(sql+' ORDER BY activo DESC,nombre',conn,params=parametros)
+
+
+def rrhh_obtener_ficha(conn, trabajador_id):
+    trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,'ver','Trabajadores')
+    return conn.execute('SELECT * FROM nomina_trabajadores WHERE id=?',(trabajador_id,)).fetchone()
+
+
+def rrhh_historial_condiciones(conn, trabajador_id):
+    trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,'ver','Trabajadores')
+    return pd.read_sql_query('SELECT vigente_desde,sueldo_base,afp,salud_tipo,isapre,salud_modalidad,salud_valor FROM nomina_historial_condiciones WHERE trabajador_id=? ORDER BY vigente_desde DESC',conn,params=(trabajador_id,))
+
+
+def rrhh_listar_documentos(conn, trabajador_id):
+    trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,'ver','Trabajadores')
+    return pd.read_sql_query('SELECT id,tipo,nombre_archivo,fecha_documento,observacion,creado_en FROM rrhh_documentos WHERE trabajador_id=? AND activo=1 ORDER BY id DESC',conn,params=(trabajador_id,))
+
+
+def rrhh_vacaciones_datos(conn, trabajador_id, tipo='movimientos'):
+    consultas={
+        'movimientos':'SELECT id,fecha,tipo,dias,observacion FROM rrhh_vacaciones_movimientos WHERE trabajador_id=? ORDER BY fecha DESC,id DESC',
+        'solicitudes':'SELECT id,fecha_solicitud,desde,hasta,dias_solicitados,estado,observacion,revisado_por,fecha_revision FROM rrhh_vacaciones_solicitudes WHERE trabajador_id=? ORDER BY id DESC'}
+    if tipo not in consultas:raise ValueError('Consulta de vacaciones inválida.')
+    trabajador_id=_rrhh_autorizar_trabajador(conn,trabajador_id,'ver','Vacaciones')
+    return pd.read_sql_query(consultas[tipo],conn,params=(trabajador_id,))
+
+
+def rrhh_listar_movimientos_nomina(conn, tipo):
+    consultas={
+        'anticipos':("SELECT a.id,t.nombre,a.periodo,a.fecha,a.monto,a.contabilizado,a.asiento_id FROM nomina_anticipos a JOIN nomina_trabajadores t ON t.id=a.trabajador_id WHERE COALESCE(a.anulado,0)=0",'a'),
+        'prestamos':("SELECT p.id,t.nombre,p.fecha,p.monto_original,p.numero_cuotas,p.cuota,p.saldo,p.estado,p.contabilizado,p.asiento_id FROM nomina_prestamos p JOIN nomina_trabajadores t ON t.id=p.trabajador_id WHERE 1=1",'p')}
+    if tipo not in consultas:raise ValueError('Consulta de movimientos inválida.')
+    sgci_autorizar_operacion(conn,'nomina','ver','Anticipos y préstamos')
+    ids=sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual())
+    sql,alias=consultas[tipo];parametros=[]
+    if ids is not None:
+        sql+=' AND '+alias+'.trabajador_id IN ('+','.join('?' for _ in ids)+')' if ids else ' AND 0'
+        parametros.extend(sorted(ids))
+    return pd.read_sql_query(sql+' ORDER BY '+alias+'.id DESC',conn,params=parametros)
+
+
+def rrhh_exportar_ficha(conn, trabajador_id):
+    _rrhh_autorizar_trabajador(conn,trabajador_id,'ver','Trabajadores')
+    _rrhh_autorizar_trabajador(conn,trabajador_id,'exportar','Trabajadores')
+    ficha=rrhh_obtener_ficha(conn,trabajador_id)
+    hist=rrhh_historial_condiciones(conn,trabajador_id)
+    return nomina_pdf('Ficha e historial del trabajador',f"{ficha['nombre']} · RUT {ficha['rut']}",
+        ['Vigente desde','Sueldo','AFP','Salud','Isapre','Modalidad','Valor'],
+        [[r.vigente_desde,money(r.sueldo_base),r.afp,r.salud_tipo,r.isapre or '',r.salud_modalidad,r.salud_valor] for r in hist.itertuples()])
+
+
 def _nomina_autorizar_alta_movimiento(conn, trabajador_id):
     sgci_autorizar_operacion(conn, 'nomina', 'crear', 'Anticipos y préstamos')
     trabajador_id = _sgci_monto_auxiliar(trabajador_id)

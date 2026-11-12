@@ -459,7 +459,7 @@ elif menu == "👥 Recursos Humanos":
 
     if nomina_seccion == 'Trabajadores':
         st.subheader("Ficha del trabajador")
-        trabajadores=pd.read_sql_query("SELECT * FROM nomina_trabajadores ORDER BY activo DESC,nombre",conn)
+        trabajadores=rrhh_listar_trabajadores(conn,'Trabajadores')
         if not trabajadores.empty:
             vista=trabajadores[['rut','nombre','cargo','fecha_ingreso','sueldo_base','afp','salud_tipo','banco','activo']].copy(); vista['sueldo_base']=vista['sueldo_base'].map(lambda x: money(x)); vista['activo']=vista['activo'].map({1:'Activo',0:'Inactivo'})
             st.dataframe(vista.rename(columns={'rut':'RUT','nombre':'Nombre','cargo':'Cargo','fecha_ingreso':'Ingreso','sueldo_base':'Sueldo base','afp':'AFP','salud_tipo':'Salud','banco':'Banco','activo':'Estado'}),use_container_width=True,hide_index=True)
@@ -467,7 +467,7 @@ elif menu == "👥 Recursos Humanos":
             st.markdown("### Expediente del trabajador · Vista completa")
             opciones_exp={f"{r.rut} · {r.nombre}":int(r.id) for r in trabajadores.itertuples()}
             sel_exp=st.selectbox("Consultar expediente",list(opciones_exp),key="rrhh_exp_trab")
-            exp=conn.execute("SELECT * FROM nomina_trabajadores WHERE id=?",(opciones_exp[sel_exp],)).fetchone()
+            exp=rrhh_obtener_ficha(conn,opciones_exp[sel_exp])
             with st.container(border=True):
                 st.subheader(exp["nombre"])
                 a,b,c=st.columns(3)
@@ -489,14 +489,15 @@ elif menu == "👥 Recursos Humanos":
                         elif campo=="gratificacion_valor": valor=money(valor)
                         col.text_input(etiqueta,value=str(valor if valor is not None else "—"),disabled=True,key=f"rrhh_exp_{campo}_{exp['id']}")
                 st.markdown("#### Contratos y anexos")
-                docs=pd.read_sql_query("SELECT id,tipo,nombre_archivo,fecha_documento,observacion,creado_en FROM rrhh_documentos WHERE trabajador_id=? AND activo=1 ORDER BY id DESC",conn,params=(exp["id"],))
+                docs=rrhh_listar_documentos(conn,exp["id"])
                 if not docs.empty:
                     st.dataframe(docs,hide_index=True,use_container_width=True)
                     for dr in docs.itertuples():
                         with st.expander(f"{dr.tipo} · {dr.nombre_archivo} · #{dr.id}"):
-                            doc=conn.execute("SELECT contenido FROM rrhh_documentos WHERE id=? AND trabajador_id=? AND activo=1",(dr.id,exp["id"])).fetchone()
-                            if doc:
-                                st.download_button("Descargar PDF",bytes(doc["contenido"]),file_name=dr.nombre_archivo,mime="application/pdf",key=f"rrhh_desc_doc_{dr.id}")
+                            if sgci_puede_submodulo(conn,'nomina','Trabajadores','exportar'):
+                                doc=rrhh_descargar_documento(conn,exp["id"],dr.id)
+                                if doc:
+                                    st.download_button("Descargar PDF",bytes(doc["contenido"]),file_name=dr.nombre_archivo,mime="application/pdf",key=f"rrhh_desc_doc_{dr.id}")
                             st.caption(dr.observacion or "Sin observaciones")
                 with st.expander("➕ Adjuntar contrato o anexo",expanded=False):
                     with st.form(f"rrhh_form_doc_{exp['id']}",clear_on_submit=True):
@@ -513,12 +514,12 @@ elif menu == "👥 Recursos Humanos":
                             if len(contenido)>8*1024*1024 or not contenido.startswith(b"%PDF-"):
                                 st.error("El archivo debe ser un PDF válido de hasta 8 MB.")
                             else:
-                                conn.execute("""INSERT INTO rrhh_documentos
-                                    (trabajador_id,tipo,nombre_archivo,fecha_documento,observacion,contenido,sha256,creado_en)
-                                    VALUES(?,?,?,?,?,?,?,?)""",
-                                    (exp["id"],tipo_doc,os.path.basename(archivo.name),fecha_doc.isoformat(),obs_doc,sqlite3.Binary(contenido),sha256(contenido).hexdigest(),datetime.now().isoformat(timespec="seconds")))
-                                conn.commit()
-                                sgci_exito("Documento incorporado al expediente.");st.rerun()
+                                try:
+                                    rrhh_adjuntar_documento(conn,exp["id"],tipo_doc,archivo.name,fecha_doc.isoformat(),obs_doc,contenido)
+                                except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                                    st.error(str(exc))
+                                else:
+                                    sgci_exito("Documento incorporado al expediente.");st.rerun()
                 st.markdown("#### Últimas liquidaciones")
                 hist_exp=pd.read_sql_query("SELECT periodo,total_haberes,total_descuentos,saldo_pagar,estado FROM nomina_liquidaciones WHERE trabajador_id=? ORDER BY periodo DESC LIMIT 12",conn,params=(exp["id"],))
                 if not hist_exp.empty: st.dataframe(formatear_montos_df(hist_exp),use_container_width=True,hide_index=True)
@@ -547,7 +548,8 @@ elif menu == "👥 Recursos Humanos":
             anticipo=c.checkbox('Anticipo quincenal',value=bool(getattr(edit_row,'anticipo_quincenal',1)) if edit_row else True)
             ant_pct=a.number_input('% anticipo habitual',min_value=0.0,max_value=100.0,value=float(getattr(edit_row,'anticipo_porcentaje',50) or 50) if edit_row else 50.0)
             banco=b.text_input('Banco',value=getattr(edit_row,'banco','') or '' if edit_row else '')
-            tipo_cta=c.selectbox('Tipo de cuenta',['Corriente','Vista','Ahorro','Otra'],index=0)
+            tipos_cta=['Corriente','Vista','Ahorro','Otra']; tipo_cta_actual=getattr(edit_row,'tipo_cuenta','Corriente') if edit_row else 'Corriente'
+            tipo_cta=c.selectbox('Tipo de cuenta',tipos_cta,index=tipos_cta.index(tipo_cta_actual) if tipo_cta_actual in tipos_cta else 0)
             nro=a.text_input('N° de cuenta',value=getattr(edit_row,'numero_cuenta','') or '' if edit_row else '')
             activo=b.checkbox('Trabajador activo',value=bool(getattr(edit_row,'activo',1)) if edit_row else True)
             guardar=st.form_submit_button('💾 Guardar ficha',type='primary')
@@ -555,34 +557,34 @@ elif menu == "👥 Recursos Humanos":
                 if not rut.strip() or not nombre.strip(): st.error('RUT y nombre son obligatorios.')
                 else:
                     vals=(rut.strip(),nombre.strip(),ingreso.isoformat(),cargo.strip(),contrato,clp_round(sueldo),grat_tipo,clp_round(grat),afp,salud_tipo,isapre.strip(),salud_modalidad,salud_valor,int(afc),int(anticipo),ant_pct,banco.strip(),tipo_cta,nro.strip(),int(activo),datetime.now().isoformat(timespec='seconds'))
-                    if edit_row:
-                        conn.execute("UPDATE nomina_trabajadores SET rut=?,nombre=?,fecha_ingreso=?,cargo=?,tipo_contrato=?,sueldo_base=?,gratificacion_tipo=?,gratificacion_valor=?,afp=?,salud_tipo=?,isapre=?,salud_modalidad=?,salud_valor=?,afc=?,anticipo_quincenal=?,anticipo_porcentaje=?,banco=?,tipo_cuenta=?,numero_cuenta=?,activo=?,fecha_creacion=? WHERE id=?",vals+(edit_row.id,))
+                    try:
+                        nomina_guardar_ficha(conn,vals,vigencia_cond.isoformat(),edit_row.id if edit_row else None)
+                    except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                        st.error(str(exc))
                     else:
-                        conn.execute("INSERT INTO nomina_trabajadores(rut,nombre,fecha_ingreso,cargo,tipo_contrato,sueldo_base,gratificacion_tipo,gratificacion_valor,afp,salud_tipo,isapre,salud_modalidad,salud_valor,afc,anticipo_quincenal,anticipo_porcentaje,banco,tipo_cuenta,numero_cuenta,activo,fecha_creacion) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",vals)
-                    trabajador_id = edit_row.id if edit_row else conn.execute("SELECT id FROM nomina_trabajadores WHERE rut=?",(rut.strip(),)).fetchone()[0]
-                    conn.execute("INSERT INTO nomina_historial_condiciones(trabajador_id,vigente_desde,sueldo_base,gratificacion_tipo,gratificacion_valor,afp,salud_tipo,isapre,salud_modalidad,salud_valor,observacion,fecha_registro) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(trabajador_id,vigente_desde) DO UPDATE SET sueldo_base=excluded.sueldo_base,gratificacion_tipo=excluded.gratificacion_tipo,gratificacion_valor=excluded.gratificacion_valor,afp=excluded.afp,salud_tipo=excluded.salud_tipo,isapre=excluded.isapre,salud_modalidad=excluded.salud_modalidad,salud_valor=excluded.salud_valor,fecha_registro=excluded.fecha_registro",(trabajador_id,vigencia_cond.isoformat(),clp_round(sueldo),grat_tipo,clp_round(grat),afp,salud_tipo,isapre.strip(),salud_modalidad,salud_valor,'Cambio desde ficha',datetime.now().isoformat(timespec='seconds')))
-                    conn.commit(); sgci_exito('Ficha y vigencia histórica guardadas.'); st.rerun()
+                        sgci_exito('Ficha y vigencia histórica guardadas.'); st.rerun()
 
         if edit_row:
             st.markdown('#### Historial de sueldo y condiciones previsionales')
-            hc=pd.read_sql_query("SELECT vigente_desde,sueldo_base,afp,salud_tipo,isapre,salud_modalidad,salud_valor FROM nomina_historial_condiciones WHERE trabajador_id=? ORDER BY vigente_desde DESC",conn,params=(edit_row.id,))
+            hc=rrhh_historial_condiciones(conn,edit_row.id)
             if not hc.empty:
                 hc_show=hc.copy(); hc_show['sueldo_base']=hc_show['sueldo_base'].map(money)
                 st.dataframe(hc_show,use_container_width=True,hide_index=True)
-                pdf_ficha=nomina_pdf('Ficha e historial del trabajador',f'{edit_row.nombre} · RUT {edit_row.rut}',['Vigente desde','Sueldo','AFP','Salud','Isapre','Modalidad','Valor'],[[r.vigente_desde,money(r.sueldo_base),r.afp,r.salud_tipo,r.isapre or '',r.salud_modalidad,r.salud_valor] for r in hc.itertuples()])
-                st.download_button('🖨️ PDF ficha / historial',pdf_ficha,f'ficha_{edit_row.rut}.pdf','application/pdf',key='pdf_ficha_nom')
+                if sgci_puede_submodulo(conn,'nomina','Trabajadores','exportar'):
+                    pdf_ficha=rrhh_exportar_ficha(conn,edit_row.id)
+                    st.download_button('🖨️ PDF ficha / historial',pdf_ficha,f'ficha_{edit_row.rut}.pdf','application/pdf',key='pdf_ficha_nom')
 
     if nomina_seccion == 'Vacaciones':
         st.subheader("Vacaciones · Control manual")
         st.caption("Los días se asignan y descuentan manualmente. Las solicitudes y sus aprobaciones NO generan descuentos automáticos ni asientos contables.")
-        tdf=pd.read_sql_query("SELECT id,rut,nombre FROM nomina_trabajadores ORDER BY activo DESC,nombre",conn)
+        tdf=rrhh_listar_trabajadores(conn,'Vacaciones')
         if tdf.empty:
             st.info("Primero registra trabajadores.")
         else:
             tm={f"{r.rut} · {r.nombre}":int(r.id) for r in tdf.itertuples()}
             elegido=st.selectbox("Trabajador",list(tm),key="rrhh_vac_trab")
             tid=tm[elegido]
-            registros=pd.read_sql_query("SELECT id,fecha,tipo,dias,observacion FROM rrhh_vacaciones_movimientos WHERE trabajador_id=? ORDER BY fecha DESC,id DESC",conn,params=(tid,))
+            registros=rrhh_vacaciones_datos(conn,tid)
             asignados=float(registros.loc[registros.tipo=="ASIGNACION","dias"].sum()) if not registros.empty else 0
             ajustes=float(registros.loc[registros.tipo=="AJUSTE","dias"].sum()) if not registros.empty else 0
             usados=float(registros.loc[registros.tipo=="DESCUENTO","dias"].sum()) if not registros.empty else 0
@@ -599,12 +601,12 @@ elif menu == "👥 Recursos Humanos":
                     obs_mov=st.text_input("Motivo / referencia")
                     confirmar_mov=st.form_submit_button("Guardar movimiento")
                 if confirmar_mov:
-                    if tipo_mov=="DESCUENTO" and dias_mov>asignados+ajustes-usados:
-                        st.error("El descuento supera el saldo disponible.")
+                    try:
+                        rrhh_registrar_vacaciones(conn,tid,fecha_mov.isoformat(),tipo_mov,dias_mov,obs_mov)
+                    except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                        st.error(str(exc))
                     else:
-                        conn.execute("INSERT INTO rrhh_vacaciones_movimientos(trabajador_id,fecha,tipo,dias,observacion,creado_en) VALUES(?,?,?,?,?,?)",
-                                     (tid,fecha_mov.isoformat(),tipo_mov,float(dias_mov),obs_mov,datetime.now().isoformat(timespec="seconds")))
-                        conn.commit();sgci_exito("Movimiento de vacaciones registrado.");st.rerun()
+                        sgci_exito("Movimiento de vacaciones registrado.");st.rerun()
             st.markdown("#### Solicitudes")
             with st.expander("➕ Nueva solicitud",expanded=False):
                 with st.form("rrhh_vac_sol_form",clear_on_submit=True):
@@ -615,15 +617,13 @@ elif menu == "👥 Recursos Humanos":
                     obs_sol=st.text_area("Observación")
                     crear_sol=st.form_submit_button("Registrar solicitud")
                 if crear_sol:
-                    if hasta<desde:
-                        st.error("La fecha final no puede ser anterior a la inicial.")
+                    try:
+                        rrhh_solicitar_vacaciones(conn,tid,desde.isoformat(),hasta.isoformat(),dias_sol,obs_sol)
+                    except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                        st.error(str(exc))
                     else:
-                        conn.execute("""INSERT INTO rrhh_vacaciones_solicitudes
-                            (trabajador_id,fecha_solicitud,desde,hasta,dias_solicitados,estado,observacion,creado_en)
-                            VALUES(?,?,?,?,?,'PENDIENTE',?,?)""",
-                            (tid,date.today().isoformat(),desde.isoformat(),hasta.isoformat(),float(dias_sol),obs_sol,datetime.now().isoformat(timespec="seconds")))
-                        conn.commit();sgci_exito("Solicitud registrada como pendiente.");st.rerun()
-            solicitudes=pd.read_sql_query("SELECT id,fecha_solicitud,desde,hasta,dias_solicitados,estado,observacion,revisado_por,fecha_revision FROM rrhh_vacaciones_solicitudes WHERE trabajador_id=? ORDER BY id DESC",conn,params=(tid,))
+                        sgci_exito("Solicitud registrada como pendiente.");st.rerun()
+            solicitudes=rrhh_vacaciones_datos(conn,tid,'solicitudes')
             if not solicitudes.empty:
                 st.dataframe(solicitudes,use_container_width=True,hide_index=True)
                 pendientes=solicitudes[solicitudes.estado=="PENDIENTE"]
@@ -635,23 +635,21 @@ elif menu == "👥 Recursos Humanos":
                         responsable=st.text_input("Responsable de la decisión")
                         obs_revision=st.text_input("Observación de revisión")
                         if st.button("Guardar decisión",key="rrhh_vac_resolver"):
-                            sgci_exigir_permiso(conn, 'nomina', 'aprobar', 'Vacaciones')
-                            if not responsable.strip(): st.error("Indica quién resuelve.")
+                            try:
+                                rrhh_resolver_vacaciones(conn,tid,opciones[elegida],decision,responsable,obs_revision)
+                            except (ValueError,PermissionError,RuntimeError,sqlite3.Error) as exc:
+                                st.error(str(exc))
                             else:
-                                cur=conn.execute("""UPDATE rrhh_vacaciones_solicitudes SET estado=?,revisado_por=?,fecha_revision=?,observacion_revision=?
-                                    WHERE id=? AND trabajador_id=? AND estado='PENDIENTE'""",
-                                    (decision,responsable.strip(),datetime.now().isoformat(timespec="seconds"),obs_revision,opciones[elegida],tid))
-                                conn.commit()
-                                if cur.rowcount: sgci_exito("Estado actualizado. Si se utilizaron días, regístralos manualmente como descuento.");st.rerun()
-                                else: st.warning("La solicitud ya no está pendiente.")
+                                sgci_exito("Estado actualizado. Si se utilizaron días, regístralos manualmente como descuento.");st.rerun()
             st.markdown("#### Historial de días")
             if not registros.empty:
                 st.dataframe(registros,use_container_width=True,hide_index=True)
-                st.download_button("Exportar historial CSV",registros.to_csv(index=False,sep=";").encode("utf-8-sig"),file_name=f"vacaciones_{tid}.csv",mime="text/csv")
+                if sgci_puede_submodulo(conn,'nomina','Vacaciones','exportar'):
+                    st.download_button("Exportar historial CSV",rrhh_exportar_vacaciones(conn,tid),file_name=f"vacaciones_{tid}.csv",mime="text/csv")
             else: st.info("Aún no hay movimientos de días registrados.")
 
     if nomina_seccion == 'Anticipos y préstamos':
-        trab=pd.read_sql_query("SELECT id,rut,nombre,sueldo_base,anticipo_porcentaje FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",conn)
+        trab=rrhh_listar_trabajadores(conn,'Anticipos y préstamos',activos=True)
         if trab.empty: st.info('Primero crea trabajadores activos.')
         else:
             mapa={f"{r.rut} - {r.nombre}":r for r in trab.itertuples()}
@@ -708,8 +706,8 @@ elif menu == "👥 Recursos Humanos":
                     else:
                         sgci_exito('Préstamo y calendario registrados.'); st.rerun()
             st.divider(); st.markdown('#### Movimientos registrados')
-            ants=pd.read_sql_query("SELECT a.id,t.nombre,a.periodo,a.fecha,a.monto,a.contabilizado,a.asiento_id FROM nomina_anticipos a JOIN nomina_trabajadores t ON t.id=a.trabajador_id WHERE COALESCE(a.anulado,0)=0 ORDER BY a.id DESC",conn)
-            pres=pd.read_sql_query("SELECT p.id,t.nombre,p.fecha,p.monto_original,p.numero_cuotas,p.cuota,p.saldo,p.estado,p.contabilizado,p.asiento_id FROM nomina_prestamos p JOIN nomina_trabajadores t ON t.id=p.trabajador_id ORDER BY p.id DESC",conn)
+            ants=rrhh_listar_movimientos_nomina(conn,'anticipos')
+            pres=rrhh_listar_movimientos_nomina(conn,'prestamos')
             st.dataframe(formatear_montos_df(ants),use_container_width=True,hide_index=True); st.dataframe(formatear_montos_df(pres),use_container_width=True,hide_index=True)
             if not ants.empty:
                 pdf_ant=nomina_pdf('Anticipos de remuneraciones','CONTEM',['ID','Trabajador','Período','Fecha','Monto','Contabilizado','Asiento'],[[r.id,r.nombre,r.periodo,r.fecha,money(r.monto),'Sí' if r.contabilizado else 'No',r.asiento_id or ''] for r in ants.itertuples()]); st.download_button('🖨️ PDF anticipos',pdf_ant,'anticipos_remuneraciones.pdf','application/pdf',key='pdf_anticipos')
@@ -731,7 +729,7 @@ elif menu == "👥 Recursos Humanos":
     if nomina_seccion == 'Liquidación mensual':
         st.subheader('Liquidación mensual')
         periodo=st.text_input('Período a liquidar (AAAA-MM)',value=date.today().strftime('%Y-%m'),key='liq_periodo')
-        trab=pd.read_sql_query("SELECT * FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",conn)
+        trab=rrhh_listar_trabajadores(conn,'Liquidación mensual',activos=True)
         if trab.empty: st.info('No hay trabajadores activos.')
         else:
             labels={f"{r.rut} - {r.nombre}":r for r in trab.itertuples()}; lab=st.selectbox('Trabajador',list(labels),key='liq_trab'); tr=labels[lab]
