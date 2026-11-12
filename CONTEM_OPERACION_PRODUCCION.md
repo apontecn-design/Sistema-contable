@@ -54,3 +54,9 @@ Ensayar la restauración en una carpeta aislada, comprobar integridad, claves fo
 [despliegues](https://render.com/docs/deploys),
 [reversión de despliegues y persistencia del disco](https://render.com/docs/rollbacks),
 [comprobaciones de salud](https://render.com/docs/health-checks).
+
+## Persistencia y recuperación comprobadas en pruebas — 12 de noviembre de 2026
+
+Sobre el código 7d19117ba892760514d2640a129919d0b84aef2a se descargaron dos respaldos privados del servicio de pruebas, antes y después de redesplegar la misma versión. Se compararon 57 tablas en ambos sentidos: esquema, contenido y secuencias de identificadores idénticos; integridad correcta y ninguna infracción de claves foráneas. El reinicio terminó live y la pantalla de acceso funcionó sin excepciones.
+
+Ambos respaldos se restauraron en copias locales aisladas mediante SQLite Backup API; se conservaron esquema y contenido y las verificaciones de integridad y relaciones pasaron. Esto comprueba la persistencia observada y el ensayo local de recuperación de esos respaldos. No se restauró la base activa ni se ejecutó recuperación sobre producción. Los archivos privados permanecen fuera del repositorio. La aceptación de perfiles operativos y flujos pendientes sigue abierta.

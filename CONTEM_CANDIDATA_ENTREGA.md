@@ -20,7 +20,7 @@
 
 - Completar auditoría de las rutas pendientes y probar el acceso multiusuario empresarial por módulo/submódulo/acción; conservar alcance de RR. HH. y revocación efectiva. La aplicación mantiene el puente de compatibilidad y dependencias globales: no se declara desacoplada ni segura para habilitar todos los módulos por tener pruebas verdes.
 - Confirmar variables efectivas y aislamiento de datos/autenticación de `Sistema-contable-1`. La integración Render disponible no permite leer las variables guardadas; se solicita al propietario únicamente información no secreta.
-- Completar la validación autenticada en staging, la persistencia después de reinicio y los flujos de negocio. El commit b549432 está desplegado y la sesión anónima real no presenta excepciones.
+- Completar la validación de perfiles operativos autenticados en staging y los flujos de negocio. El commit b549432 está desplegado y la sesión anónima real no presenta excepciones.
 - Cerrar los flujos pendientes de obligaciones previamente contabilizadas, reversos completos y validaciones manuales de negocio.
 - Obtener un respaldo operativo reciente, verificar recuperación y configuración de producción y recibir autorización expresa antes de fusionar o publicar.
 
@@ -55,3 +55,9 @@ Ficha, documentos y vacaciones: servicios autorizados por acción y alcance guar
 Reportes globales y contabilización: servicios comprueban lectura, exportación y alcance global antes de consultar nómina. El historial individual sigue filtrado por trabajador. La vista previa contable requiere permiso y alcance global; la contabilización revalida permisos dentro de la reserva de escritura y guarda auditoría en la misma transacción que asiento y estados. Se elimina la auditoría posterior desde la pantalla para evitar confirmaciones parciales. Doce pruebas nuevas cubren privacidad, revocación, exportación y fallo de auditoría con reversión completa. Suite completa: 457 pruebas; 34 pantallas sin excepciones y 57 tablas históricas sin cambios sobre copia privada.
 
 Validación manual del propietario en pruebas: la segunda cuenta entró al portal personal y abrió el PDF con su nombre y período. Al denegar Exportar en Liquidación mensual, se bloqueó preparar el PDF; al restaurar el valor original volvió a funcionar. Esta prueba confirma esa ruta y la regeneración del documento, no certifica todos los perfiles, registros ajenos ni el acceso empresarial general, que sigue restringido. No se publican identidades ni documentos personales.
+
+## Persistencia y recuperación comprobadas en pruebas — 12 de noviembre de 2026
+
+Sobre el código 7d19117ba892760514d2640a129919d0b84aef2a se descargaron dos respaldos privados del servicio de pruebas, antes y después de redesplegar la misma versión. Se compararon 57 tablas en ambos sentidos: esquema, contenido y secuencias de identificadores idénticos; integridad correcta y ninguna infracción de claves foráneas. El reinicio terminó live y la pantalla de acceso funcionó sin excepciones.
+
+Ambos respaldos se restauraron en copias locales aisladas mediante SQLite Backup API; se conservaron esquema y contenido y las verificaciones de integridad y relaciones pasaron. Esto comprueba la persistencia observada y el ensayo local de recuperación de esos respaldos. No se restauró la base activa ni se ejecutó recuperación sobre producción. Los archivos privados permanecen fuera del repositorio. La aceptación de perfiles operativos y flujos pendientes sigue abierta.
