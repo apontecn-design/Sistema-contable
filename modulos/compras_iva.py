@@ -223,7 +223,7 @@ def registrar_pago_cliente(
     cuenta_banco,
     glosa
 ):
-    sgci_autorizar_operacion(conn, 'cxc', 'crear')
+    sgci_autorizar_operacion(conn, 'cxc', 'crear', 'Pagos de clientes')
 
     roles = cargar_roles(conn)
     plan = Plan(conn)
@@ -357,7 +357,7 @@ def registrar_pago_proveedor(
     cuenta_banco,
     glosa
 ):
-    sgci_autorizar_operacion(conn, 'cxp', 'crear')
+    sgci_autorizar_operacion(conn, 'cxp', 'crear', 'Pagos de proveedores')
 
     roles = cargar_roles(conn)
     plan = Plan(conn)

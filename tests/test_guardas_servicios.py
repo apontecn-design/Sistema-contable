@@ -18,7 +18,9 @@ class TestGuardasServicios(unittest.TestCase):
         self.db=preparar(self)
 
     def test_denegacion_individual_bloquea_antes_de_escribir(self):
-        casos=[(reportes_contables.deshacer_lote,'administracion','anular','Lotes'),
+        casos=[(compras_iva.registrar_pago_cliente,'cxc','crear','Pagos de clientes'),
+            (compras_iva.registrar_pago_proveedor,'cxp','crear','Pagos de proveedores'),
+            (reportes_contables.deshacer_lote,'administracion','anular','Lotes'),
             (compras_reclasificacion.reclasificar_compras,'cxp','contabilizar','RCV Compras'),
             (compras_iva.regularizar_iva_historico_compras,'cxp','contabilizar','RCV Compras'),
             (plan_cuentas.guardar_rol,'administracion','editar','Matriz Contable'),

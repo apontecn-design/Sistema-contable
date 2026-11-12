@@ -1,6 +1,6 @@
 # CONTEM V1.0 — candidata de entrega, 12 de noviembre de 2026
 
-**Estado: candidata con avances funcionales verificados; todavía no es una entrega final certificada.** El acceso empresarial general de empleados y la validación real de staging siguen pendientes. Se conserva la barrera de empleados, no se modifica `main` y no se publica producción.
+**Estado: candidata con avances funcionales verificados; todavía no es una entrega final certificada.** El acceso empresarial general de empleados y las pruebas autenticadas de staging siguen pendientes. Se conserva la barrera de empleados, no se modifica `main` y no se publica producción.
 
 ## Implementación y evidencia
 
@@ -20,7 +20,7 @@
 
 - Completar auditoría de las rutas pendientes y probar el acceso multiusuario empresarial por módulo/submódulo/acción; conservar alcance de RR. HH. y revocación efectiva. La aplicación mantiene el puente de compatibilidad y dependencias globales: no se declara desacoplada ni segura para habilitar todos los módulos por tener pruebas verdes.
 - Confirmar variables efectivas y aislamiento de datos/autenticación de `Sistema-contable-1`. La integración Render disponible no permite leer las variables guardadas; se solicita al propietario únicamente información no secreta.
-- Desplegar y validar esta candidata en staging con sesiones reales, persistencia después de reinicio y flujos de negocio. No se ha publicado esta candidata en Render.
+- Completar la validación autenticada en staging, la persistencia después de reinicio y los flujos de negocio. El commit b549432 está desplegado y la sesión anónima real no presenta excepciones.
 - Cerrar los flujos pendientes de obligaciones previamente contabilizadas, reversos completos y validaciones manuales de negocio.
 - Obtener un respaldo operativo reciente, verificar recuperación y configuración de producción y recibir autorización expresa antes de fusionar o publicar.
 
@@ -32,4 +32,6 @@ La estructura y tratamiento de signos se contrastaron con las [instrucciones del
 
 Se añaden doce pruebas de auxiliares: autorización antes de consultas, separación entre Compras y Ventas, anulación con filtro de módulo, montos CLP sin truncamiento, auditoría en la misma transacción, reversión ante fallos y dos sesiones concurrentes que no pueden consumir dos veces el saldo. La inicialización de tablas respeta transacciones pendientes del llamador. Se repiten las 34 pantallas y la comparación de 57 tablas históricas sin cambios.
 
-GitHub mantiene en cola las ejecuciones del commit 0544b7c; el intento de cancelación del propietario fue rechazado por GitHub. Las pruebas locales no sustituyen esa validación. No se modificaron variables ni se desplegó esta candidata en Render.
+Las dos ejecuciones de GitHub del commit b549432 terminaron correctamente: 43251786735 y 43251802287. Las antiguas de 0544b7c siguen en cola; su cancelación manual falló. Render desplegó b549432 en Sistema-contable-1 mediante dep-dbqu0hdckfvc738hgke0, estado live. Se combinaron únicamente las variables no secretas de staging, preservando las existentes. La sesión anónima comprobó HTTP 200, salud ok, formulario visible y ejecución sin errores. Aún no se prueban credenciales ni se afirma aislamiento de Supabase.
+
+También se exige el permiso específico de Pagos de clientes o Pagos de proveedores al registrar pagos; una denegación individual se comprueba antes de consultar o escribir. La suite completa conserva 336 pruebas correctas.
