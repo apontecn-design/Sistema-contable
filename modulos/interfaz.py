@@ -3,6 +3,7 @@ conn = conectar()
 
 crear_esquema(conn)
 oc_crear_tablas(conn)
+tes_crear_tablas(conn)
 sgci_crear_seguridad(conn)
 dte_crear_tablas(conn)
 sgci_empresa_esquema(conn)
@@ -356,79 +357,60 @@ elif menu == "🏠 Inicio":
     st.caption('Indicadores y tareas prioritarias · información basada en los registros contables de CONTEM')
     hoy=date.today().isoformat()
     mes=hoy[:7]
-    def _sgci_valor(sql,params=()):
-        try:
-            return float(conn.execute(sql,params).fetchone()[0] or 0)
-        except sqlite3.Error:
-            return 0.0
-    ingresos=_sgci_valor("SELECT COALESCE(SUM(haber-debe),0) FROM libro_diario WHERE substr(fecha,1,7)=? AND codigo_cuenta LIKE '4.%'",(mes,))
-    gastos=_sgci_valor("SELECT COALESCE(SUM(debe-haber),0) FROM libro_diario WHERE substr(fecha,1,7)=? AND (codigo_cuenta LIKE '5.%' OR codigo_cuenta LIKE '6.%')",(mes,))
-    saldo_banco=_sgci_valor("SELECT COALESCE(SUM(d.debe-d.haber),0) FROM libro_diario d WHERE d.codigo_cuenta IN (SELECT cuenta_contable FROM bancos WHERE activo=1)")
+    panel=panel_inicio_datos(conn,mes)
+    ingresos,gastos,saldo_banco=panel['ingresos'],panel['gastos'],panel['saldo_banco']
     c1,c2,c3,c4=st.columns(4)
-    c1.metric('💰 Ingresos del mes',money(ingresos))
-    c2.metric('🛒 Gastos del mes',money(gastos))
-    c3.metric('📈 Resultado del mes',money(ingresos-gastos))
-    c4.metric('🏦 Saldo contable en bancos',money(saldo_banco))
+    c1.metric('💰 Ingresos del mes',money(ingresos) if ingresos is not None else '—')
+    c2.metric('🛒 Gastos del mes',money(gastos) if gastos is not None else '—')
+    c3.metric('📈 Resultado del mes',money(ingresos-gastos) if panel['finanzas'] else '—')
+    c4.metric('🏦 Saldo contable en bancos',money(saldo_banco) if saldo_banco is not None else '—')
     st.caption('Montos del Libro Diario · período '+mes+' · el saldo bancario puede diferir de la cartola hasta su conciliación.')
     st.write('')
     col_tareas,col_flujo,col_gastos=st.columns([1.1,1.65,1.05])
     with col_tareas:
         st.subheader('✅ Tareas pendientes')
-        pendientes_pago=int(_sgci_valor("SELECT COUNT(*) FROM tes_solicitudes WHERE estado='PENDIENTE_CONTABILIZACION'"))
-        pendientes_tes=int(_sgci_valor("SELECT COUNT(*) FROM tes_solicitudes WHERE estado IN ('BORRADOR','ENVIADA','APROBADA')"))
-        pendientes_cartola=int(_sgci_valor('SELECT COUNT(*) FROM cartola_bancaria WHERE conciliado=0'))
+        pendientes_pago,pendientes_tes,pendientes_cartola=panel['pendientes_pago'],panel['pendientes_tes'],panel['pendientes_cartola']
         if pendientes_pago: st.warning(f'💳 {pendientes_pago} pago(s) por contabilizar')
         if pendientes_tes: st.info(f'📋 {pendientes_tes} solicitud(es) de Tesorería por gestionar')
         if pendientes_cartola: st.info(f'🏦 {pendientes_cartola} movimiento(s) bancario(s) sin conciliar')
-        if not (pendientes_pago or pendientes_tes or pendientes_cartola): st.success('Sin tareas pendientes en los controles principales.')
+        if not (pendientes_pago or pendientes_tes or pendientes_cartola):
+            if panel['tesoreria'] and panel['conciliacion']: st.success('Sin tareas pendientes en los controles principales.')
+            elif panel['tesoreria'] or panel['conciliacion']: st.success('Sin tareas pendientes en los controles autorizados.')
+            else: st.info('Tu perfil no tiene tareas autorizadas en esta vista.')
     with col_flujo:
         st.subheader('📊 Ingresos y egresos · 6 meses')
-        try:
-            flujo=pd.read_sql_query('''SELECT substr(fecha,1,7) AS mes,
-                SUM(CASE WHEN codigo_cuenta LIKE '4.%' THEN haber-debe ELSE 0 END) AS Ingresos,
-                SUM(CASE WHEN codigo_cuenta LIKE '5.%' OR codigo_cuenta LIKE '6.%' THEN debe-haber ELSE 0 END) AS Egresos
-                FROM libro_diario WHERE fecha IS NOT NULL GROUP BY substr(fecha,1,7) ORDER BY mes DESC LIMIT 6''',conn)
-            if flujo.empty: st.info('Aún no hay movimientos para graficar.')
-            else:
-                flujo=flujo.sort_values('mes').set_index('mes')
-                st.bar_chart(flujo[['Ingresos','Egresos']],height=225,color=['#2E906A','#E2A25B'])
-        except (sqlite3.Error,ValueError): st.info('Gráfico disponible cuando existan movimientos contables.')
+        flujo=panel['flujo']
+        if flujo is None: st.info('Tu perfil no tiene acceso a este indicador.')
+        elif flujo.empty: st.info('Aún no hay movimientos para graficar.')
+        else:
+            flujo=flujo.sort_values('mes').set_index('mes')
+            st.bar_chart(flujo[['Ingresos','Egresos']],height=225,color=['#2E906A','#E2A25B'])
     with col_gastos:
         st.subheader('📌 Gastos del mes')
-        try:
-            categorias=pd.read_sql_query('''SELECT COALESCE(NULLIF(c.nombre,''),d.codigo_cuenta) AS Cuenta,
-                SUM(d.debe-d.haber) AS Monto FROM libro_diario d
-                LEFT JOIN plan_cuentas c ON c.codigo=d.codigo_cuenta
-                WHERE substr(d.fecha,1,7)=? AND (d.codigo_cuenta LIKE '5.%' OR d.codigo_cuenta LIKE '6.%')
-                GROUP BY d.codigo_cuenta HAVING ABS(SUM(d.debe-d.haber))>0 ORDER BY ABS(SUM(d.debe-d.haber)) DESC LIMIT 6''',conn,params=(mes,))
-            if categorias.empty: st.info('Sin gastos registrados en este período.')
-            else: st.dataframe(formatear_montos_df(categorias),hide_index=True,use_container_width=True,height=225)
-        except sqlite3.Error: st.info('Sin información disponible.')
+        categorias=panel['categorias']
+        if categorias is None: st.info('Tu perfil no tiene acceso a este indicador.')
+        elif categorias.empty: st.info('Sin gastos registrados en este período.')
+        else: st.dataframe(formatear_montos_df(categorias),hide_index=True,use_container_width=True,height=225)
     st.divider()
     st.subheader('Actividad y operaciones recientes')
     col_actividad,col_tes,col_pagar=st.columns(3)
     with col_actividad:
         st.markdown('**Actividad contable**')
-        actividad=pd.read_sql_query('SELECT fecha,cuenta,glosa,debe,haber FROM libro_diario ORDER BY id DESC LIMIT 7',conn)
-        if actividad.empty: st.info('Sin movimientos contables registrados.')
+        actividad=panel['actividad']
+        if actividad is None: st.info('Tu perfil no tiene acceso a esta actividad.')
+        elif actividad.empty: st.info('Sin movimientos contables registrados.')
         else: st.dataframe(formatear_montos_df(actividad),hide_index=True,use_container_width=True,height=270)
     with col_tes:
         st.markdown('**Solicitudes de Tesorería**')
-        tes_crear_tablas(conn)
-        tes_inicio=pd.read_sql_query('''SELECT s.id,s.beneficiario,s.estado,COALESCE(SUM(d.monto),0) AS monto
-            FROM tes_solicitudes s LEFT JOIN tes_solicitud_detalle d ON d.solicitud_id=s.id
-            GROUP BY s.id ORDER BY s.id DESC LIMIT 7''',conn)
-        if tes_inicio.empty: st.info('No hay solicitudes registradas.')
+        tes_inicio=panel['solicitudes']
+        if tes_inicio is None: st.info('Tu perfil no tiene acceso a estas solicitudes.')
+        elif tes_inicio.empty: st.info('No hay solicitudes registradas.')
         else: st.dataframe(formatear_montos_df(tes_inicio),hide_index=True,use_container_width=True,height=270)
     with col_pagar:
         st.markdown('**Cuentas por pagar**')
-        pendientes=pd.read_sql_query('''SELECT p.nombre AS proveedor,c.folio,c.fecha,
-            ROUND(ABS(COALESCE(c.monto_total,0))-COALESCE((SELECT SUM(ABS(a.monto)) FROM aplicaciones_proveedores a WHERE a.compra_id=c.id),0)) AS saldo
-            FROM compras c LEFT JOIN proveedores p ON p.id=c.proveedor_id
-            WHERE c.tipo_doc NOT IN (60,61,52) OR c.tipo_doc IS NULL
-            ORDER BY c.fecha DESC LIMIT 100''',conn)
-        pendientes=pendientes[pendientes.saldo>0].head(7) if not pendientes.empty else pendientes
-        if pendientes.empty: st.info('No hay documentos pendientes en esta vista.')
+        pendientes=panel['pendientes']
+        if pendientes is None: st.info('Tu perfil no tiene acceso a estas cuentas.')
+        elif pendientes.empty: st.info('No hay documentos pendientes en esta vista.')
         else: st.dataframe(formatear_montos_df(pendientes),hide_index=True,use_container_width=True,height=270)
     st.divider()
     st.subheader('⚡ Accesos rápidos')
