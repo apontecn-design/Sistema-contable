@@ -1581,13 +1581,21 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
     return asiento
 
 
+def banco_trabajadores_anticipos(conn):
+    """Selector bancario con lectura laboral y alcance filtrado antes de devolver datos."""
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    return rrhh_listar_trabajadores(conn,'Anticipos y préstamos',activos=True)
+
+
 def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_id, periodo, observacion=""):
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'nomina', 'crear', 'Anticipos y préstamos')
     """Vincula un cargo real de cartola con un anticipo de nómina y lo contabiliza una sola vez."""
     _sgci_exigir_sin_transaccion(conn)
     with conn:
         conn.execute('BEGIN IMMEDIATE')
         sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'nomina', 'crear', 'Anticipos y préstamos')
         ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
         if ids is not None and int(trabajador_id) not in ids:
             raise PermissionError('El trabajador está fuera de tu alcance de Recursos Humanos.')
@@ -1641,10 +1649,12 @@ def contabilizar_anticipo_nomina_desde_cartola(conn, movimiento_id, trabajador_i
 def revertir_anticipo_nomina_cartola(conn, movimiento_id):
     # Revierte exclusivamente anticipos creados desde cartola.
     sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'nomina', 'anular', 'Anticipos y préstamos')
     _sgci_exigir_sin_transaccion(conn)
     with conn:
         conn.execute('BEGIN IMMEDIATE')
         sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'nomina', 'anular', 'Anticipos y préstamos')
         ids = sgci_rrhh_ids_autorizados(conn, sgci_identidad_actual())
         if ids is not None and not ids:
             raise PermissionError('No tienes trabajadores autorizados para esta operación.')

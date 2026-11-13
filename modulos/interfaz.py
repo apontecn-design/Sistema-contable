@@ -1191,6 +1191,8 @@ elif menu == "🏦 Bancos y Cartolas":
                 es_cargo = float(mov_sel["cargo"] or 0) > 0
                 es_abono = float(mov_sel["abono"] or 0) > 0
                 metodos = (["💼 Tesorería", "👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente", "↩️ Devolución de proveedor"] if es_abono else []) + ["🔗 Asientos existentes", "✏️ Una cuenta", "🧩 Varias cuentas"]
+                if not sgci_puede_submodulo(conn,'nomina','Anticipos y préstamos','ver'):
+                    metodos=[m for m in metodos if m!='👤 Nómina']
                 metodo_conc = st.radio("¿Cómo quieres conciliar este movimiento?", metodos, horizontal=True, key=f"metodo_conc_{movimiento_id}")
                 if metodo_conc == "🔗 Asientos existentes":
                     st.divider()
@@ -1255,10 +1257,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     st.divider()
                     st.subheader("👤 Nómina / trabajador")
                     st.caption("Úsalo para conciliar anticipos quincenales pagados por cheque o transferencia. CONTEM carga Anticipos de remuneraciones, acredita Banco y vincula el pago al trabajador y período.")
-                    trabajadores_banco=pd.read_sql_query(
-                        "SELECT id,rut,nombre,sueldo_base,anticipo_porcentaje FROM nomina_trabajadores WHERE activo=1 ORDER BY nombre",
-                        conn
-                    )
+                    trabajadores_banco=banco_trabajadores_anticipos(conn)
                     if trabajadores_banco.empty:
                         st.info("No hay trabajadores activos registrados en Nómina.")
                     else:

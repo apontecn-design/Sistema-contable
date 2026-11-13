@@ -29,6 +29,67 @@ class TestAnticiposCartolaAlcance(unittest.TestCase):
     def crear(self,trabajador=1):
         return servicios.contabilizar_anticipo_nomina_desde_cartola(self.db,1,trabajador,'2026-11')
 
+    def test_selector_solo_activos_del_alcance_y_campos_necesarios(self):
+        self.db.execute("INSERT INTO nomina_trabajadores(id,rut,nombre,activo) VALUES(3,'3-5','Inactivo',0)")
+        self.db.execute("INSERT INTO sgci_rrhh_autorizados VALUES('finanzas@example.com',3)")
+        self.db.execute("INSERT INTO sgci_alcance_rrhh VALUES('finanzas@example.com','autorizados')")
+        antes=list(self.db.iterdump())
+        filas=servicios.banco_trabajadores_anticipos(self.db)
+        self.assertEqual(filas.id.tolist(),[1])
+        self.assertEqual(list(filas.columns),['id','rut','nombre','sueldo_base','anticipo_porcentaje'])
+        self.assertEqual(list(self.db.iterdump()),antes)
+
+    def test_selector_alcance_todos_y_revocacion(self):
+        self.db.execute("INSERT INTO sgci_alcance_rrhh VALUES('finanzas@example.com','todos')")
+        self.assertEqual(set(servicios.banco_trabajadores_anticipos(self.db).id),{1,2})
+        self.db.execute("UPDATE sgci_alcance_rrhh SET alcance='propios'")
+        self.assertEqual(servicios.banco_trabajadores_anticipos(self.db).id.tolist(),[1])
+        self.db.execute('DELETE FROM sgci_usuario_trabajador')
+        self.assertTrue(servicios.banco_trabajadores_anticipos(self.db).empty)
+
+    def test_selector_exige_ambos_permisos_antes_de_consultar_trabajadores(self):
+        for modulo,sub in [('banco','Conciliación bancaria'),('nomina','Anticipos y préstamos')]:
+            with self.subTest(modulo=modulo):
+                self.db.execute('INSERT INTO sgci_usuario_permisos_detalle VALUES(?,?,?,?,0)',('finanzas@example.com',modulo,sub,'ver'))
+                consultas=[];self.db.set_trace_callback(consultas.append)
+                with self.assertRaises(PermissionError):servicios.banco_trabajadores_anticipos(self.db)
+                self.db.set_trace_callback(None)
+                self.assertFalse(any('FROM nomina_trabajadores' in q for q in consultas))
+                self.db.execute('DELETE FROM sgci_usuario_permisos_detalle')
+
+    def test_permiso_bancario_no_concede_creacion_laboral(self):
+        self.db.execute("INSERT INTO sgci_usuario_permisos_detalle VALUES('finanzas@example.com','nomina','Anticipos y préstamos','crear',0)")
+        self.db.commit();antes=list(self.db.iterdump())
+        with self.assertRaises(PermissionError):self.crear()
+        self.assertEqual(list(self.db.iterdump()),antes)
+
+    def test_permiso_bancario_no_concede_anulacion_laboral(self):
+        self.crear()
+        self.db.execute("INSERT INTO sgci_usuario_permisos_detalle VALUES('finanzas@example.com','nomina','Anticipos y préstamos','anular',0)")
+        self.db.commit();antes=list(self.db.iterdump())
+        with self.assertRaises(PermissionError):servicios.revertir_anticipo_nomina_cartola(self.db,1)
+        self.assertEqual(list(self.db.iterdump()),antes)
+
+    def test_revocacion_laboral_al_entrar_en_transaccion_bloquea_creacion(self):
+        self.comprobar_revocacion_transaccional('crear',lambda:self.crear())
+
+    def test_revocacion_laboral_al_entrar_en_transaccion_bloquea_reverso(self):
+        self.crear()
+        self.comprobar_revocacion_transaccional('anular',lambda:servicios.revertir_anticipo_nomina_cartola(self.db,1))
+
+    def comprobar_revocacion_transaccional(self,accion,operacion):
+        antes=list(self.db.iterdump());llamadas=[]
+        def autorizar(conn,modulo,act,sub=None):
+            usuarios.sgci_autorizar_operacion(conn,modulo,act,sub)
+            if modulo=='nomina' and act==accion:
+                llamadas.append(conn.in_transaction)
+                if conn.in_transaction:raise PermissionError('Permiso revocado')
+        with patch.dict(vars(servicios),{'sgci_autorizar_operacion':autorizar}):
+            with self.assertRaises(PermissionError):operacion()
+        self.assertEqual(llamadas,[False,True])
+        self.assertEqual(list(self.db.iterdump()),antes)
+        self.assertFalse(self.db.in_transaction)
+
     def test_ciclo_propio_cuadra_y_reverso_conserva_original(self):
         original,anticipo=self.crear()
         reverso=servicios.revertir_anticipo_nomina_cartola(self.db,1)
