@@ -4,6 +4,7 @@ conn = conectar()
 crear_esquema(conn)
 oc_crear_tablas(conn)
 tes_crear_tablas(conn)
+sgci_crear_devoluciones_proveedor(conn)
 sgci_crear_seguridad(conn)
 dte_crear_tablas(conn)
 sgci_empresa_esquema(conn)
@@ -1193,6 +1194,9 @@ elif menu == "🏦 Bancos y Cartolas":
                 metodos = (["💼 Tesorería", "👤 Nómina", "🏢 Proveedor"] if es_cargo else []) + (["👥 Cliente", "↩️ Devolución de proveedor"] if es_abono else []) + ["🔗 Asientos existentes", "✏️ Una cuenta", "🧩 Varias cuentas"]
                 if not sgci_puede_submodulo(conn,'nomina','Anticipos y préstamos','ver'):
                     metodos=[m for m in metodos if m!='👤 Nómina']
+                permisos_cruzados={'💼 Tesorería':('tesoreria','Historial'),'🏢 Proveedor':('cxp','Pagos de proveedores'),
+                    '↩️ Devolución de proveedor':('cxp','Pagos de proveedores'),'👥 Cliente':('cxc','Pagos de clientes')}
+                metodos=[m for m in metodos if m not in permisos_cruzados or sgci_puede_submodulo(conn,*permisos_cruzados[m],'ver')]
                 metodo_conc = st.radio("¿Cómo quieres conciliar este movimiento?", metodos, horizontal=True, key=f"metodo_conc_{movimiento_id}")
                 if metodo_conc == "🔗 Asientos existentes":
                     st.divider()
@@ -1227,16 +1231,7 @@ elif menu == "🏦 Bancos y Cartolas":
                 if es_cargo and metodo_conc == '💼 Tesorería':
                     st.divider()
                     st.subheader('💼 Conciliar pago ya contabilizado en Tesorería')
-                    tes_crear_tablas(conn)
-                    pendientes_tes=pd.read_sql_query("""SELECT s.id,s.beneficiario,p.fecha_pago,p.referencia,
-                        SUM(d.monto) AS monto,p.asiento_id FROM tes_solicitudes s
-                        JOIN tes_confirmaciones_pago p ON p.solicitud_id=s.id
-                        JOIN tes_solicitud_detalle d ON d.solicitud_id=s.id
-                        WHERE s.estado='CONTABILIZADA' AND p.banco_id=?
-                        AND NOT EXISTS(SELECT 1 FROM cartola_bancaria cb WHERE cb.conciliado=1
-                        AND cb.match_tipo='TESORERIA' AND cb.match_id=s.id)
-                        GROUP BY s.id HAVING ROUND(SUM(d.monto))=? ORDER BY p.fecha_pago DESC""",conn,
-                        params=(banco_id,int(round(float(mov_sel['cargo'] or 0)))))
+                    pendientes_tes=banco_pagos_tesoreria(conn,banco_id,float(mov_sel['cargo'] or 0))
                     if pendientes_tes.empty:
                         st.info('No hay pagos contabilizados en Tesorería pendientes de conciliación con este banco y monto.')
                     else:
@@ -1294,14 +1289,14 @@ elif menu == "🏦 Bancos y Cartolas":
                     st.divider()
                     st.subheader("🏢 Pago a proveedor")
                     st.caption("Úsalo cuando el cargo bancario paga una factura ya contabilizada en RCV. CONTEM rebaja Proveedores, acredita Banco y actualiza el auxiliar del proveedor y sus documentos.")
-                    proveedores_pago = pd.read_sql_query("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM proveedores WHERE activo=1 ORDER BY nombre", conn)
+                    proveedores_pago = banco_entidades_pago(conn,'cxp')
                     if proveedores_pago.empty:
                         st.info("No hay proveedores registrados.")
                     else:
                         prov_labels = [f"{r.id} | {r.rut} | {r.nombre}" for r in proveedores_pago.itertuples()]
                         prov_label = st.selectbox("Proveedor", prov_labels, key=f"pago_prov_{movimiento_id}")
                         prov_id = int(prov_label.split(" | ",1)[0])
-                        docs_pend = documentos_pendientes_proveedor(conn, prov_id)
+                        docs_pend = banco_documentos_pago(conn,'cxp',prov_id)
                         modo_pago_prov = st.radio(
                             "Aplicación del pago",
                             ["Aplicar a documento(s) pendiente(s)", "Pago sin documento / saldo anterior"],
@@ -1377,17 +1372,14 @@ elif menu == "🏦 Bancos y Cartolas":
                     st.divider()
                     st.subheader('↩️ Devolución de proveedor')
                     st.caption('Reembolso de una nota de crédito que excede una factura del mismo proveedor. Un solo asiento Banco / Proveedores, auxiliar actualizado y movimiento conciliado.')
-                    sgci_crear_devoluciones_proveedor(conn)
-                    proveedores_dev = pd.read_sql_query('''SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) AS nombre
-                        FROM proveedores WHERE activo=1 ORDER BY nombre''', conn)
+                    proveedores_dev=banco_entidades_pago(conn,'cxp')
                     if proveedores_dev.empty:
                         st.info('No hay proveedores activos.')
                     else:
                         etiquetas_dev = {f'{int(r.id)} | {r.rut} | {r.nombre}':int(r.id) for r in proveedores_dev.itertuples()}
                         etiqueta_dev = st.selectbox('Proveedor que realizó el reembolso',list(etiquetas_dev),key=f'dev_prov_{movimiento_id}')
                         prov_dev = etiquetas_dev[etiqueta_dev]
-                        documentos_dev = pd.read_sql_query('''SELECT id,fecha,folio,tipo_doc,monto_total FROM compras
-                            WHERE proveedor_id=? ORDER BY fecha DESC,id DESC''',conn,params=[prov_dev])
+                        documentos_dev=banco_documentos_pago(conn,'cxp',prov_dev,devolucion=True)
                         notas_dev = documentos_dev[documentos_dev['tipo_doc'].isin([60,61])]
                         facturas_dev = documentos_dev[~documentos_dev['tipo_doc'].isin([60,61])]
                         if notas_dev.empty or facturas_dev.empty:
@@ -1400,8 +1392,7 @@ elif menu == "🏦 Bancos y Cartolas":
                             id_nc,id_fac = mapa_nc_dev[etiqueta_nc],mapa_fac_dev[etiqueta_fac]
                             total_nc = abs(float(notas_dev.loc[notas_dev['id']==id_nc,'monto_total'].iloc[0]))
                             total_fac = abs(float(facturas_dev.loc[facturas_dev['id']==id_fac,'monto_total'].iloc[0]))
-                            aplicado_dev = conn.execute('''SELECT COALESCE(SUM(monto),0) FROM sgci_devoluciones_proveedor
-                                WHERE nota_credito_id=? AND factura_id=?''',(id_nc,id_fac)).fetchone()[0]
+                            aplicado_dev=banco_devolucion_aplicada(conn,id_nc,id_fac)
                             saldo_dev = clp_round(total_nc-total_fac-float(aplicado_dev or 0))
                             abono_dev = clp_round(float(mov_sel['abono'] or 0))
                             c1,c2,c3=st.columns(3)
@@ -1427,14 +1418,14 @@ elif menu == "🏦 Bancos y Cartolas":
                     st.divider()
                     st.subheader("👥 Cobro / anticipo de cliente")
                     st.caption("Aplica el abono a facturas pendientes o regístralo como anticipo/saldo a favor del cliente. Si el abono supera las facturas elegidas, puedes enviar el sobrante a Anticipos de clientes u otra cuenta.")
-                    clientes_cobro=pd.read_sql_query("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM clientes WHERE activo=1 ORDER BY nombre",conn)
+                    clientes_cobro=banco_entidades_pago(conn,'cxc')
                     if clientes_cobro.empty:
                         st.info("No hay clientes activos registrados.")
                     else:
                         cli_labels=[f"{r.id} | {r.rut} | {r.nombre}" for r in clientes_cobro.itertuples()]
                         cli_label=st.selectbox("Cliente",cli_labels,key=f"cobro_cli_{movimiento_id}")
                         cli_id=int(cli_label.split(" | ",1)[0])
-                        docs_cli=documentos_pendientes_cliente(conn,cli_id)
+                        docs_cli=banco_documentos_pago(conn,'cxc',cli_id)
                         sgci_saldos_apertura_clientes(conn)
                         with st.expander("📘 Saldo inicial 2026 del cliente (auxiliar, sin asiento contable)"):
                             registro=conn.execute("SELECT monto FROM sgci_apertura_clientes WHERE cliente_id=?",(cli_id,)).fetchone()

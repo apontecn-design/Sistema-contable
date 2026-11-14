@@ -16,7 +16,8 @@ class TestConciliacionTesoreria(unittest.TestCase):
             CREATE TABLE sgci_usuario_permisos_detalle(email TEXT,modulo TEXT,submodulo TEXT,accion TEXT,permitido INTEGER);
             INSERT INTO sgci_usuarios VALUES('banco@example.com','Finanzas',1);
             INSERT INTO sgci_perfil_permisos VALUES
-                ('Finanzas','banco','Conciliación bancaria','conciliar',1);
+                ('Finanzas','banco','Conciliación bancaria','conciliar',1),
+                ('Finanzas','tesoreria','Historial','ver',1);
             CREATE TABLE cartola_bancaria(
                 id INTEGER PRIMARY KEY,banco_id INTEGER,conciliado INTEGER,
                 cargo REAL,abono REAL,match_tipo TEXT,match_id INTEGER,
@@ -81,6 +82,29 @@ class TestConciliacionTesoreria(unittest.TestCase):
             ventas_dte.tes_conciliar_pago(self.db,10,1)
         self.assertEqual(self.db.execute(
             'SELECT conciliado FROM cartola_bancaria WHERE id=10').fetchone()[0],0)
+
+    def test_sin_historial_no_lee_tesoreria_ni_movimiento(self):
+        self.db.execute("DELETE FROM sgci_perfil_permisos WHERE modulo='tesoreria'");self.db.commit()
+        consultas=[];self.db.set_trace_callback(consultas.append)
+        with self.assertRaises(PermissionError):ventas_dte.tes_conciliar_pago(self.db,10,1)
+        self.db.set_trace_callback(None)
+        self.assertFalse(any('FROM tes_' in q or 'FROM cartola_bancaria' in q for q in consultas))
+
+    def test_transaccion_previa_no_se_revierte(self):
+        self.db.execute('UPDATE cartola_bancaria SET cargo=123 WHERE id=10')
+        with self.assertRaises(RuntimeError):ventas_dte.tes_conciliar_pago(self.db,10,1)
+        self.assertTrue(self.db.in_transaction)
+        self.assertEqual(self.db.execute('SELECT cargo FROM cartola_bancaria WHERE id=10').fetchone()[0],123)
+        self.db.rollback()
+
+    def test_revocacion_tras_reserva_no_deja_cambios(self):
+        def autorizar(conn,modulo,accion,sub):
+            usuarios.sgci_autorizar_operacion(conn,modulo,accion,sub)
+            if modulo=='tesoreria' and conn.in_transaction:raise PermissionError('Revocado')
+        antes=list(self.db.iterdump())
+        with patch.dict(vars(ventas_dte),{'sgci_autorizar_operacion':autorizar}):
+            with self.assertRaises(PermissionError):ventas_dte.tes_conciliar_pago(self.db,10,1)
+        self.assertEqual(list(self.db.iterdump()),antes)
 
 
 if __name__=='__main__':

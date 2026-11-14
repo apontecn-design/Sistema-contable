@@ -528,9 +528,14 @@ def tes_vista_comprobante(pago,sid):
 
 def tes_conciliar_pago(conn,movimiento_id,solicitud_id):
     sgci_autorizar_operacion(conn, 'banco', 'conciliar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Historial')
     """Solo vincula cartola con asiento ya existente. No crea un asiento nuevo."""
+    if conn.in_transaction:
+        raise RuntimeError('Finaliza la transacción pendiente antes de conciliar.')
     try:
         conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'conciliar', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Historial')
         mov=conn.execute('SELECT * FROM cartola_bancaria WHERE id=?',(movimiento_id,)).fetchone()
         pago=conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?',(solicitud_id,)).fetchone()
         sol=conn.execute('SELECT * FROM tes_solicitudes WHERE id=?',(solicitud_id,)).fetchone()

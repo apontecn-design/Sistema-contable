@@ -434,6 +434,7 @@ def sgci_contabilizar_devolucion_proveedor(conn, movimiento_id, proveedor_id,
     No genera una nueva compra ni altera el asiento de la nota de crédito.
     """
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'cxp', 'contabilizar', 'Pagos de proveedores')
     sgci_crear_devoluciones_proveedor(conn)
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
     if not mov or int(mov['conciliado'] or 0):
@@ -513,6 +514,7 @@ def sgci_contabilizar_devolucion_proveedor(conn, movimiento_id, proveedor_id,
 def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id, compra_ids,
                                                  cuenta_diferencia=None, glosa_diferencia=""):
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'cxp', 'contabilizar', 'Pagos de proveedores')
     """Contabiliza un cargo bancario como pago a proveedor.
 
     El monto aplicado al auxiliar del proveedor nunca supera el saldo de los documentos elegidos.
@@ -639,6 +641,7 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
 
 def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id):
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'cxp', 'contabilizar', 'Pagos de proveedores')
     """Contabiliza un cargo bancario como pago a proveedor sin aplicarlo a una factura específica.
 
     Se usa para pagos de saldos anteriores o documentos que todavía no están cargados en SGCI.
@@ -712,6 +715,7 @@ def revertir_abono_cliente_cartola(conn, movimiento_id):
     auxiliar originado por esta conciliación. Nunca deshace aplicaciones posteriores.
     """
     sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'cxc', 'anular', 'Pagos de clientes')
     mov = conn.execute('SELECT * FROM cartola_bancaria WHERE id=?', (int(movimiento_id),)).fetchone()
     if not mov or int(mov['conciliado'] or 0) != 1 or mov['match_tipo'] not in ('CLIENTE_ANTICIPO', 'CLIENTE'):
         raise ValueError('Selecciona un abono de cliente conciliado.')
@@ -772,6 +776,8 @@ def revertir_abono_cliente_cartola(conn, movimiento_id):
     # Transacción única: reverso + auxiliar + liberación de cartola + auditoría.
     try:
         conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'cxc', 'anular', 'Pagos de clientes')
         nuevo = siguiente_asiento(conn) + 1
         rev_lote = 'REV-CLI-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         for l in lineas:
@@ -806,6 +812,7 @@ def revertir_abono_cliente_cartola(conn, movimiento_id):
 def revertir_pago_proveedor_cartola(conn, movimiento_id):
     """Reversión atómica de pago bancario a proveedor, con comprobaciones de trazabilidad."""
     sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'cxp', 'anular', 'Pagos de proveedores')
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo'] not in ('PROVEEDOR','PROVEEDOR_SIN_DOCUMENTO'):
         raise ValueError('El movimiento no es un pago conciliado a proveedor.')
@@ -849,6 +856,8 @@ def revertir_pago_proveedor_cartola(conn, movimiento_id):
     rev_lote='REV-PROV-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     try:
         conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'cxp', 'anular', 'Pagos de proveedores')
         for l in lineas:
             conn.execute("""INSERT INTO libro_diario
                 (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
@@ -1579,6 +1588,46 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
         conn.execute(f"UPDATE {tabla} SET asiento_id=?, contabilizado=1 WHERE id=?",(asiento,registro_id))
         _sgci_auditar_auxiliar(conn, 'CONTABILIZAR ENTREGA NOMINA', f'{tabla}:{registro_id}; asiento:{asiento}')
     return asiento
+
+
+def banco_entidades_pago(conn, modulo):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    if modulo not in ('cxc','cxp'):raise ValueError('Módulo de pago inválido.')
+    sub='Pagos de clientes' if modulo=='cxc' else 'Pagos de proveedores'
+    sgci_autorizar_operacion(conn,modulo,'ver',sub)
+    tabla='clientes' if modulo=='cxc' else 'proveedores'
+    return pd.read_sql_query("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) nombre FROM "+tabla+" WHERE activo=1 ORDER BY nombre",conn)
+
+
+def banco_documentos_pago(conn, modulo, tercero_id, devolucion=False):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    if modulo not in ('cxc','cxp') or (devolucion and modulo!='cxp'):
+        raise ValueError('Consulta de documentos inválida.')
+    sgci_autorizar_operacion(conn,modulo,'ver','Pagos de clientes' if modulo=='cxc' else 'Pagos de proveedores')
+    if devolucion:
+        return pd.read_sql_query('SELECT id,fecha,folio,tipo_doc,monto_total FROM compras WHERE proveedor_id=? ORDER BY fecha DESC,id DESC',conn,params=(int(tercero_id),))
+    return documentos_pendientes_cliente(conn,tercero_id) if modulo=='cxc' else documentos_pendientes_proveedor(conn,tercero_id)
+
+
+def banco_pagos_tesoreria(conn, banco_id, monto):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    sgci_autorizar_operacion(conn,'tesoreria','ver','Historial')
+    return pd.read_sql_query("""SELECT s.id,s.beneficiario,p.fecha_pago,p.referencia,
+        SUM(d.monto) AS monto,p.asiento_id FROM tes_solicitudes s
+        JOIN tes_confirmaciones_pago p ON p.solicitud_id=s.id
+        JOIN tes_solicitud_detalle d ON d.solicitud_id=s.id
+        WHERE s.estado='CONTABILIZADA' AND p.banco_id=?
+        AND NOT EXISTS(SELECT 1 FROM cartola_bancaria cb WHERE cb.conciliado=1
+        AND cb.match_tipo='TESORERIA' AND cb.match_id=s.id)
+        GROUP BY s.id HAVING ROUND(SUM(d.monto))=? ORDER BY p.fecha_pago DESC""",conn,
+        params=(int(banco_id),int(round(float(monto)))))
+
+
+def banco_devolucion_aplicada(conn, nota_credito_id, factura_id):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    sgci_autorizar_operacion(conn,'cxp','ver','Pagos de proveedores')
+    return conn.execute('SELECT COALESCE(SUM(monto),0) FROM sgci_devoluciones_proveedor WHERE nota_credito_id=? AND factura_id=?',
+                        (int(nota_credito_id),int(factura_id))).fetchone()[0]
 
 
 def banco_trabajadores_anticipos(conn):

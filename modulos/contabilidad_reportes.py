@@ -617,6 +617,7 @@ def crear_obligacion_manual(conn, fecha, tipo, descripcion, referencia, monto, c
 
 def candidatos_conciliacion(conn, movimiento_id):
     """Busca coincidencias por monto y agrega señales por fecha/referencia."""
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
     if not mov:
         return pd.DataFrame()
@@ -656,7 +657,7 @@ def candidatos_conciliacion(conn, movimiento_id):
         })
 
     roles = cargar_roles(conn)
-    if es_cargo:
+    if es_cargo and sgci_puede_submodulo(conn,'cxp','Pagos de proveedores','ver'):
         # Compras/proveedores aún no aplicadas completamente.
         filas = conn.execute("""
             SELECT c.id,c.fecha,c.folio,c.monto_total,c.proveedor_id,
@@ -668,7 +669,7 @@ def candidatos_conciliacion(conn, movimiento_id):
         for r in filas:
             pendiente = max(abs(float(r["monto_total"] or 0)) - abs(float(r["aplicado"] or 0)), 0)
             agregar("PROVEEDOR", r["id"], r["fecha"], f"{r['entidad']} | Compra/Doc. {r['folio']}", r["folio"], pendiente, cuenta, r["proveedor_id"])
-    else:
+    elif not es_cargo and sgci_puede_submodulo(conn,'cxc','Pagos de clientes','ver'):
         filas = conn.execute("""
             SELECT v.id,v.fecha,v.folio,v.monto_total,v.cliente_id,
                    COALESCE(c.razon_social,c.nombre,'Cliente') entidad,
@@ -696,6 +697,10 @@ def candidatos_conciliacion(conn, movimiento_id):
 
 def contabilizar_conciliacion_bancaria(conn, movimiento_id, candidato_tipo, candidato_id):
     sgci_autorizar_operacion(conn, 'banco', 'conciliar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+    if candidato_tipo in ('CLIENTE','PROVEEDOR'):
+        sgci_autorizar_operacion(conn,'cxc' if candidato_tipo=='CLIENTE' else 'cxp','contabilizar',
+            'Pagos de clientes' if candidato_tipo=='CLIENTE' else 'Pagos de proveedores')
     """Confirma una coincidencia, genera el asiento bancario y deja trazabilidad."""
     mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
     if not mov:
@@ -965,6 +970,7 @@ def sgci_saldo_apertura_disponible(conn, cliente_id):
 def sgci_cobro_mixto(conn,movimiento_id,cliente_id,venta_ids,monto_apertura):
     """Un asiento Banco/Clientes; desglose auxiliar entre facturas y apertura."""
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'cxc', 'contabilizar', 'Pagos de clientes')
     sgci_saldos_apertura_clientes(conn)
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov or int(mov["conciliado"] or 0): raise ValueError("Movimiento inexistente o ya conciliado.")
@@ -1016,6 +1022,7 @@ def sgci_cobro_mixto(conn,movimiento_id,cliente_id,venta_ids,monto_apertura):
 def contabilizar_cobro_cliente_desde_cartola(conn, movimiento_id, cliente_id, venta_ids,
                                                cuenta_diferencia=None, glosa_diferencia=""):
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'cxc', 'contabilizar', 'Pagos de clientes')
     """Conciliación de abono: aplica a facturas del cliente y lleva cualquier exceso a otra cuenta."""
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov: raise ValueError("Movimiento bancario no encontrado.")
@@ -1090,6 +1097,7 @@ def contabilizar_cobro_cliente_desde_cartola(conn, movimiento_id, cliente_id, ve
 
 def contabilizar_cobro_cliente_sin_documento(conn,movimiento_id,cliente_id,cuenta_anticipo):
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+    sgci_autorizar_operacion(conn, 'cxc', 'contabilizar', 'Pagos de clientes')
     """Registra un abono sin factura como anticipo/saldo a favor del cliente y lo deja en su auxiliar."""
     mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
     if not mov: raise ValueError("Movimiento bancario no encontrado.")
