@@ -1,0 +1,44 @@
+name: Validación CONTEM (rama de integración)
+on:
+  push:
+    branches: [contem-v1-integracion]
+  pull_request:
+    branches: [main]
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Dependencias
+        run: pip install -r requirements.txt
+      - name: Validar sintaxis Python
+        run: python -m compileall -q app.py modulos tests scripts sgci_rrhh_autorizacion.py sgci_rrhh_seguridad.py
+      - name: Crear base SQLite sintética y ejecutar pruebas
+        env:
+          CONTEM_TEST_DB: ${{ runner.temp }}/contem_sintetico.db
+        run: |
+          python -c "import sqlite3,os; sqlite3.connect(os.environ['CONTEM_TEST_DB']).close()"
+          python -m unittest discover -s tests -v
+
+      - name: Inventariar funciones potencialmente mutantes sin autorización interna
+        run: python scripts/auditar_permisos.py > ${{ runner.temp }}/auditoria_permisos.json
+
+      - name: Comprobar arranque de Streamlit sin credenciales
+        env:
+          SGCI_DATA_DIR: ${{ runner.temp }}/contem_login_smoke
+          SGCI_LAB_MODE: '0'
+          SUPABASE_URL: ''
+          SGCI_PASSWORD_HASH: ''
+        run: |
+          python - <<'PY'
+          from streamlit.testing.v1 import AppTest
+          at = AppTest.from_file('app.py', default_timeout=30).run()
+          errores = [str(e.message) for e in at.exception]
+          assert not errores, 'Error de inicio de Streamlit: ' + repr(errores)
+          assert not at.session_state.get('authenticated', False), 'Acceso sin autenticación'
+          print('Arranque Streamlit sin sesión: correcto')
+          PY
