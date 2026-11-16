@@ -45,6 +45,7 @@ class TestTesoreriaFlujoContable(unittest.TestCase):
                 (1,1,12500,NULL,'Pendiente de reconocimiento contable','5.1.01','Servicio');
             CREATE TABLE asientos_prueba(
                 numero INTEGER, cuenta TEXT, debe INTEGER, haber INTEGER);
+            CREATE TABLE tes_eventos(solicitud_id INTEGER,fecha TEXT,accion TEXT,usuario TEXT,observacion TEXT);
         """)
         self.db.commit()
         def linea(conn, fecha, cuenta, debe, haber, glosa, asiento, origen):
@@ -62,6 +63,7 @@ class TestTesoreriaFlujoContable(unittest.TestCase):
             'Plan': _PlanFalso,
             'siguiente_asiento': lambda conn: 100,
             'nomina_asiento_linea': linea,
+            'sgci_identidad_actual': usuarios.sgci_identidad_actual,
         })
         self.globals_patch.start()
 

@@ -176,14 +176,85 @@ def tes_crear_tablas(conn):
         solicitud_id INTEGER NOT NULL REFERENCES tes_solicitudes(id),
         nombre TEXT NOT NULL, contenido BLOB NOT NULL, sha256 TEXT NOT NULL,
         fecha TEXT NOT NULL, UNIQUE(solicitud_id,sha256))''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS tes_vinculos_obligacion (
+        detalle_id INTEGER PRIMARY KEY,linea_origen_id INTEGER NOT NULL,huella TEXT NOT NULL,
+        confirmado_por TEXT NOT NULL,fecha TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS tes_aplicaciones_obligacion (
+        detalle_id INTEGER PRIMARY KEY,linea_origen_id INTEGER NOT NULL,monto INTEGER NOT NULL CHECK(monto>0),
+        asiento_pago INTEGER NOT NULL)''')
     conn.commit()
+
+
+def _tes_origen_obligacion(conn,linea_id):
+    import json,math
+    r=conn.execute('SELECT * FROM libro_diario WHERE id=?',(int(linea_id),)).fetchone()
+    if not r or not r['asiento_id'] or not str(r['codigo_cuenta']).startswith('2.') or r['codigo_cuenta'] not in Plan(conn).hojas:
+        raise ValueError('Selecciona una línea imputable de pasivo ya contabilizado.')
+    monto=float(r['haber'] or 0)
+    if not math.isfinite(monto) or monto<=0 or monto!=int(monto) or float(r['debe'] or 0)!=0:
+        raise ValueError('El origen debe ser una obligación acreedora entera en CLP.')
+    if str(r['origen'] or '').upper().startswith('REV') or r['origen']=='TESORERIA':
+        raise ValueError('Un reverso o pago no puede ser el origen de una obligación.')
+    origen_texto=str(r['origen'] or '').upper()
+    if any(palabra in origen_texto for palabra in ('RCV','DTE','NOMINA','NÓMINA','CONCILIACION','CONCILIACIÓN')):
+        raise ValueError('Este origen pertenece a un auxiliar; utiliza el flujo de documentos o nómina correspondiente.')
+    if r['lote_id'] and conn.execute('SELECT 1 FROM compras WHERE lote_id=? LIMIT 1',(r['lote_id'],)).fetchone():
+        raise ValueError('La obligación pertenece a una compra; utiliza el pago del documento.')
+    asiento=[dict(x) for x in conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id',(r['asiento_id'],))]
+    if any(not math.isfinite(float(x[c] or 0)) or float(x[c] or 0)<0 for x in asiento for c in ('debe','haber')) or abs(sum(float(x['debe'] or 0)-float(x['haber'] or 0) for x in asiento))>0.01:
+        raise ValueError('El asiento de origen no está cuadrado.')
+    huella=hashlib.sha256(json.dumps(asiento,sort_keys=True,allow_nan=False).encode('utf8')).hexdigest()
+    aplicado=conn.execute('SELECT COALESCE(SUM(monto),0) FROM tes_aplicaciones_obligacion WHERE linea_origen_id=?',(r['id'],)).fetchone()[0]
+    saldo_cuenta=conn.execute('SELECT COALESCE(SUM(haber-debe),0) FROM libro_diario WHERE codigo_cuenta=?',(r['codigo_cuenta'],)).fetchone()[0]
+    return {'id':r['id'],'cuenta':r['codigo_cuenta'],'monto':int(monto),'disponible':min(int(monto)-int(aplicado),int(round(float(saldo_cuenta)))), 'huella':huella}
+
+
+def tes_obligaciones_disponibles(conn):
+    sgci_autorizar_operacion(conn,'tesoreria','ver','Confirmación de pagos')
+    sgci_autorizar_operacion(conn,'contabilidad','ver','Libro Diario')
+    filas=conn.execute("""SELECT id,fecha,asiento_id,codigo_cuenta,glosa FROM libro_diario
+        WHERE codigo_cuenta LIKE '2.%' AND haber>0 AND COALESCE(debe,0)=0
+        AND UPPER(COALESCE(origen,'')) NOT LIKE 'REV%' AND COALESCE(origen,'')<>'TESORERIA'
+        ORDER BY fecha DESC,id DESC""").fetchall()
+    datos=[]
+    for r in filas:
+        try:origen=_tes_origen_obligacion(conn,r['id'])
+        except ValueError:continue
+        if origen['disponible']>0:datos.append({**dict(r),'disponible':origen['disponible']})
+    return pd.DataFrame(datos,columns=['id','fecha','asiento_id','codigo_cuenta','glosa','disponible'])
+
+
+def tes_vincular_obligacion(conn,sid,detalle_id,linea_id,confirmacion):
+    sgci_autorizar_operacion(conn,'tesoreria','contabilizar','Confirmación de pagos')
+    sgci_autorizar_operacion(conn,'contabilidad','ver','Libro Diario')
+    if confirmacion is not True:raise ValueError('Confirma que la obligación sigue pendiente y no fue pagada por otro medio.')
+    if conn.in_transaction:raise RuntimeError('Finaliza la operación pendiente antes de vincular.')
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn,'tesoreria','contabilizar','Confirmación de pagos')
+        sgci_autorizar_operacion(conn,'contabilidad','ver','Libro Diario')
+        d=conn.execute('''SELECT d.* FROM tes_solicitud_detalle d JOIN tes_solicitudes s ON s.id=d.solicitud_id
+            WHERE d.id=? AND d.solicitud_id=? AND s.estado IN ('BORRADOR','ENVIADA','APROBADA','PENDIENTE_CONTABILIZACION')''',(int(detalle_id),int(sid))).fetchone()
+        if not d or d['compra_id'] is not None or d['tratamiento']!='Obligación ya contabilizada':
+            raise ValueError('La línea no es una obligación modificable sin DTE.')
+        origen=_tes_origen_obligacion(conn,linea_id)
+        if int(d['monto'])>origen['disponible']:raise ValueError('La obligación de origen no tiene saldo suficiente.')
+        conn.execute('''INSERT INTO tes_vinculos_obligacion(detalle_id,linea_origen_id,huella,confirmado_por,fecha)
+            VALUES(?,?,?,?,?) ON CONFLICT(detalle_id) DO UPDATE SET linea_origen_id=excluded.linea_origen_id,
+            huella=excluded.huella,confirmado_por=excluded.confirmado_por,fecha=excluded.fecha''',
+            (d['id'],origen['id'],origen['huella'],sgci_identidad_actual(),datetime.now().isoformat(timespec='seconds')))
+        conn.execute('UPDATE tes_solicitud_detalle SET cuenta_contable=? WHERE id=?',(origen['cuenta'],d['id']))
+        conn.execute('INSERT INTO tes_eventos(solicitud_id,fecha,accion,usuario,observacion) VALUES(?,?,?,?,?)',
+            (sid,datetime.now().isoformat(timespec='seconds'),'VINCULAR OBLIGACION',sgci_identidad_actual(),f"Línea {d['id']} -> diario {origen['id']}; obligación pendiente sin pago por otro medio confirmado"))
 
 
 def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
     sgci_autorizar_operacion(conn, 'tesoreria', 'contabilizar', 'Confirmación de pagos')
     """Contabilización atómica y única. No registra cartola ni conciliación."""
+    if conn.in_transaction:raise RuntimeError('Finaliza la operación pendiente antes de contabilizar.')
     try:
         conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn,'tesoreria','contabilizar','Confirmación de pagos')
         sol=conn.execute('SELECT * FROM tes_solicitudes WHERE id=?',(sid,)).fetchone()
         pago=conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?',(sid,)).fetchone()
         if not sol or not pago or sol['estado'] != 'PENDIENTE_CONTABILIZACION' or pago['asiento_id'] is not None:
@@ -202,6 +273,7 @@ def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
             raise ValueError('La solicitud no tiene detalle.')
         movimientos=[]
         aplicaciones=[]
+        obligaciones=[]
         for d in detalles:
             monto=int(d['monto'])
             if monto <= 0:
@@ -224,8 +296,17 @@ def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
                 if not tratamiento:
                     raise ValueError('Indica el tratamiento contable del desembolso.')
                 if tratamiento == 'Obligación ya contabilizada':
-                    raise ValueError('Vincula el documento u obligación original antes de contabilizar para evitar duplicar el gasto.')
-                cuenta=str(d['cuenta_contable'] or cuenta_sin_dte or pago['cuenta_contrapartida'] or '').strip()
+                    vinculo=conn.execute('SELECT * FROM tes_vinculos_obligacion WHERE detalle_id=?',(d['id'],)).fetchone()
+                    if not vinculo:raise ValueError('Vincula el documento u obligación original antes de contabilizar para evitar duplicar el gasto.')
+                    origen=_tes_origen_obligacion(conn,vinculo['linea_origen_id'])
+                    if origen['huella']!=vinculo['huella']:raise ValueError('El asiento de origen cambió; vuelve a revisar y vincular la obligación.')
+                    reservado=sum(x[2] for x in obligaciones if x[1]==origen['id'])
+                    if monto>origen['disponible']-reservado:raise ValueError('La obligación de origen no tiene saldo suficiente.')
+                    cuenta=origen['cuenta']
+                    if d['cuenta_contable']!=cuenta:raise ValueError('La cuenta clasificada no coincide con la obligación de origen.')
+                    obligaciones.append((d['id'],origen['id'],monto,cuenta))
+                else:
+                    cuenta=str(d['cuenta_contable'] or cuenta_sin_dte or pago['cuenta_contrapartida'] or '').strip()
                 if not cuenta:
                     raise ValueError(f'Falta asignar la cuenta contable a la línea: {d["descripcion"]}.')
                 if tratamiento == 'Pendiente de reconocimiento contable' and not cuenta.startswith(('4.','5.','6.','7.')):
@@ -236,6 +317,10 @@ def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
                 raise ValueError('La cuenta de contrapartida no es imputable o coincide con el banco.')
             movimientos.append((cuenta,monto))
         total=sum(m for _,m in movimientos)
+        for cuenta in {o[3] for o in obligaciones}:
+            saldo=conn.execute('SELECT COALESCE(SUM(haber-debe),0) FROM libro_diario WHERE codigo_cuenta=?',(cuenta,)).fetchone()[0]
+            if sum(o[2] for o in obligaciones if o[3]==cuenta)>round(float(saldo)):
+                raise ValueError('El pasivo no tiene saldo acreedor suficiente para este pago.')
         asiento=siguiente_asiento(conn)+1
         glosa=f'Tesorería SF-{sid:06d} · {sol["beneficiario"]} · {pago["referencia"]}'
         for cuenta,monto in movimientos:
@@ -256,6 +341,10 @@ def tes_contabilizar_pago(conn, sid, banco_id, cuenta_sin_dte=None):
         if cur.rowcount != 1:
             raise ValueError('El pago ya fue contabilizado.')
         conn.execute("UPDATE tes_solicitudes SET estado='CONTABILIZADA' WHERE id=? AND estado='PENDIENTE_CONTABILIZACION'",(sid,))
+        for did,linea,monto,cuenta in obligaciones:
+            conn.execute('INSERT INTO tes_aplicaciones_obligacion(detalle_id,linea_origen_id,monto,asiento_pago) VALUES(?,?,?,?)',(did,linea,monto,asiento))
+        conn.execute('INSERT INTO tes_eventos(solicitud_id,fecha,accion,usuario,observacion) VALUES(?,?,?,?,?)',
+            (sid,datetime.now().isoformat(timespec='seconds'),'CONTABILIZAR',sgci_identidad_actual(),f'Asiento {asiento}; obligaciones vinculadas: {len(obligaciones)}'))
         conn.commit()
         return asiento
     except Exception:
@@ -412,13 +501,31 @@ def pantalla_tesoreria(conn):
             if fila['estado'] in ('BORRADOR','ENVIADA','APROBADA','PENDIENTE_CONTABILIZACION'):
                 st.markdown('#### Clasificación contable por línea')
                 st.caption('Cada concepto se imputa a su propia cuenta. Una sola transferencia genera un asiento con varios débitos y un crédito bancario total.')
-                detalles_db=conn.execute('SELECT id,descripcion,monto,compra_id,cuenta_contable FROM tes_solicitud_detalle WHERE solicitud_id=? ORDER BY id',(sid,)).fetchall()
+                detalles_db=conn.execute('SELECT id,descripcion,monto,compra_id,cuenta_contable,tratamiento FROM tes_solicitud_detalle WHERE solicitud_id=? ORDER BY id',(sid,)).fetchall()
                 hojas_tes=cuentas_imputables(conn)
                 cuentas_tes={f'{r.codigo} - {r.nombre}':r.codigo for r in hojas_tes.itertuples(index=False)}
                 seleccion_tes={}
                 for n,d in enumerate(detalles_db,1):
                     if d['compra_id'] is not None:
                         st.caption(f'Línea {n}: {d["descripcion"]} · {money(d["monto"])} · DTE vinculado: cuenta Proveedores automática')
+                        continue
+                    if d['tratamiento']=='Obligación ya contabilizada':
+                        st.markdown(f'**Línea {n} · {d["descripcion"]} · {money(d["monto"])}**')
+                        vinculo=conn.execute('SELECT linea_origen_id FROM tes_vinculos_obligacion WHERE detalle_id=?',(d['id'],)).fetchone()
+                        if vinculo:st.caption(f'Obligación vinculada a línea del diario {vinculo[0]}. Se revalidará al pagar.')
+                        if not sgci_puede_submodulo(conn,'contabilidad','Libro Diario','ver'):
+                            st.info('La vinculación requiere autorización para consultar el Libro Diario.')
+                            continue
+                        origenes=tes_obligaciones_disponibles(conn)
+                        opciones_origen={f"Línea {r.id} · Asiento {r.asiento_id} · {r.fecha} · {r.codigo_cuenta} · disponible {money(r.disponible)} · {str(r.glosa or '')[:90]}":int(r.id) for r in origenes.itertuples()}
+                        origen_sel=st.selectbox('Obligación de origen',['Seleccionar obligación']+list(opciones_origen),key=f'tes_origen_{d["id"]}')
+                        confirma_origen=st.checkbox('Confirmo que corresponde al beneficiario y que sigue pendiente, sin pagos por otro medio.',key=f'tes_origen_conf_{d["id"]}')
+                        if st.button('Vincular obligación contabilizada',disabled=not(confirma_origen and origen_sel in opciones_origen),key=f'tes_origen_btn_{d["id"]}'):
+                            try:
+                                tes_vincular_obligacion(conn,sid,d['id'],opciones_origen[origen_sel],confirma_origen)
+                                st.success('Origen vinculado. El pago debitará el pasivo sin volver a registrar el gasto.')
+                                st.rerun()
+                            except Exception as exc:st.error(f'No se realizaron cambios: {exc}')
                         continue
                     opciones_tes=['Seleccionar cuenta']+list(cuentas_tes)
                     previa=d['cuenta_contable'] or ''
