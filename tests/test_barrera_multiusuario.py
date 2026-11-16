@@ -1,7 +1,7 @@
 """Invariantes de aislamiento de empleados durante la habilitación gradual.
 
-Estas pruebas NO certifican el acceso multiusuario general: evitan que se
-retire accidentalmente la barrera antes de auditar todos los módulos.
+La activación empresarial es explícita por entorno; las cuentas personales
+mantienen su portal aislado. Estas pruebas no sustituyen la aceptación real.
 """
 import ast
 import pathlib
@@ -18,9 +18,9 @@ class TestBarreraMultiusuario(unittest.TestCase):
         cls.source = INTERFAZ.read_text(encoding="utf-8")
         cls.tree = ast.parse(cls.source)
 
-    def test_empleado_bloqueado_antes_de_navegacion_general(self):
+    def test_cuenta_personal_bloqueada_antes_de_navegacion_general(self):
         source = self.source
-        start = source.index("if not sgci_es_propietario():")
+        start = source.index("if not contem_acceso_empresarial(conn):")
         navigation = source.index("sgci_nav_modulos = [", start)
         barrier = source[start:navigation]
         self.assertIn("sgci_sesion_valida()", barrier)

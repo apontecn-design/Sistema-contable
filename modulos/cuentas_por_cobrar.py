@@ -6,6 +6,7 @@ def estado_cuenta_cliente(
     hasta=None
 ):
 
+    sgci_autorizar_operacion(conn,'cxc','ver','Clientes y estados de cuenta')
     cliente = conn.execute(
         """
         SELECT *
@@ -108,6 +109,7 @@ def estado_cuenta_proveedor(
     hasta=None
 ):
 
+    sgci_autorizar_operacion(conn,'cxp','ver','Proveedores y estados de cuenta')
     proveedor = conn.execute(
         """
         SELECT *

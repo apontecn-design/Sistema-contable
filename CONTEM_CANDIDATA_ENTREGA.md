@@ -1,30 +1,39 @@
-# CONTEM V1.0 — candidata de entrega, 16 de noviembre de 2026
+# CONTEM V1.0 — candidata consolidada para aceptación, 16 de noviembre de 2026
 
-**Estado: candidata con avances funcionales verificados; todavía no es una entrega final certificada.** El acceso empresarial general de empleados y la validación completa de perfiles y flujos en staging siguen pendientes. Se conserva la barrera de empleados, no se modifica `main` y no se publica producción.
+**Estado: implementación consolidada validada localmente; pendiente de publicación y aceptación autenticada en pruebas. No se ha publicado producción.** Activo en pruebas: 997849b563c694c8d97f98d12ebe7510aec73e82. Los cambios locales posteriores forman un único lote de cierre; no se entregan como versiones menores separadas.
 
-## Implementación y evidencia
+## Los once requisitos y su cierre
 
-1. **Interfaz aprobada:** se conservan tema, logotipo y navegación principal. Se amplían los contenidos necesarios de balance, adjuntos y modificación de OC, sin rediseño.
-2. **Usuarios y permisos:** administración de usuarios, vínculo laboral y alcance de RR. HH. pasan por servicios con autorización del propietario y transacciones. Nuevos usuarios conservan alcance propio. Se añaden controles específicos en consultas, exportaciones, RCV, auxiliares, reglas y lotes. La contabilización general de nómina exige permiso de acción y autorización expresa para todos los trabajadores. Falta auditar y probar todas las operaciones todavía embebidas en pantallas y el acceso multiusuario general real; no se retira la barrera.
-3. **Balance de ocho columnas:** implementado con Sumas, Saldos, Inventario y Resultados; sumas, resultado y totales; reconocimiento de saldos contrarios a la naturaleza; rechazo de cuentas sin clasificación; PDF horizontal con encabezados repetidos y Excel imprimible. Los nombres de cuentas se exportan como texto, evitando fórmulas introducidas por esos nombres. Doce pruebas específicas cubren utilidad, pérdida, signos inversos, fechas, precisión decimal, descuadres, formatos y ausencia de escrituras. Sobre el respaldo se revisan 48 cuentas con movimientos y cuadran los cuatro pares. Las sumas corresponden al intervalo elegido; los asientos de apertura deben estar registrados en ese intervalo.
-4. **Tesorería:** servicios para crear solicitudes, guardar clasificación por línea, enviar/aprobar/rechazar y confirmar pagos. Adjuntos PDF, imágenes y Excel hasta 5 MB se conservan dentro de SQLite con validación de tipo y huella. Se elimina la condición incorrecta que rechazaba pagos sin DTE con cuentas por línea ya asignadas. El formulario conserva sus campos y la selección de solicitud tiene clave estable. Pruebas del ciclo completo usan el generador real de asientos; cubren múltiples cuentas, reintentos, permisos, adjuntos y reversión ante errores. Las obligaciones ya contabilizadas sin documento identificado siguen bloqueadas hasta vincular una línea acreedora de pasivo, confirmar que continúa pendiente y revalidar origen y saldo al pagar. Esta candidata añade ese vínculo sin reconocer de nuevo el gasto.
-5. **Bancos y conciliación:** la importación de cartolas es atómica, diferencia duplicados de otros errores y conserva dos movimientos similares cuando sus saldos los distinguen. La creación manual ya no exige accidentalmente permiso de importar archivos. Se prueban reimportación, saldos y rollback del lote. Se verifican los cuatro movimientos históricos sin asiento directo: los vínculos de asientos existentes cuadran y el grupo de cheque protestado es consistente. Se verificaron ciclos y reversos bancarios en bases sintéticas; permanecen pendientes la aceptación real de perfiles y la auditoría de las demás rutas.
-6. **Compras y OC:** servicios autorizados y transaccionales para crear, modificar, cambiar estado, asociar y desvincular facturas. La modificación incluye proveedor, fecha, condiciones, observaciones y líneas; las OC anuladas o con facturas vinculadas no se modifican. La asociación controla proveedor, estado, duplicados y saldos globales de factura/OC. Se conserva el PDF con membrete y se protege su exportación. Los ensayos no generan asientos por emitir o vincular una OC. El RCV se prueba con reglas reales de factura y nota de crédito; se conserva la prevención de duplicados y se bloquea la contabilización en períodos cerrados.
-7. **RR. HH. y nómina:** se conserva la implementación existente. Se refuerzan exportación por trabajador y contabilización general por alcance. Se mantiene el resultado de auditoría de nueve períodos históricos cuadrados. El propietario verificó acceso de administrador, portal personal, PDF individual y denegación/restauración del permiso de exportar; las demás sesiones por perfil siguen pendientes.
-8. **Históricos:** las 57 tablas de negocio conservan sus columnas y registros originales después de la navegación y migraciones de esta candidata. Solo se añaden estructuras necesarias, como la tabla de adjuntos de Tesorería. La copia original del propietario queda fuera de las pruebas de escritura y fuera de GitHub.
-9. **Identidad:** se sustituyen referencias visibles SGCI en pantallas, subtítulos de informes y exportación de historial por CONTEM. Se preservan nombres técnicos de tablas, variables, claves de widgets y archivos de compatibilidad.
-10. **Pruebas integrales:** 638 pruebas locales correctas, sin omisiones, ejecutadas con copias privadas y datos sintéticos. Se repite navegación real por 34 pantallas con AppTest y comparación histórica sin modificaciones. Estas pruebas no sustituyen la validación funcional en Render ni las sesiones reales de Supabase.
-11. **Preparación de producción:** respaldo descargable consistente mediante SQLite Backup API, incluido WAL; comprobación de integridad; ensayo de recuperación que compara también el contenido; preflight de configuración productiva sin mostrar secretos; procedimiento de despliegue, persistencia, recuperación y reversión en `CONTEM_OPERACION_PRODUCCION.md`. La ejecución operativa y aprobación de publicación siguen pendientes.
+| Punto | Estado de la candidata |
+|---|---|
+| 1. Interfaz | Se conserva la interfaz aprobada, con las mismas secciones y campos para el propietario. |
+| 2. Multiusuario | Perfiles y excepciones efectivos, menús filtrados y revocación; activación empresarial controlada por CONTEM_MULTIUSUARIO_HABILITADO=SI. Por defecto NO conserva el portal anterior. Cuentas con solo liquidación personal conservan su portal. RR. HH. filtra trabajadores; informes globales requieren alcance todos. Nueve perfiles de lectura recorrieron 42 vistas y nueve revocaciones en sesiones simuladas, sin errores. Pendiente aceptación con Supabase real antes de habilitar producción. |
+| 3. Balance | Ocho columnas, cuadraturas, PDF y Excel implementados y probados. |
+| 4. Tesorería | Solicitud, adjuntos, aprobación, comprobante, clasificación, obligación de origen y pago probados. Lecturas/exportaciones independientes y catálogos con permisos de sus módulos. La obligación de origen exige confirmación operativa de beneficiario y saldo pendiente. |
+| 5. Bancos | Importación, duplicados, conciliación, imputaciones y reversos probados. Alta y vinculación bancaria ahora validan y auditan de forma atómica. |
+| 6. Compras y OC | Creación, modificación, anulación, PDF y asociación de OC implementados; RCV y períodos cerrados protegidos. |
+| 7. RR. HH. | Se conserva cálculo y contabilización existente. Alcance propio/autorizados/todos, servicios por trabajador y exportaciones probados. Portal/PDF/revocación reales ya verificados por el propietario. |
+| 8. Históricos | 57 tablas originales conservadas tras inicialización y recorrido de propietario; pruebas de escritura solo en copias y datos sintéticos. |
+| 9. Identidad | CONTEM en pantallas y encabezados de informes; identificadores SGCI técnicos conservados. |
+| 10. Regresión | 689 pruebas correctas; 34 vistas del propietario; 51 recorridos de perfiles y revocación simulados sin errores. Asiento manual desde pantalla real: cuadrado, auditado y borrador retirado. Falta aceptación autenticada de la candidata consolidada en Render. |
+| 11. Producción | Procedimiento de respaldo, recuperación, configuración, despliegue y retorno preparado. Persistencia/recuperación de pruebas ya ensayadas. Faltan respaldo productivo reciente, preflight y autorización expresa final para main/producción. |
 
-## Bloqueantes vigentes para declarar la entrega definitiva
+## Cambios agrupados del cierre
 
-- Completar auditoría de consultas y operaciones aún embebidas en pantallas antes de habilitar el acceso empresarial general. Mantener la barrera actual y el alcance laboral.
-- Validar con el propietario los vínculos operativos de obligaciones de Tesorería. La candidata ya implementa el servicio y sus pruebas; los casos sin origen o confirmación siguen bloqueados.
-- Realizar aceptación funcional con perfiles operativos autenticados y flujos de negocio completos. La prueba real de portal/PDF/revocación no certifica todos los perfiles.
-- Publicar y validar la candidata local de listados bancarios cuando se autoricen sus cuatro archivos. Activo en staging: 1f1b2006ecb7389f7cc50f3ae279437b3d3b5253, con obligaciones de Tesorería y acceso verificados. Esta nueva candidata tiene 638 pruebas correctas y aún no se ha desplegado.
-- Antes de producción: respaldo operativo reciente, comprobaciones finales de recuperación/configuración y autorización expresa para modificar main y desplegar. La persistencia y el ensayo local de recuperación en pruebas ya fueron comprobados con dos respaldos privados del 12 de noviembre; no equivalen a una restauración de producción.
+- Asiento manual y carga de saldos: servicio único que reserva escritura antes de validar cuentas, cierre, montos enteros, fechas y cuadratura; numera asientos dentro de la reserva y confirma lote y auditoría juntos. Un error rechaza todo el lote y respeta transacciones previas.
+- F29: revalida autorización y cierre bajo reserva, bloquea un período ya compensado y confirma asiento/control/auditoría juntos. Se conserva el cálculo existente; no presenta declaraciones tributarias.
+- Cierre/reapertura: revalida estado y cuadratura bajo reserva y guarda auditoría conjunta; no depende únicamente de una vista previa.
+- DTE: cada pestaña valida su lectura antes de consultar. Descargas y reportes requieren exportación del submódulo correspondiente. No cambia su carácter documental independiente del RCV.
+- Exportaciones: se agregan controles faltantes en diario, mayor, estados financieros, asientos, estados de cuenta, partidas abiertas y anticipos/préstamos. El enriquecimiento XML también exige lectura documental.
+- Catálogos de Tesorería y vistas cruzadas exigen permisos de sus fuentes; una vista de conciliación auxiliar o cierre indica las lecturas adicionales necesarias antes de consultar.
 
-Las entradas posteriores describen etapas históricas y sus cifras de pruebas; este bloque y la última etapa describen el estado actual. El aislamiento de los proyectos Supabase de pruebas y producción y la configuración de staging fueron confirmados; no se vuelven a solicitar esos datos.
+## Condiciones restantes de liberación
+
+1. Publicar este único lote revisado en integración, CI y despliegue de pruebas. Activar el acceso empresarial únicamente en pruebas para la aceptación. No tocar main.
+2. Aceptar con cuentas Supabase reales navegación autorizada, denegación/revocación y alcance laboral. Las sesiones AppTest simuladas no acreditan autenticación real.
+3. Obtener respaldo productivo actual, ejecutar comprobaciones finales y recibir autorización expresa de producción. Registrar versión de retorno y verificar después del despliegue sin escrituras de prueba.
+
+No se añaden funcionalidades opcionales a esta liberación. Los apartados posteriores son el historial de desarrollo y conservan cifras y estados de sus fechas; esta cabecera describe la candidata actual.
 
 ## Referencia contable del formato
 

@@ -33,6 +33,7 @@ def saldo_cuenta(conn, codigo, hasta=None):
 
 
 def resumen_financiero(conn, hasta=None):
+    sgci_autorizar_operacion(conn,'contabilidad','ver','Estados Financieros')
     where = ""
     params=[]
     if hasta:
@@ -59,6 +60,7 @@ def estado_situacion(conn, hasta=None):
 
 
 def estado_resultados(conn, hasta=None, desde=None):
+    sgci_autorizar_operacion(conn,'contabilidad','ver','Estados Financieros')
     sql="""
         SELECT p.codigo, p.nombre, p.tipo, p.categoria,
                COALESCE(SUM(l.debe),0) debe, COALESCE(SUM(l.haber),0) haber

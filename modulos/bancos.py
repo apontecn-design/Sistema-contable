@@ -1,4 +1,38 @@
 # CONTEM: componente extraído del app.py original; ejecución secuencial compartida.
+
+def contem_guardar_banco(conn,nombre,numero,tipo,codigo,saldo=0):
+    from datetime import datetime
+    from decimal import Decimal
+    sgci_autorizar_operacion(conn,'banco','crear','Bancos y cartolas')
+    if conn.in_transaction:raise ValueError('Hay una transacción pendiente; no se modificó.')
+    saldo=Decimal(str(saldo))
+    if not str(nombre).strip() or not saldo.is_finite() or saldo!=saldo.to_integral_value():
+        raise ValueError('Indica nombre y saldo CLP entero válido.')
+    if tipo not in ('Cuenta corriente','Cuenta vista','Cuenta empresa','Otra'):raise ValueError('Tipo de cuenta inválido.')
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn,'banco','crear','Bancos y cartolas')
+        if codigo not in Plan(conn).hojas:raise ValueError('Selecciona una cuenta imputable.')
+        cur=conn.execute('INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)',
+            (str(nombre).strip(),str(numero).strip(),tipo,codigo,int(saldo)))
+        bid=cur.lastrowid
+        conn.execute('INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)',
+            (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),'NUEVO BANCO',str(bid)))
+    return bid
+
+
+def contem_vincular_banco(conn,banco_id,codigo):
+    from datetime import datetime
+    sgci_autorizar_operacion(conn,'banco','editar','Bancos y cartolas')
+    if conn.in_transaction:raise ValueError('Hay una transacción pendiente; no se modificó.')
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn,'banco','editar','Bancos y cartolas')
+        if codigo not in Plan(conn).hojas:raise ValueError('Selecciona una cuenta imputable.')
+        cur=conn.execute('UPDATE bancos SET cuenta_contable=? WHERE id=? AND activo=1',(codigo,banco_id))
+        if cur.rowcount!=1:raise ValueError('Banco no disponible.')
+        conn.execute('INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)',
+            (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),'VINCULACION BANCO',f'{banco_id}: {codigo}'))
 def conciliacion_clientes(conn):
 
     roles = cargar_roles(conn)

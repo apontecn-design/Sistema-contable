@@ -258,7 +258,7 @@ def dte_reporte_pdf(titulo, df, filtros=''):
     styles=getSampleStyleSheet()
     styles.add(ParagraphStyle(name='DTECell',fontName='Helvetica',fontSize=6,leading=7.5,alignment=TA_LEFT,wordWrap='CJK'))
     styles.add(ParagraphStyle(name='DTEHeader',parent=styles['DTECell'],fontName='Helvetica-Bold',textColor=colors.white))
-    story=[Paragraph(escape('SGCI | '+titulo),styles['Heading2']),Paragraph(escape(filtros),styles['Normal']),Spacer(1,6*mm)]
+    story=[Paragraph(escape('CONTEM | '+titulo),styles['Heading2']),Paragraph(escape(filtros),styles['Normal']),Spacer(1,6*mm)]
     if df.empty:
         story.append(Paragraph('No hay registros para los filtros seleccionados.',styles['Normal']))
     else:
@@ -288,175 +288,191 @@ def pantalla_dte(conn):
     st.caption('Repositorio documental independiente. La importación NO crea ventas, cuentas por cobrar ni asientos contables.')
     tab1,tab2,tab3 = st.tabs(['📥 Importar XML','🔎 Documentos y visor','📊 Reportería'])
     with tab1:
-        st.info('Importa XML del SII (SetDTE mensual, DTE individuales o ZIP). Solo se agregan registros documentales: RCV sigue siendo la fuente contable.')
-        archivos=st.file_uploader('XML o ZIP',type=['xml','zip'],accept_multiple_files=True,key='dte_carga')
-        if archivos:
-            try:
-                paquetes=dte_archivos_extraer(archivos)
-                resumen=[]; errores=[]; vistos=set()
-                for nombre,datos in paquetes:
-                    try:
-                        for cab,items,refs in dte_parsear(datos):
-                            clave=(cab['rut_emisor'],cab['tipo_doc'],cab['folio'])
-                            existe=conn.execute('SELECT 1 FROM dte_documentos WHERE rut_emisor=? AND tipo_doc=? AND folio=?',clave).fetchone()
-                            estado='Duplicado' if existe or clave in vistos else 'Nuevo'
-                            vistos.add(clave)
-                            resumen.append(dict(Archivo=nombre,Estado=estado,Emisor=cab['rut_emisor'],
-                                Fecha=cab['fecha'],Tipo=cab['tipo_doc'],Folio=cab['folio'],
-                                Cliente=cab['razon_receptor'],Total=cab['total'],Items=len(items),Referencias=len(refs)))
-                    except Exception as e: errores.append(f'{nombre}: {e}')
-                if resumen:
-                    previa=pd.DataFrame(resumen)
-                    st.subheader('Vista previa antes de importar')
-                    st.dataframe(previa,use_container_width=True,hide_index=True)
-                    st.caption(f"Nuevos: {(previa['Estado']=='Nuevo').sum()} · Duplicados: {(previa['Estado']=='Duplicado').sum()}")
-                    emisores=sorted(previa['Emisor'].unique())
-                    if len(emisores)>1:
-                        st.error('El lote contiene varios RUT emisores. Sepáralos antes de importar.')
-                    else:
-                        st.caption('Verifica que el RUT emisor corresponda a la empresa piloto seleccionada.')
-                    confirmado=st.checkbox('Confirmo que el RUT emisor corresponde a la empresa seleccionada y autorizo únicamente la carga documental.',key='dte_confirma')
-                    if st.button('Guardar documentos (sin contabilizar)',type='primary',disabled=not confirmado or len(emisores)!=1,key='dte_importar'):
-                        nuevos=duplicados=0; fallas=[]
-                        for nombre,datos in paquetes:
-                            try:
-                                with conn:
-                                    a,b=dte_guardar(conn,datos,nombre,rut_permitido=emisores[0])
-                                nuevos+=a;duplicados+=b
-                            except Exception as e: fallas.append(f'{nombre}: {e}')
-                        st.success(f'Documentos guardados: {nuevos} · Duplicados omitidos: {duplicados}. No se generaron asientos.')
-                        if fallas: st.warning('Observaciones: '+'; '.join(fallas[:10]))
-                if errores: st.warning('XML no procesados: '+'; '.join(errores[:10]))
-            except Exception as e: st.error(f'No se pudo preparar el lote: {e}')
+        if not sgci_puede_submodulo(conn,'dte','Importar XML','ver'):
+            st.info('No tienes autorización para esta sección.')
+        else:
+            sgci_autorizar_operacion(conn,'dte','ver','Importar XML')
+            st.info('Importa XML del SII (SetDTE mensual, DTE individuales o ZIP). Solo se agregan registros documentales: RCV sigue siendo la fuente contable.')
+            archivos=st.file_uploader('XML o ZIP',type=['xml','zip'],accept_multiple_files=True,key='dte_carga')
+            if archivos:
+                try:
+                    paquetes=dte_archivos_extraer(archivos)
+                    resumen=[]; errores=[]; vistos=set()
+                    for nombre,datos in paquetes:
+                        try:
+                            for cab,items,refs in dte_parsear(datos):
+                                clave=(cab['rut_emisor'],cab['tipo_doc'],cab['folio'])
+                                existe=conn.execute('SELECT 1 FROM dte_documentos WHERE rut_emisor=? AND tipo_doc=? AND folio=?',clave).fetchone()
+                                estado='Duplicado' if existe or clave in vistos else 'Nuevo'
+                                vistos.add(clave)
+                                resumen.append(dict(Archivo=nombre,Estado=estado,Emisor=cab['rut_emisor'],
+                                    Fecha=cab['fecha'],Tipo=cab['tipo_doc'],Folio=cab['folio'],
+                                    Cliente=cab['razon_receptor'],Total=cab['total'],Items=len(items),Referencias=len(refs)))
+                        except Exception as e: errores.append(f'{nombre}: {e}')
+                    if resumen:
+                        previa=pd.DataFrame(resumen)
+                        st.subheader('Vista previa antes de importar')
+                        st.dataframe(previa,use_container_width=True,hide_index=True)
+                        st.caption(f"Nuevos: {(previa['Estado']=='Nuevo').sum()} · Duplicados: {(previa['Estado']=='Duplicado').sum()}")
+                        emisores=sorted(previa['Emisor'].unique())
+                        if len(emisores)>1:
+                            st.error('El lote contiene varios RUT emisores. Sepáralos antes de importar.')
+                        else:
+                            st.caption('Verifica que el RUT emisor corresponda a la empresa piloto seleccionada.')
+                        confirmado=st.checkbox('Confirmo que el RUT emisor corresponde a la empresa seleccionada y autorizo únicamente la carga documental.',key='dte_confirma')
+                        if st.button('Guardar documentos (sin contabilizar)',type='primary',disabled=not confirmado or len(emisores)!=1,key='dte_importar'):
+                            nuevos=duplicados=0; fallas=[]
+                            for nombre,datos in paquetes:
+                                try:
+                                    with conn:
+                                        a,b=dte_guardar(conn,datos,nombre,rut_permitido=emisores[0])
+                                    nuevos+=a;duplicados+=b
+                                except Exception as e: fallas.append(f'{nombre}: {e}')
+                            st.success(f'Documentos guardados: {nuevos} · Duplicados omitidos: {duplicados}. No se generaron asientos.')
+                            if fallas: st.warning('Observaciones: '+'; '.join(fallas[:10]))
+                    if errores: st.warning('XML no procesados: '+'; '.join(errores[:10]))
+                except Exception as e: st.error(f'No se pudo preparar el lote: {e}')
     with tab2:
-        df=pd.read_sql_query('''SELECT id,fecha,tipo_doc,folio,razon_receptor,rut_receptor,neto,iva,total
-            FROM dte_documentos ORDER BY fecha DESC,id DESC''',conn)
-        if df.empty:
-            st.info('Aún no hay documentos importados.')
+        if not sgci_puede_submodulo(conn,'dte','Documentos y visor','ver'):
+            st.info('No tienes autorización para esta sección.')
         else:
-            busqueda=st.text_input('Buscar cliente, RUT o folio',key='dte_busqueda')
-            if busqueda:
-                df=df[df[['razon_receptor','rut_receptor','folio']].fillna('').astype(str).apply(
-                    lambda x:x.str.contains(busqueda,case=False,regex=False)).any(axis=1)]
-            st.caption('Pulsa 🔍 en la factura que quieras consultar. Ningún documento se abre automáticamente.')
+            sgci_autorizar_operacion(conn,'dte','ver','Documentos y visor')
+            df=pd.read_sql_query('''SELECT id,fecha,tipo_doc,folio,razon_receptor,rut_receptor,neto,iva,total
+                FROM dte_documentos ORDER BY fecha DESC,id DESC''',conn)
             if df.empty:
-                st.info('No hay documentos que coincidan con la búsqueda.')
+                st.info('Aún no hay documentos importados.')
             else:
-                tamano=15
-                paginas=max(1,(len(df)+tamano-1)//tamano)
-                pagina=st.number_input('Página',min_value=1,max_value=paginas,value=1,step=1,key='dte_pagina')
-                visible=df.iloc[(pagina-1)*tamano:pagina*tamano]
-                cab=st.columns([1.1,.7,.8,2.6,1.25,1.15,.45])
-                for c,t in zip(cab,['Fecha','Tipo','Folio','Cliente','RUT','Total','Ver']): c.markdown('**'+t+'**')
-                for r in visible.itertuples(index=False):
-                    c=st.columns([1.1,.7,.8,2.6,1.25,1.15,.45],vertical_alignment='center')
-                    for col,val in zip(c[:6],[r.fecha,r.tipo_doc,r.folio,r.razon_receptor,r.rut_receptor,money(r.total)]):
-                        col.write(str(val or ''))
-                    if c[6].button('🔍',key=f'dte_lupa_{r.id}',help='Ver factura '+str(r.folio)):
-                        st.session_state['dte_documento_abierto']=int(r.id)
-                abierto=st.session_state.get('dte_documento_abierto')
-                if abierto is not None:
-                    fila=conn.execute('SELECT * FROM dte_documentos WHERE id=?',(abierto,)).fetchone()
-                    if fila:
-                        st.divider()
-                        c_t,c_x=st.columns([5,1])
-                        c_t.subheader(f"{nombre_documento(fila['tipo_doc'])} N.º {fila['folio']}")
-                        if c_x.button('✖ Cerrar vista',key='dte_cerrar'):
-                            st.session_state['dte_documento_abierto']=None
-                            st.rerun()
-                        items=pd.read_sql_query("""SELECT linea,codigo,nombre,descripcion,cantidad,unidad,precio,descuento,monto
-                            FROM dte_items WHERE documento_id=? ORDER BY linea""",conn,params=(fila['id'],))
-                        refs=pd.read_sql_query('SELECT linea,tipo_ref,folio_ref,fecha_ref,codigo_ref,razon_ref FROM dte_referencias WHERE documento_id=? ORDER BY linea',conn,params=(fila['id'],))
-                        vista_html=dte_html_factura(fila,items,refs)
-                        import streamlit.components.v1 as components
-                        st.caption('Representación documental similar al formato de factura del SII. No es copia oficial ni afecta contabilidad.')
-                        components.html(vista_html,height=780,scrolling=True)
-                        b1,b2=st.columns(2)
-                        with b1:
-                            st.download_button('🖨️ Descargar vista para imprimir (HTML)',vista_html.encode('utf-8'),
-                                file_name=f"Vista_DTE_{fila['tipo_doc']}_{fila['folio']}.html",mime='text/html',key=f"dte_print_{fila['id']}")
-                        with b2:
-                            st.download_button('⬇️ XML original',bytes(fila['xml_original']),
-                                file_name=f"DTE_{fila['tipo_doc']}_{fila['folio']}.xml",mime='application/xml',key=f"dte_xml_{fila['id']}")
-                        with st.expander('Ver datos estructurados para reportes'):
-                            st.markdown('**Detalle de ítems**')
-                            st.dataframe(items,use_container_width=True,hide_index=True)
-                            if not refs.empty:
-                                st.markdown('**Referencias**')
-                                st.dataframe(refs,use_container_width=True,hide_index=True)
+                busqueda=st.text_input('Buscar cliente, RUT o folio',key='dte_busqueda')
+                if busqueda:
+                    df=df[df[['razon_receptor','rut_receptor','folio']].fillna('').astype(str).apply(
+                        lambda x:x.str.contains(busqueda,case=False,regex=False)).any(axis=1)]
+                st.caption('Pulsa 🔍 en la factura que quieras consultar. Ningún documento se abre automáticamente.')
+                if df.empty:
+                    st.info('No hay documentos que coincidan con la búsqueda.')
+                else:
+                    tamano=15
+                    paginas=max(1,(len(df)+tamano-1)//tamano)
+                    pagina=st.number_input('Página',min_value=1,max_value=paginas,value=1,step=1,key='dte_pagina')
+                    visible=df.iloc[(pagina-1)*tamano:pagina*tamano]
+                    cab=st.columns([1.1,.7,.8,2.6,1.25,1.15,.45])
+                    for c,t in zip(cab,['Fecha','Tipo','Folio','Cliente','RUT','Total','Ver']): c.markdown('**'+t+'**')
+                    for r in visible.itertuples(index=False):
+                        c=st.columns([1.1,.7,.8,2.6,1.25,1.15,.45],vertical_alignment='center')
+                        for col,val in zip(c[:6],[r.fecha,r.tipo_doc,r.folio,r.razon_receptor,r.rut_receptor,money(r.total)]):
+                            col.write(str(val or ''))
+                        if c[6].button('🔍',key=f'dte_lupa_{r.id}',help='Ver factura '+str(r.folio)):
+                            st.session_state['dte_documento_abierto']=int(r.id)
+                    abierto=st.session_state.get('dte_documento_abierto')
+                    if abierto is not None:
+                        fila=conn.execute('SELECT * FROM dte_documentos WHERE id=?',(abierto,)).fetchone()
+                        if fila:
+                            st.divider()
+                            c_t,c_x=st.columns([5,1])
+                            c_t.subheader(f"{nombre_documento(fila['tipo_doc'])} N.º {fila['folio']}")
+                            if c_x.button('✖ Cerrar vista',key='dte_cerrar'):
+                                st.session_state['dte_documento_abierto']=None
+                                st.rerun()
+                            items=pd.read_sql_query("""SELECT linea,codigo,nombre,descripcion,cantidad,unidad,precio,descuento,monto
+                                FROM dte_items WHERE documento_id=? ORDER BY linea""",conn,params=(fila['id'],))
+                            refs=pd.read_sql_query('SELECT linea,tipo_ref,folio_ref,fecha_ref,codigo_ref,razon_ref FROM dte_referencias WHERE documento_id=? ORDER BY linea',conn,params=(fila['id'],))
+                            vista_html=dte_html_factura(fila,items,refs)
+                            import streamlit.components.v1 as components
+                            st.caption('Representación documental similar al formato de factura del SII. No es copia oficial ni afecta contabilidad.')
+                            components.html(vista_html,height=780,scrolling=True)
+                            if sgci_puede_submodulo(conn,'dte','Documentos y visor','exportar'):
+                                sgci_autorizar_operacion(conn,'dte','exportar','Documentos y visor')
+                                b1,b2=st.columns(2)
+                                with b1:
+                                    st.download_button('🖨️ Descargar vista para imprimir (HTML)',vista_html.encode('utf-8'),
+                                        file_name=f"Vista_DTE_{fila['tipo_doc']}_{fila['folio']}.html",mime='text/html',key=f"dte_print_{fila['id']}")
+                                with b2:
+                                    st.download_button('⬇️ XML original',bytes(fila['xml_original']),
+                                        file_name=f"DTE_{fila['tipo_doc']}_{fila['folio']}.xml",mime='application/xml',key=f"dte_xml_{fila['id']}")
+                            with st.expander('Ver datos estructurados para reportes'):
+                                st.markdown('**Detalle de ítems**')
+                                st.dataframe(items,use_container_width=True,hide_index=True)
+                                if not refs.empty:
+                                    st.markdown('**Referencias**')
+                                    st.dataframe(refs,use_container_width=True,hide_index=True)
     with tab3:
-        df=pd.read_sql_query('''SELECT fecha,tipo_doc,folio,rut_receptor,razon_receptor,neto,exento,iva,total
-            FROM dte_documentos ORDER BY fecha DESC''',conn)
-        if df.empty:
-            st.info('Importa documentos para visualizar reportes.')
+        if not sgci_puede_submodulo(conn,'dte','Reportería','ver'):
+            st.info('No tienes autorización para esta sección.')
         else:
-            df['periodo']=df['fecha'].fillna('').str[:7]
-            periodos=sorted(df['periodo'].unique(),reverse=True)
-            elegidos=st.multiselect('Períodos',periodos,default=periodos,key='dte_periodos')
-            filtrado=df[df['periodo'].isin(elegidos)].copy()
-            st.caption('Los importes de notas de crédito se presentan sin signo ajustado; no equivalen a ventas netas tributarias.')
-            reporte=st.selectbox('Selecciona el reporte',[
-                'Por período','Por fecha','Por cliente','Por tipo de documento','Documentos individuales','Ítems facturados','Buscar descripciones','Cantidades por ítem','Referencias y notas de crédito','Resumen neto ajustado por NC'],key='dte_tipo_reporte')
-            if reporte=='Por período':
-                tabla=filtrado.groupby('periodo',as_index=False)[['neto','exento','iva','total']].sum()
-            elif reporte=='Por fecha':
-                tabla=filtrado.groupby('fecha',as_index=False)[['neto','exento','iva','total']].sum()
-            elif reporte=='Por cliente':
-                clientes=sorted(filtrado['razon_receptor'].dropna().unique())
-                seleccion=st.multiselect('Filtrar clientes',clientes,default=clientes,key='dte_reporte_clientes')
-                filtrado=filtrado[filtrado['razon_receptor'].isin(seleccion)]
-                tabla=filtrado.groupby(['rut_receptor','razon_receptor'],as_index=False)[['neto','exento','iva','total']].sum()
-            elif reporte=='Por tipo de documento':
-                tabla=filtrado.groupby('tipo_doc',as_index=False)[['neto','exento','iva','total']].sum()
-                tabla.insert(1,'documento',tabla['tipo_doc'].apply(nombre_documento))
-            elif reporte=='Documentos individuales':
-                tabla=filtrado[['fecha','tipo_doc','folio','razon_receptor','neto','exento','iva','total']].copy()
-            elif reporte in ('Ítems facturados','Buscar descripciones','Cantidades por ítem'):
-                tabla=pd.read_sql_query('''SELECT d.fecha,d.tipo_doc,d.folio,d.razon_receptor,
-                    i.nombre,i.descripcion,i.cantidad,i.precio,i.monto
-                    FROM dte_items i JOIN dte_documentos d ON d.id=i.documento_id
-                    ORDER BY d.fecha DESC''',conn)
-                tabla=tabla[tabla['fecha'].fillna('').str[:7].isin(elegidos)].copy()
-                if reporte=='Buscar descripciones':
-                    palabra=st.text_input('Buscar texto en nombre o descripción',key='dte_palabra')
-                    if palabra:
-                        mascara=tabla[['nombre','descripcion']].fillna('').astype(str).apply(lambda col:col.str.contains(palabra,case=False,regex=False)).any(axis=1)
-                        tabla=tabla[mascara]
-                elif reporte=='Cantidades por ítem':
-                    tabla=tabla.groupby('nombre',dropna=False,as_index=False).agg(cantidad=('cantidad','sum'),monto=('monto','sum'),lineas=('folio','size'))
-                st.caption('Reporte documental. Los montos de ítems no equivalen necesariamente a ventas netas tributarias.')
-            elif reporte=='Referencias y notas de crédito':
-                tabla=pd.read_sql_query('''SELECT d.fecha,d.tipo_doc,d.folio,d.razon_receptor,r.tipo_ref,r.folio_ref,r.fecha_ref,r.codigo_ref,r.razon_ref
-                    FROM dte_referencias r JOIN dte_documentos d ON d.id=r.documento_id ORDER BY d.fecha DESC''',conn)
-                tabla=tabla[tabla['fecha'].fillna('').str[:7].isin(elegidos)].copy()
+            sgci_autorizar_operacion(conn,'dte','ver','Reportería')
+            df=pd.read_sql_query('''SELECT fecha,tipo_doc,folio,rut_receptor,razon_receptor,neto,exento,iva,total
+                FROM dte_documentos ORDER BY fecha DESC''',conn)
+            if df.empty:
+                st.info('Importa documentos para visualizar reportes.')
             else:
-                tabla=filtrado.copy()
-                tabla['signo']=tabla['tipo_doc'].apply(lambda x:-1 if x==61 else 1)
-                for campo in ['neto','exento','iva','total']:
-                    tabla[campo]=tabla[campo]*tabla['signo']
-                tabla=tabla.groupby('periodo',as_index=False)[['neto','exento','iva','total']].sum()
-                st.caption('Resumen documental estimado: resta notas de crédito tipo 61; no sustituye al RCV ni constituye conciliación tributaria.')
-            st.subheader(reporte)
-            st.metric('Documentos incluidos en el filtro',len(filtrado))
-            st.dataframe(formatear_montos_df(tabla),use_container_width=True,hide_index=True,
-                column_config={'descripcion':st.column_config.TextColumn('Descripción',width='large')} if 'descripcion' in tabla else None)
-            col1,col2,col3=st.columns(3)
-            with col1:
-                st.download_button('⬇️ Exportar CSV',tabla.to_csv(index=False).encode('utf-8-sig'),
-                    file_name='SGCI_'+reporte.lower().replace(' ','_')+'.csv',mime='text/csv',key='dte_csv_reporte')
-            with col3:
-                try:
-                    st.download_button('⬇️ Exportar Excel',dte_excel(tabla),file_name='SGCI_'+reporte.lower().replace(' ','_')+'.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key='dte_excel_reporte')
-                except ImportError:
-                    st.warning('Para Excel, instalar openpyxl.')
-            with col2:
-                try:
-                    pdf=dte_reporte_pdf('Facturación DTE - '+reporte,formatear_montos_df(tabla),
-                        'Períodos: '+(', '.join(elegidos) if elegidos else 'Ninguno'))
-                    st.download_button('🖨️ Generar PDF para imprimir',pdf,
-                        file_name='SGCI_'+reporte.lower().replace(' ','_')+'.pdf',mime='application/pdf',key='dte_pdf_reporte')
-                except ImportError:
-                    st.warning('Para generar PDF, agrega reportlab a requirements.txt y vuelve a desplegar la aplicación.')
+                df['periodo']=df['fecha'].fillna('').str[:7]
+                periodos=sorted(df['periodo'].unique(),reverse=True)
+                elegidos=st.multiselect('Períodos',periodos,default=periodos,key='dte_periodos')
+                filtrado=df[df['periodo'].isin(elegidos)].copy()
+                st.caption('Los importes de notas de crédito se presentan sin signo ajustado; no equivalen a ventas netas tributarias.')
+                reporte=st.selectbox('Selecciona el reporte',[
+                    'Por período','Por fecha','Por cliente','Por tipo de documento','Documentos individuales','Ítems facturados','Buscar descripciones','Cantidades por ítem','Referencias y notas de crédito','Resumen neto ajustado por NC'],key='dte_tipo_reporte')
+                if reporte=='Por período':
+                    tabla=filtrado.groupby('periodo',as_index=False)[['neto','exento','iva','total']].sum()
+                elif reporte=='Por fecha':
+                    tabla=filtrado.groupby('fecha',as_index=False)[['neto','exento','iva','total']].sum()
+                elif reporte=='Por cliente':
+                    clientes=sorted(filtrado['razon_receptor'].dropna().unique())
+                    seleccion=st.multiselect('Filtrar clientes',clientes,default=clientes,key='dte_reporte_clientes')
+                    filtrado=filtrado[filtrado['razon_receptor'].isin(seleccion)]
+                    tabla=filtrado.groupby(['rut_receptor','razon_receptor'],as_index=False)[['neto','exento','iva','total']].sum()
+                elif reporte=='Por tipo de documento':
+                    tabla=filtrado.groupby('tipo_doc',as_index=False)[['neto','exento','iva','total']].sum()
+                    tabla.insert(1,'documento',tabla['tipo_doc'].apply(nombre_documento))
+                elif reporte=='Documentos individuales':
+                    tabla=filtrado[['fecha','tipo_doc','folio','razon_receptor','neto','exento','iva','total']].copy()
+                elif reporte in ('Ítems facturados','Buscar descripciones','Cantidades por ítem'):
+                    tabla=pd.read_sql_query('''SELECT d.fecha,d.tipo_doc,d.folio,d.razon_receptor,
+                        i.nombre,i.descripcion,i.cantidad,i.precio,i.monto
+                        FROM dte_items i JOIN dte_documentos d ON d.id=i.documento_id
+                        ORDER BY d.fecha DESC''',conn)
+                    tabla=tabla[tabla['fecha'].fillna('').str[:7].isin(elegidos)].copy()
+                    if reporte=='Buscar descripciones':
+                        palabra=st.text_input('Buscar texto en nombre o descripción',key='dte_palabra')
+                        if palabra:
+                            mascara=tabla[['nombre','descripcion']].fillna('').astype(str).apply(lambda col:col.str.contains(palabra,case=False,regex=False)).any(axis=1)
+                            tabla=tabla[mascara]
+                    elif reporte=='Cantidades por ítem':
+                        tabla=tabla.groupby('nombre',dropna=False,as_index=False).agg(cantidad=('cantidad','sum'),monto=('monto','sum'),lineas=('folio','size'))
+                    st.caption('Reporte documental. Los montos de ítems no equivalen necesariamente a ventas netas tributarias.')
+                elif reporte=='Referencias y notas de crédito':
+                    tabla=pd.read_sql_query('''SELECT d.fecha,d.tipo_doc,d.folio,d.razon_receptor,r.tipo_ref,r.folio_ref,r.fecha_ref,r.codigo_ref,r.razon_ref
+                        FROM dte_referencias r JOIN dte_documentos d ON d.id=r.documento_id ORDER BY d.fecha DESC''',conn)
+                    tabla=tabla[tabla['fecha'].fillna('').str[:7].isin(elegidos)].copy()
+                else:
+                    tabla=filtrado.copy()
+                    tabla['signo']=tabla['tipo_doc'].apply(lambda x:-1 if x==61 else 1)
+                    for campo in ['neto','exento','iva','total']:
+                        tabla[campo]=tabla[campo]*tabla['signo']
+                    tabla=tabla.groupby('periodo',as_index=False)[['neto','exento','iva','total']].sum()
+                    st.caption('Resumen documental estimado: resta notas de crédito tipo 61; no sustituye al RCV ni constituye conciliación tributaria.')
+                st.subheader(reporte)
+                st.metric('Documentos incluidos en el filtro',len(filtrado))
+                st.dataframe(formatear_montos_df(tabla),use_container_width=True,hide_index=True,
+                    column_config={'descripcion':st.column_config.TextColumn('Descripción',width='large')} if 'descripcion' in tabla else None)
+                if sgci_puede_submodulo(conn,'dte','Reportería','exportar'):
+                    sgci_autorizar_operacion(conn,'dte','exportar','Reportería')
+                    col1,col2,col3=st.columns(3)
+                    with col1:
+                        st.download_button('⬇️ Exportar CSV',tabla.to_csv(index=False).encode('utf-8-sig'),
+                            file_name='CONTEM_'+reporte.lower().replace(' ','_')+'.csv',mime='text/csv',key='dte_csv_reporte')
+                    with col3:
+                        try:
+                            st.download_button('⬇️ Exportar Excel',dte_excel(tabla),file_name='CONTEM_'+reporte.lower().replace(' ','_')+'.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key='dte_excel_reporte')
+                        except ImportError:
+                            st.warning('Para Excel, instalar openpyxl.')
+                    with col2:
+                        try:
+                            pdf=dte_reporte_pdf('Facturación DTE - '+reporte,formatear_montos_df(tabla),
+                                'Períodos: '+(', '.join(elegidos) if elegidos else 'Ninguno'))
+                            st.download_button('🖨️ Generar PDF para imprimir',pdf,
+                                file_name='CONTEM_'+reporte.lower().replace(' ','_')+'.pdf',mime='application/pdf',key='dte_pdf_reporte')
+                        except ImportError:
+                            st.warning('Para generar PDF, agrega reportlab a requirements.txt y vuelve a desplegar la aplicación.')
 
 
 
@@ -473,7 +489,7 @@ def tes_reporte_imprimible(titulo, datos):
     doc=SimpleDocTemplate(buffer,pagesize=A4,leftMargin=25,rightMargin=25,topMargin=105,bottomMargin=30)
     styles=getSampleStyleSheet()
     styles['Title'].textColor=colors.HexColor('#46543A')
-    story=[Paragraph('SGCI | '+str(titulo),styles['Title']),Spacer(1,12)]
+    story=[Paragraph('CONTEM | '+str(titulo),styles['Title']),Spacer(1,12)]
     if datos is not None and not datos.empty:
         d=datos.copy().fillna('')
         # Ancho adaptable y texto ajustado para no cortar las columnas.
@@ -507,7 +523,7 @@ def tes_boton_imprimir(conn,titulo,df,key,submodulo='Solicitudes de fondos'):
     sgci_autorizar_operacion(conn,'tesoreria','exportar',submodulo)
     try:
         st.download_button('🖨️ Imprimir / PDF · '+titulo,
-            data=tes_reporte_imprimible(titulo,df),file_name='SGCI_'+key+'.pdf',
+            data=tes_reporte_imprimible(titulo,df),file_name='CONTEM_'+key+'.pdf',
             mime='application/pdf',key='tes_print_'+key)
     except ImportError:
         st.caption('Para imprimir en PDF, instalar reportlab en requirements.txt.')

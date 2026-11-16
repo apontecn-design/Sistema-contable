@@ -60,3 +60,14 @@ Ensayar la restauración en una carpeta aislada, comprobar integridad, claves fo
 Sobre el código 7d19117ba892760514d2640a129919d0b84aef2a se descargaron dos respaldos privados del servicio de pruebas, antes y después de redesplegar la misma versión. Se compararon 57 tablas en ambos sentidos: esquema, contenido y secuencias de identificadores idénticos; integridad correcta y ninguna infracción de claves foráneas. El reinicio terminó live y la pantalla de acceso funcionó sin excepciones.
 
 Ambos respaldos se restauraron en copias locales aisladas mediante SQLite Backup API; se conservaron esquema y contenido y las verificaciones de integridad y relaciones pasaron. Esto comprueba la persistencia observada y el ensayo local de recuperación de esos respaldos. No se restauró la base activa ni se ejecutó recuperación sobre producción. Los archivos privados permanecen fuera del repositorio. La aceptación de perfiles operativos y flujos pendientes sigue abierta.
+
+
+## Activación controlada del acceso empresarial — candidata consolidada
+
+CONTEM_MULTIUSUARIO_HABILITADO tiene valor predeterminado NO. Sin activación, las cuentas no propietarias siguen en el portal personal anterior. Con SI, una cuenta activa, sin cambio inicial pendiente y con lecturas explícitas de perfil/excepciones puede entrar a sus módulos; las cuentas con solo Liquidación mensual siguen en su portal. No se conceden permisos nuevos al activar la variable. Las concesiones generales heredadas no bastan para entrar.
+
+Habilitar SI primero en Sistema-contable-1, después de publicar la candidata consolidada y pasar CI. Comprobar con Supabase real un perfil operativo restringido, una denegación/revocación y el alcance laboral. No modificar el proyecto Supabase ni las credenciales. Conservar las pruebas previas del portal/PDF; repetir únicamente si una ruta cambia.
+
+Registrar la aceptación del propietario antes de activar SI en producción. Para retirar el acceso empresarial, volver la variable a NO y verificar después del despliegue: las cuentas no propietarias vuelven al portal al recargar. Esto no restaura datos ni revierte operaciones contables. El propietario mantiene su acceso.
+
+Validación local de esta candidata: 689 pruebas correctas, 34 vistas del propietario y 51 recorridos de nueve perfiles/revocaciones en sesiones simuladas sin errores; 57 tablas históricas conservadas. No sustituye la aceptación autenticada real.

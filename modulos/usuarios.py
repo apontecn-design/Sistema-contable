@@ -21,6 +21,47 @@ SGCI_SUBMODULOS = {
 SGCI_ACCIONES_SUB = SGCI_ACCIONES + ('importar', 'anular', 'confirmar')
 
 
+def contem_puede_exportar(conn,modulo,submodulo):
+    if not (sgci_puede_submodulo(conn,modulo,submodulo,'ver') and
+            sgci_puede_submodulo(conn,modulo,submodulo,'exportar')):
+        return False
+    sgci_autorizar_operacion(conn,modulo,'ver',submodulo)
+    sgci_autorizar_operacion(conn,modulo,'exportar',submodulo)
+    return True
+
+
+def contem_submodulos_visibles(conn,modulo):
+    return [sub for sub in SGCI_SUBMODULOS.get(modulo,())
+            if sgci_puede_submodulo(conn,modulo,sub,'ver')]
+
+
+def contem_selector_submodulo(conn,modulo,etiqueta,clave):
+    opciones=contem_submodulos_visibles(conn,modulo)
+    if modulo=='administracion' and sgci_es_propietario():opciones=['Usuarios y permisos']+opciones
+    if not opciones:
+        st.info('No tienes secciones habilitadas en este módulo.');st.stop()
+    if st.session_state.get(clave) not in opciones:st.session_state[clave]=opciones[0]
+    elegido=st.selectbox(etiqueta,opciones,key=clave)
+    if elegido!='Usuarios y permisos':sgci_autorizar_operacion(conn,modulo,'ver',elegido)
+    return elegido
+
+
+def contem_acceso_empresarial(conn):
+    """Activación controlada: las cuentas personales conservan su portal."""
+    import os
+    if sgci_es_propietario():return True
+    if os.getenv('CONTEM_MULTIUSUARIO_HABILITADO','NO')!='SI':return False
+    fila=conn.execute('SELECT activo,debe_cambiar_clave FROM sgci_usuarios WHERE email=?',
+        (sgci_identidad_actual(),)).fetchone()
+    if not fila or not fila['activo'] or fila['debe_cambiar_clave']:return False
+    # No convertir una concesión histórica general en acceso empresarial.
+    for modulo in SGCI_SUBMODULOS:
+        subs=contem_submodulos_visibles(conn,modulo)
+        if modulo!='nomina' and subs:return True
+        if modulo=='nomina' and any(s!='Liquidación mensual' for s in subs):return True
+    return False
+
+
 def sgci_crear_seguridad(conn):
     # Migración aditiva: no se alteran ni eliminan permisos históricos.
     conn.execute("""CREATE TABLE IF NOT EXISTS sgci_usuarios (

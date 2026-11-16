@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pandas as pd
 from modulos import esquema, contabilidad, plan_cuentas, reglas_contables, utilidades
 from modulos import conciliacion_documental, contabilidad_reportes, usuarios, empresa, tesoreria
-from modulos import contabilidad_asientos, reportes_contables
+from modulos import contabilidad_asientos, reportes_contables, bancos, cuentas_por_cobrar
 
 
 def preparar(test):
@@ -33,8 +33,10 @@ def preparar(test):
                 'validar_rut':utilidades.validar_rut,
                 'normalizar_rut':utilidades.normalizar_rut,
                 'cargar_roles':plan_cuentas.cargar_roles}
+    simbolos.update({'conciliacion_clientes':bancos.conciliacion_clientes,
+                     'conciliacion_proveedores':bancos.conciliacion_proveedores})
     simbolos.update({n:getattr(utilidades,n) for n in ('clp_round','limpiar_texto','fecha_iso','numero','normalizar_columnas')})
-    for modulo in (esquema,plan_cuentas,utilidades,conciliacion_documental,tesoreria,empresa,contabilidad_reportes,contabilidad_asientos,reglas_contables,reportes_contables):
+    for modulo in (esquema,plan_cuentas,utilidades,conciliacion_documental,tesoreria,empresa,contabilidad_reportes,contabilidad_asientos,reglas_contables,reportes_contables,bancos,cuentas_por_cobrar):
         p = patch.dict(vars(modulo),simbolos)
         p.start(); test.addCleanup(p.stop)
     for nombre, valor in (('sgci_es_propietario',False),('sgci_identidad_actual','finanzas@example.com')):

@@ -406,6 +406,18 @@ def tes_conciliacion_pago_autorizada(conn, sid):
         AND s.estado='CONTABILIZADA' LIMIT 1""",(sid,)).fetchone())
 
 
+def tes_proveedores_autorizados(conn):
+    sgci_autorizar_operacion(conn,'tesoreria','ver','Solicitudes de fondos')
+    sgci_autorizar_operacion(conn,'cxp','ver','Proveedores y estados de cuenta')
+    return pd.read_sql_query("SELECT id,rut,COALESCE(NULLIF(razon_social,''),nombre) AS nombre FROM proveedores ORDER BY nombre",conn)
+
+
+def tes_bancos_autorizados(conn):
+    sgci_autorizar_operacion(conn,'tesoreria','ver','Confirmación de pagos')
+    sgci_autorizar_operacion(conn,'banco','ver','Bancos y cartolas')
+    return conn.execute('SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 ORDER BY nombre').fetchall()
+
+
 def pantalla_tesoreria(conn):
     sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Solicitudes de fondos')
     st.title('💼 Tesorería · Solicitudes de fondos')
@@ -420,7 +432,9 @@ def pantalla_tesoreria(conn):
     c4.metric('Contabilizadas',estados_tes.get('CONTABILIZADA',0))
     tab_nueva,tab_listado,tab_historial=st.tabs(['➕ Nueva solicitud','📋 Solicitudes registradas','🕘 Historial'])
     with tab_nueva:
-        proveedores = pd.read_sql_query("SELECT id, rut, COALESCE(NULLIF(razon_social, ''), nombre) AS nombre FROM proveedores ORDER BY nombre", conn)
+        proveedores = (tes_proveedores_autorizados(conn)
+            if sgci_puede_submodulo(conn,'cxp','Proveedores y estados de cuenta','ver')
+            else pd.DataFrame(columns=['id','rut','nombre']))
         opciones = {'Beneficiario externo / sin ficha de proveedor': None}
         for _, p in proveedores.iterrows():
             opciones[f"{p['nombre']} · {p['rut'] or 'Sin RUT'} · ID {int(p['id'])}"] = int(p['id'])
@@ -612,7 +626,7 @@ def pantalla_tesoreria(conn):
                 with st.form(f'tes_pago_{sid}'):
                     medio = st.selectbox('Medio de pago', ['TRANSFERENCIA', 'CHEQUE'])
                     fecha_pago = st.date_input('Fecha de pago informada por Finanzas', value=date.today(), key=f'tes_fp_{sid}')
-                    bancos_pago=conn.execute('SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 ORDER BY nombre').fetchall()
+                    bancos_pago=(tes_bancos_autorizados(conn) if sgci_puede_submodulo(conn,'banco','Bancos y cartolas','ver') else [])
                     opciones_banco={f"{b['nombre']} · {b['numero_cuenta'] or 'Sin número'} · {b['cuenta_contable'] or 'Sin cuenta contable'}":b['id'] for b in bancos_pago}
                     banco_etiqueta=st.selectbox('Banco de origen registrado', ['Seleccionar banco']+list(opciones_banco),key=f'tes_banco_id_{sid}')
                     banco_desc=st.text_input('Descripción adicional del banco (opcional)', key=f'tes_banco_{sid}')
@@ -665,7 +679,7 @@ def pantalla_tesoreria(conn):
                     st.write(f"**Medio:** {pago['medio']} · **Fecha:** {pago['fecha_pago']} · **Banco:** {pago['banco_descripcion']}")
                     st.write(f"**Referencia:** {pago['referencia']}")
                     tes_vista_comprobante(conn,sid)
-                    bancos_disponibles=conn.execute('SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 ORDER BY nombre').fetchall()
+                    bancos_disponibles=(tes_bancos_autorizados(conn) if sgci_puede_submodulo(conn,'banco','Bancos y cartolas','ver') else [])
                     opciones_bancos={f"{b['nombre']} · {b['numero_cuenta'] or 'Sin número'} · {b['cuenta_contable'] or 'SIN CUENTA'}":int(b['id']) for b in bancos_disponibles}
                     predef_banco=next((i for i,k in enumerate(['Seleccionar banco']+list(opciones_bancos)) if opciones_bancos.get(k)==pago['banco_id']),0)
                     banco_sel=st.selectbox('Banco de origen para contabilizar', ['Seleccionar banco']+list(opciones_bancos),index=predef_banco,key=f'tes_cont_banco_{sid}')

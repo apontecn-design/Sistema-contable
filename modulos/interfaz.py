@@ -67,9 +67,9 @@ st.sidebar.markdown(
 )
 st.sidebar.markdown("---")
 
-# LABORATORIO: nunca permitir acceso operativo de empleados antes de terminar
-# y auditar las validaciones por acción y por registro en TODOS los módulos.
-if not sgci_es_propietario():
+# El acceso empresarial se activa explícitamente por entorno, después de su
+# aceptación. Sin activación se conserva la barrera y el portal anteriores.
+if not contem_acceso_empresarial(conn):
     # Portal aislado: NO entrar en la navegación general, incluso con LAB_MODE=0.
     # Solo sesiones verificadas por Supabase; no se admite identidad simulada.
     if st.session_state.get('sgci_auth_tipo') != 'supabase' or not sgci_sesion_valida():
@@ -86,7 +86,7 @@ if not sgci_es_propietario():
     from sgci_rrhh_guardia_68b import mostrar_portal_con_sesion
     st.sidebar.info('Portal de empleado · Recursos Humanos')
     mostrar_portal_con_sesion(st, conn, st.session_state, email_portal, rrhh_pdf_liquidacion)
-    st.stop()  # Invariante: empleados nunca alcanzan módulos administrativos.
+    st.stop()  # Las cuentas personales no alcanzan la navegación empresarial.
 
 sgci_nav_modulos = [
     ("🏠 Inicio","inicio"), ("🏦 Banco","banco"), ("💼 Tesorería","tesoreria"),
@@ -137,14 +137,14 @@ elif modulo_principal == "🏦 Banco":
 elif modulo_principal == "💼 Tesorería":
     menu = "💼 Tesorería"
 elif modulo_principal == "💰 Ventas/clientes":
-    sub = st.selectbox("Sección de Cuentas por Cobrar", ["Clientes y estados de cuenta", "Pagos de clientes", "RCV Ventas", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxc")
+    sub = contem_selector_submodulo(conn,'cxc','Sección de Cuentas por Cobrar','nav_cxc')
     if sub == "Clientes y estados de cuenta": menu = "👥 Clientes"
     elif sub == "Pagos de clientes": menu = "💵 Pagos"; nav_context = "clientes"
     elif sub == "RCV Ventas": menu = "📤 RCV Ventas"
     elif sub == "Antigüedad de saldos": menu = "📌 Cuentas por Cobrar/Pagar"; nav_context = "clientes"
     else: menu = "📊 Conciliación"; nav_context = "clientes"
 elif modulo_principal == "💳 Compras/proveedores":
-    sub = st.selectbox("Sección de Cuentas por Pagar", ["Proveedores y estados de cuenta", "Pagos de proveedores", "RCV Compras", "Órdenes de compra", "Antigüedad de saldos", "Conciliación auxiliar"], key="nav_cxp")
+    sub = contem_selector_submodulo(conn,'cxp','Sección de Cuentas por Pagar','nav_cxp')
     if sub == "Proveedores y estados de cuenta": menu = "🏢 Proveedores"
     elif sub == "Pagos de proveedores": menu = "💵 Pagos"; nav_context = "proveedores"
     elif sub == "RCV Compras": menu = "📥 RCV Compras"
@@ -156,14 +156,14 @@ elif modulo_principal == "🧾 Facturación y DTE":
 elif modulo_principal == "👥 Recursos Humanos":
     menu = "👥 Recursos Humanos"
 elif modulo_principal == "📚 Contabilidad":
-    sub = st.selectbox("Sección de Contabilidad", ["Asientos y Saldos", "Plan de Cuentas", "Libro Diario", "Libro Mayor", "Balance de Comprobación", "Estados Financieros"], key="nav_conta")
+    sub = contem_selector_submodulo(conn,'contabilidad','Sección de Contabilidad','nav_conta')
     menu = {
         "Asientos y Saldos":"✍️ Asientos y Saldos", "Plan de Cuentas":"📋 Plan de Cuentas",
         "Libro Diario":"📒 Libro Diario", "Libro Mayor":"📚 Mayor",
         "Balance de Comprobación":"⚖️ Balance de Comprobación", "Estados Financieros":"📊 Estados Financieros"
     }[sub]
 else:
-    sub = st.selectbox("Sección de Administración", (["Usuarios y permisos"] if sgci_es_propietario() else []) + ["Datos de la empresa", "Cierre Mensual", "Reglas Contables", "Lotes", "Matriz Contable"], key="nav_admin")
+    sub = contem_selector_submodulo(conn,'administracion','Sección de Administración','nav_admin')
     menu = {"Datos de la empresa":"🏢 Datos de la empresa", "Usuarios y permisos":"🛡️ Usuarios y permisos", "Cierre Mensual":"🔒 Cierre Mensual", "Reglas Contables":"⚙️ Reglas Contables", "Lotes":"📦 Lotes", "Matriz Contable":"🧰 Matriz Contable"}[sub]
 
 # Etapa 6.8A: comprobación de permiso de módulo en el servidor,
@@ -180,6 +180,21 @@ sgci_exigir_permiso(conn, sgci_modulo_elegido, 'ver')
 if sgci_modulo_elegido in ('cxc','cxp','contabilidad','administracion'):
     if sub != 'Usuarios y permisos':
         sgci_exigir_permiso(conn, sgci_modulo_elegido, 'ver', sub)
+
+# Las vistas que cruzan auxiliares requieren sus lecturas antes de cualquier SQL.
+if menu=='📊 Conciliación':
+    codigo_aux='cxc' if nav_context=='clientes' else 'cxp'
+    sub_entidad='Clientes y estados de cuenta' if codigo_aux=='cxc' else 'Proveedores y estados de cuenta'
+    sub_pago='Pagos de clientes' if codigo_aux=='cxc' else 'Pagos de proveedores'
+    requeridos=[(codigo_aux,sub_entidad),(codigo_aux,sub_pago),('contabilidad','Libro Diario')]
+elif menu=='🔒 Cierre Mensual':
+    requeridos=[('contabilidad','Libro Diario'),('cxc','Conciliación auxiliar'),('cxp','Conciliación auxiliar')]
+else:requeridos=[]
+faltantes=[sub for mod,sub in requeridos if not sgci_puede_submodulo(conn,mod,sub,'ver')]
+if faltantes:
+    st.info('Esta vista cruza información y requiere autorización de lectura en: '+', '.join(faltantes))
+    st.stop()
+for mod,subrequerido in requeridos:sgci_autorizar_operacion(conn,mod,'ver',subrequerido)
 
 st.sidebar.divider()
 st.sidebar.caption("Respaldo de Datos")
@@ -271,10 +286,13 @@ def sgci_mostrar_partidas_abiertas(conn, modulo, tercero_id, etiqueta):
     c.metric('Posición neta',money(deuda-creditos))
     st.caption('La posición neta es informativa: los créditos disponibles no se consideran aplicados a una factura hasta compensarlos. No se descuentan dos veces los pagos ya aplicados.')
     st.dataframe(formatear_montos_df(df),use_container_width=True,hide_index=True)
-    st.download_button('⬇️ Exportar partidas abiertas (CSV)',df.to_csv(index=False).encode('utf-8-sig'),
-                       f'partidas_abiertas_{modulo.lower()}_{tercero_id}.csv','text/csv',
-                       key=f'sgci_abiertas_csv_{modulo}_{tercero_id}')
-    if modulo=='COMPRAS':
+    exportacion_abiertas=contem_puede_exportar(conn,'cxc' if modulo=='VENTAS' else 'cxp',
+        'Clientes y estados de cuenta' if modulo=='VENTAS' else 'Proveedores y estados de cuenta')
+    if exportacion_abiertas:
+        st.download_button('⬇️ Exportar partidas abiertas (CSV)',df.to_csv(index=False).encode('utf-8-sig'),
+                           f'partidas_abiertas_{modulo.lower()}_{tercero_id}.csv','text/csv',
+                           key=f'sgci_abiertas_csv_{modulo}_{tercero_id}')
+    if modulo=='COMPRAS' and exportacion_abiertas:
         # Estado de cuenta de deuda documental; créditos disponibles por separado.
         docs=df[df['Saldo pendiente']>0].copy()
         creditos_df=df[df['Saldo pendiente']<0].copy()
@@ -310,32 +328,34 @@ def sgci_mostrar_partidas_abiertas(conn, modulo, tercero_id, etiqueta):
         st.metric('Saldo vencido de documentos',money(vencido))
         st.caption('Vencimientos estimados usando el plazo indicado; validar condiciones contractuales. Las referencias y descripciones XML no se inventan si no están almacenadas.')
         st.dataframe(formatear_montos_df(venc),use_container_width=True,hide_index=True)
-        # Enriquecimiento documental: el saldo procede del auxiliar; referencias/descripción del repositorio XML.
-        perfil=sgci_perfil(conn)
-        rut_cliente=conn.execute('SELECT rut FROM clientes WHERE id=?',(tercero_id,)).fetchone()
-        rut_cli=normalizar_rut(rut_cliente['rut']) if rut_cliente else ''
-        detalle=[]
-        for _,r in venc.iterrows():
-            folio=str(r['Documento']).split()[-1]
-            xml=conn.execute("""SELECT id FROM dte_documentos WHERE folio=? AND
-                REPLACE(REPLACE(UPPER(rut_receptor),'.',''),'-','')=?
-                AND tipo_doc IN (33,34,56) ORDER BY id DESC LIMIT 1""",
-                (folio,re.sub(r'[^0-9K]','',rut_cli.upper()))).fetchone()
-            refs='';descripcion=''
-            if xml:
-                rr=conn.execute('SELECT folio_ref,razon_ref FROM dte_referencias WHERE documento_id=? ORDER BY linea LIMIT 4',(xml['id'],)).fetchall()
-                refs='; '.join(' / '.join(filter(None,[str(x['folio_ref'] or ''),str(x['razon_ref'] or '')])) for x in rr)
-                items=conn.execute('SELECT nombre,descripcion FROM dte_items WHERE documento_id=? ORDER BY linea LIMIT 3',(xml['id'],)).fetchall()
-                descripcion='; '.join(' - '.join(filter(None,[str(x['nombre'] or ''),str(x['descripcion'] or '')])) for x in items)
-            detalle.append([str(r['Fecha']),folio,refs or '—',descripcion or '—',
-                money(r['Monto original']),money(r['Aplicado']),money(r['Saldo pendiente']),
-                str(r['Vencimiento']),str(r['Estado']),str(r['Días vencidos'])])
-        st.caption('Las referencias y conceptos se muestran cuando el folio y el RUT receptor coinciden con un XML almacenado. Un guion indica información documental no encontrada.')
-        pdf=nomina_pdf('Estado de cuenta detallado de cobranza',etiqueta,
-            ['Fecha','Factura','Referencia XML','Servicio / descripción XML','Monto','Aplicado','Pendiente','Vence','Estado','Días'],
-            detalle,['','TOTAL','','','', '',money(deuda),'','',''])
-        st.download_button('🖨️ PDF detallado de cobranza',pdf,f'cobranza_cliente_{tercero_id}.pdf',
-                           'application/pdf',key=f'sgci_cobranza_pdf_{tercero_id}')
+        if exportacion_abiertas:
+            # Enriquecimiento documental: el saldo procede del auxiliar; referencias/descripción del repositorio XML.
+            perfil=sgci_perfil(conn)
+            rut_cliente=conn.execute('SELECT rut FROM clientes WHERE id=?',(tercero_id,)).fetchone()
+            rut_cli=normalizar_rut(rut_cliente['rut']) if rut_cliente else ''
+            detalle=[]
+            for _,r in venc.iterrows():
+                folio=str(r['Documento']).split()[-1]
+                xml=conn.execute("""SELECT id FROM dte_documentos WHERE folio=? AND
+                    REPLACE(REPLACE(UPPER(rut_receptor),'.',''),'-','')=?
+                    AND tipo_doc IN (33,34,56) ORDER BY id DESC LIMIT 1""",
+                    (folio,re.sub(r'[^0-9K]','',rut_cli.upper()))).fetchone() if sgci_puede_submodulo(conn,'dte','Documentos y visor','ver') else None
+                refs='';descripcion=''
+                if xml:
+                    rr=conn.execute('SELECT folio_ref,razon_ref FROM dte_referencias WHERE documento_id=? ORDER BY linea LIMIT 4',(xml['id'],)).fetchall()
+                    refs='; '.join(' / '.join(filter(None,[str(x['folio_ref'] or ''),str(x['razon_ref'] or '')])) for x in rr)
+                    items=conn.execute('SELECT nombre,descripcion FROM dte_items WHERE documento_id=? ORDER BY linea LIMIT 3',(xml['id'],)).fetchall()
+                    descripcion='; '.join(' - '.join(filter(None,[str(x['nombre'] or ''),str(x['descripcion'] or '')])) for x in items)
+                detalle.append([str(r['Fecha']),folio,refs or '—',descripcion or '—',
+                    money(r['Monto original']),money(r['Aplicado']),money(r['Saldo pendiente']),
+                    str(r['Vencimiento']),str(r['Estado']),str(r['Días vencidos'])])
+            st.caption('Las referencias y conceptos se muestran cuando el folio y el RUT receptor coinciden con un XML almacenado. Un guion indica información documental no encontrada.')
+            pdf=nomina_pdf('Estado de cuenta detallado de cobranza',etiqueta,
+                ['Fecha','Factura','Referencia XML','Servicio / descripción XML','Monto','Aplicado','Pendiente','Vence','Estado','Días'],
+                detalle,['','TOTAL','','','', '',money(deuda),'','',''])
+            st.download_button('🖨️ PDF detallado de cobranza',pdf,f'cobranza_cliente_{tercero_id}.pdf',
+                               'application/pdf',key=f'sgci_cobranza_pdf_{tercero_id}')
+
 
 
 if menu == "🏢 Datos de la empresa":
@@ -428,7 +448,7 @@ elif menu == "🏠 Inicio":
 
 elif menu == "👥 Recursos Humanos":
     st.title("👥 Recursos Humanos")
-    if not sgci_es_propietario():
+    if not contem_acceso_empresarial(conn):
         # Etapa 6.6: rama aislada. El bloqueo global de laboratorio permanece activo.
         # No reutilizar las pantallas administrativas de Nómina para empleados.
         from sgci_rrhh_guardia_68b import mostrar_portal_con_sesion
@@ -439,6 +459,13 @@ elif menu == "👥 Recursos Humanos":
     # al usuario a la primera pestaña al cambiar trabajadores u otros controles.
     nomina_opciones = ["Trabajadores", "Vacaciones", "Anticipos y préstamos", "Liquidación mensual",
                       "Resumen y reportes", "Parámetros", "Contabilización"]
+    nomina_opciones=[s for s in nomina_opciones if sgci_puede_submodulo(conn,'nomina',s,'ver')]
+    if not sgci_es_propietario() and sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual()) is not None:
+        nomina_opciones=[s for s in nomina_opciones if s not in ('Resumen y reportes','Contabilización')]
+    if not nomina_opciones:
+        st.info('No tienes secciones habilitadas para tu alcance laboral.');st.stop()
+    if st.session_state.get('sgci_nomina_seccion') not in nomina_opciones:
+        st.session_state['sgci_nomina_seccion']=nomina_opciones[0]
     nomina_seccion = st.selectbox("Sección de Recursos Humanos", nomina_opciones,
                                   key="sgci_nomina_seccion")
     sgci_exigir_permiso(conn,'nomina','ver',nomina_seccion)
@@ -695,9 +722,9 @@ elif menu == "👥 Recursos Humanos":
             ants=rrhh_listar_movimientos_nomina(conn,'anticipos')
             pres=rrhh_listar_movimientos_nomina(conn,'prestamos')
             st.dataframe(formatear_montos_df(ants),use_container_width=True,hide_index=True); st.dataframe(formatear_montos_df(pres),use_container_width=True,hide_index=True)
-            if not ants.empty:
+            if not ants.empty and contem_puede_exportar(conn,'nomina','Anticipos y préstamos'):
                 pdf_ant=nomina_pdf('Anticipos de remuneraciones','CONTEM',['ID','Trabajador','Período','Fecha','Monto','Contabilizado','Asiento'],[[r.id,r.nombre,r.periodo,r.fecha,money(r.monto),'Sí' if r.contabilizado else 'No',r.asiento_id or ''] for r in ants.itertuples()]); st.download_button('🖨️ PDF anticipos',pdf_ant,'anticipos_remuneraciones.pdf','application/pdf',key='pdf_anticipos')
-            if not pres.empty:
+            if not pres.empty and contem_puede_exportar(conn,'nomina','Anticipos y préstamos'):
                 pdf_pre=nomina_pdf('Préstamos a trabajadores','CONTEM',['ID','Trabajador','Fecha','Monto','Cuotas','Cuota','Saldo','Estado'],[[r.id,r.nombre,r.fecha,money(r.monto_original),r.numero_cuotas,money(r.cuota),money(r.saldo),r.estado] for r in pres.itertuples()]); st.download_button('🖨️ PDF préstamos',pdf_pre,'prestamos_trabajadores.pdf','application/pdf',key='pdf_prestamos')
             st.markdown('#### Contabilizar entrega de anticipo/préstamo')
             bancos=pd.read_sql_query("SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 AND cuenta_contable IS NOT NULL",conn)
@@ -784,8 +811,8 @@ elif menu == "👥 Recursos Humanos":
         # Etapa 6.4: este reporte agrega datos de TODOS los trabajadores.
         # No debe abrirse con permisos individuales de lectura o exportación.
         # Los informes de empleados requieren una vista separada filtrada por registro.
-        if not sgci_es_propietario():
-            st.error('Acceso restringido: los reportes globales de Nómina son exclusivos del administrador.')
+        if not sgci_es_propietario() and sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual()) is not None:
+            st.error('Los reportes globales requieren autorización expresa para todos los trabajadores.')
             st.stop()
         st.subheader('Resumen de nómina y reportes')
         periodos=rrhh_periodos_nomina(conn)['periodo'].tolist()
@@ -891,8 +918,9 @@ elif menu == "📊 Estados Financieros":
             a,b,c=st.columns(3); a.metric("Ingresos",money(ingresos)); b.metric("Gastos",money(gastos)); c.metric("Resultado",money(resultado))
             mostrar_ef=df[["codigo","nombre","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","saldo":"Saldo"})
             st.dataframe(mostrar_ef,use_container_width=True,hide_index=True)
-            pdf_ef=nomina_pdf("Estado de Resultados",f"Desde {ds} hasta {hs}",["Código","Cuenta","Saldo"],[[r.Código,r.Cuenta,money(r.Saldo)] for r in mostrar_ef.itertuples(index=False)],["","RESULTADO",money(resultado)])
-            st.download_button("🖨️ Imprimir / PDF Estado de Resultados",pdf_ef,f"estado_resultados_{hs}.pdf","application/pdf",key="pdf_er")
+            if contem_puede_exportar(conn,'contabilidad','Estados Financieros'):
+                pdf_ef=nomina_pdf("Estado de Resultados",f"Desde {ds} hasta {hs}",["Código","Cuenta","Saldo"],[[r.Código,r.Cuenta,money(r.Saldo)] for r in mostrar_ef.itertuples(index=False)],["","RESULTADO",money(resultado)])
+                st.download_button("🖨️ Imprimir / PDF Estado de Resultados",pdf_ef,f"estado_resultados_{hs}.pdf","application/pdf",key="pdf_er")
             sgci_exito(f"Resultado del período: {money(resultado)}" if resultado>=0 else f"Resultado del período: {money(resultado)} (pérdida)")
     elif modo=="Estado de Situación Financiera":
         df=estado_situacion(conn,hs)
@@ -902,8 +930,9 @@ elif menu == "📊 Estados Financieros":
             a,b,c=st.columns(3); a.metric("Activos",money(activos)); b.metric("Pasivos",money(pasivos)); c.metric("Patrimonio",money(patrimonio))
             mostrar_esf=df[["codigo","nombre","tipo","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","tipo":"Tipo","saldo":"Saldo"})
             st.dataframe(mostrar_esf,use_container_width=True,hide_index=True)
-            pdf_esf=nomina_pdf("Estado de Situación Financiera",f"Al {hs}",["Código","Cuenta","Tipo","Saldo"],[[r.Código,r.Cuenta,r.Tipo,money(r.Saldo)] for r in mostrar_esf.itertuples(index=False)],["","TOTAL ACTIVO / P+P","",f"{money(activos)} / {money(pasivos+patrimonio)}"] )
-            st.download_button("🖨️ Imprimir / PDF Estado de Situación",pdf_esf,f"estado_situacion_{hs}.pdf","application/pdf",key="pdf_esf")
+            if contem_puede_exportar(conn,'contabilidad','Estados Financieros'):
+                pdf_esf=nomina_pdf("Estado de Situación Financiera",f"Al {hs}",["Código","Cuenta","Tipo","Saldo"],[[r.Código,r.Cuenta,r.Tipo,money(r.Saldo)] for r in mostrar_esf.itertuples(index=False)],["","TOTAL ACTIVO / P+P","",f"{money(activos)} / {money(pasivos+patrimonio)}"] )
+                st.download_button("🖨️ Imprimir / PDF Estado de Situación",pdf_esf,f"estado_situacion_{hs}.pdf","application/pdf",key="pdf_esf")
             st.info(f"Control: Activo = {money(activos)} | Pasivo + Patrimonio = {money(pasivos+patrimonio)} | Diferencia = {money(activos-pasivos-patrimonio)}")
     else:
         df=resumen_financiero(conn,hs)
@@ -913,8 +942,9 @@ elif menu == "📊 Estados Financieros":
             df["saldo_acreedor"]=df["haber"]-df["debe"].clip(upper=df["haber"])
             mostrar_bc=df[["codigo","nombre","debe","haber","saldo"]].rename(columns={"codigo":"Código","nombre":"Cuenta","debe":"Debe","haber":"Haber","saldo":"Saldo"})
             st.dataframe(mostrar_bc,use_container_width=True,hide_index=True)
-            pdf_bc=nomina_pdf("Balance de Comprobación",f"Al {hs}",["Código","Cuenta","Debe","Haber","Saldo"],[[r.Código,r.Cuenta,money(r.Debe),money(r.Haber),money(r.Saldo)] for r in mostrar_bc.itertuples(index=False)],["","TOTALES",money(df.debe.sum()),money(df.haber.sum()),money(df.saldo.sum())])
-            st.download_button("🖨️ Imprimir / PDF Balance",pdf_bc,f"balance_comprobacion_{hs}.pdf","application/pdf",key="pdf_bc_ef")
+            if contem_puede_exportar(conn,'contabilidad','Estados Financieros'):
+                pdf_bc=nomina_pdf("Balance de Comprobación",f"Al {hs}",["Código","Cuenta","Debe","Haber","Saldo"],[[r.Código,r.Cuenta,money(r.Debe),money(r.Haber),money(r.Saldo)] for r in mostrar_bc.itertuples(index=False)],["","TOTALES",money(df.debe.sum()),money(df.haber.sum()),money(df.saldo.sum())])
+                st.download_button("🖨️ Imprimir / PDF Balance",pdf_bc,f"balance_comprobacion_{hs}.pdf","application/pdf",key="pdf_bc_ef")
             sgci_exito("🟢 Balance cuadrado" if abs(df.debe.sum()-df.haber.sum())<0.01 else f"🔴 Diferencia: {money(df.debe.sum()-df.haber.sum())}")
 
 
@@ -956,8 +986,10 @@ elif menu == "🏦 Bancos y Cartolas":
             saldo = st.number_input("Saldo inicial", value=0.0, step=1000.0,format='%.0f')
             if st.form_submit_button("Guardar cuenta bancaria"):
                 sgci_exigir_permiso(conn, 'banco', 'crear', 'Bancos y cartolas')
-                conn.execute("INSERT INTO bancos(nombre,numero_cuenta,tipo,cuenta_contable,saldo_inicial) VALUES(?,?,?,?,?)", (nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo))
-                conn.commit(); registrar_auditoria(conn,"NUEVO BANCO",nombre); sgci_exito("Cuenta bancaria creada.")
+                try:
+                    contem_guardar_banco(conn,nombre,numero_cuenta,tipo,mapa.get(cuenta),saldo)
+                    sgci_exito("Cuenta bancaria creada.")
+                except (ValueError,PermissionError,sqlite3.Error) as exc:st.error(str(exc))
 
         st.divider()
         st.subheader("Vinculación contable de cuentas bancarias")
@@ -974,10 +1006,11 @@ elif menu == "🏦 Bancos y Cartolas":
                 st.info(f"Actualmente vinculada a: {actual} - {Plan(conn).todos.get(actual, actual)}")
             if st.button("💾 Guardar vinculación bancaria", key="guardar_cfg_banco"):
                 sgci_exigir_permiso(conn, 'banco', 'editar', 'Bancos y cartolas')
-                conn.execute("UPDATE bancos SET cuenta_contable=? WHERE id=?", (mapa[nueva_etiqueta], banco_cfg_id))
-                conn.commit(); registrar_auditoria(conn,"VINCULACIÓN BANCO",f"Banco {banco_cfg_id} -> {mapa[nueva_etiqueta]}")
-                sgci_exito("Vinculación actualizada. Los próximos asientos de esta cartola usarán esa cuenta bancaria.")
-                st.rerun()
+                try:
+                    contem_vincular_banco(conn,banco_cfg_id,mapa[nueva_etiqueta])
+                    sgci_exito("Vinculación actualizada. Los próximos asientos de esta cartola usarán esa cuenta bancaria.")
+                    st.rerun()
+                except (ValueError,PermissionError,sqlite3.Error) as exc:st.error(str(exc))
 
     if banco_seccion == "Cargar cartola":
         bancos = pd.read_sql_query("SELECT id,nombre,numero_cuenta FROM bancos WHERE activo=1 ORDER BY nombre", conn)
@@ -1772,13 +1805,14 @@ elif menu == "🔒 Cierre Mensual":
                 sgci_exigir_permiso(conn, 'administracion', 'aprobar', 'Cierre Mensual')
                 if alertas: st.error("No se recomienda cerrar mientras existan alertas.")
                 else:
-                    asegurar_periodo(conn,periodo)
-                    conn.execute("UPDATE periodos_contables SET estado='CERRADO',fecha_cierre=? WHERE periodo=?",(datetime.now().strftime("%Y-%m-%d %H:%M:%S"),periodo)); conn.commit(); registrar_auditoria(conn,"CIERRE CONTABLE",periodo); sgci_exito("Período cerrado."); st.rerun()
+                    contem_cambiar_cierre(conn,periodo,True)
+                    sgci_exito("Período cerrado."); st.rerun()
         else:
             sgci_exito("🔒 Período cerrado")
             if st.button("Reabrir período"):
                 sgci_exigir_permiso(conn, 'administracion', 'aprobar', 'Cierre Mensual')
-                conn.execute("UPDATE periodos_contables SET estado='ABIERTO',fecha_cierre=NULL WHERE periodo=?",(periodo,)); conn.commit(); registrar_auditoria(conn,"REAPERTURA CONTABLE",periodo); st.warning("Período reabierto."); st.rerun()
+                contem_cambiar_cierre(conn,periodo,False)
+                st.warning("Período reabierto."); st.rerun()
     except Exception as e: st.error(f"Período inválido: {e}")
 
 
@@ -2406,32 +2440,8 @@ elif menu == "✍️ Asientos y Saldos":
             elif not confirma_f29:
                 st.error("Debes confirmar los valores antes de contabilizar.")
             else:
-                asiento = siguiente_asiento(conn) + 1
-                fecha_iso_f29 = fecha_f29.strftime("%Y-%m-%d")
-                glosa_f29 = f"Compensación IVA F29 período {periodo_f29.strip()}"
                 try:
-                    cur=conn.cursor()
-                    cur.execute("BEGIN")
-                    lineas=[
-                        ("2.1.01.02","IVA Débito Fiscal",float(debito_f29),0.0),
-                    ]
-                    if credito_f29 > 0:
-                        lineas.append(("1.1.03.02","IVA Crédito Fiscal",0.0,float(credito_f29)))
-                    if iva_pagar_f29 > 0:
-                        lineas.append(("2.1.01.03","IVA por pagar",0.0,float(iva_pagar_f29)))
-                    for codigo,cuenta,debe,haber in lineas:
-                        cur.execute("""
-                            INSERT INTO libro_diario
-                            (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
-                            VALUES (?,?,?,?,?,?,?,?,?,?)
-                        """,(fecha_iso_f29,cuenta,debe,haber,glosa_f29,"General / Ninguno",codigo,asiento,
-                             f"F29-{periodo_f29.strip()}","Compensación IVA F29"))
-                    cur.execute("""
-                        INSERT INTO compensaciones_iva_f29
-                        (periodo,fecha_contable,iva_debito,iva_credito,iva_por_pagar,asiento_id)
-                        VALUES (?,?,?,?,?,?)
-                    """,(periodo_f29.strip(),fecha_iso_f29,float(debito_f29),float(credito_f29),float(iva_pagar_f29),asiento))
-                    conn.commit()
+                    asiento=contem_guardar_f29(conn,periodo_f29.strip(),fecha_f29.isoformat(),debito_f29,credito_f29)
                     sgci_exito(f"Compensación registrada. Asiento {asiento}. IVA por pagar: {_f29_clp(iva_pagar_f29)}")
                     st.rerun()
                 except Exception as e:
@@ -2550,32 +2560,11 @@ elif menu == "✍️ Asientos y Saldos":
                          disabled=not confirmar_manual, key="sgci_manual_guardar"):
                 sgci_exigir_permiso(conn, 'contabilidad', 'contabilizar', 'Asientos y Saldos')
                 try:
-                    # Revalidación de cierre y cuentas justo antes de escribir.
-                    if periodo_cerrado(conn, borrador_manual["fecha"]):
-                        raise ValueError("El período está cerrado.")
-                    plan_actual = Plan(conn)
-                    for cod, nombre, debe, haber in borrador_manual["detalle"]:
-                        if cod not in plan_actual.hojas:
-                            raise ValueError(f"La cuenta {cod} ya no es imputable.")
-                    if sum(x[2] for x in borrador_manual["detalle"]) != sum(x[3] for x in borrador_manual["detalle"]):
-                        raise ValueError("El asiento no cuadra.")
-                    cur = conn.cursor()
-                    cur.execute("BEGIN IMMEDIATE")
-                    nuevo_asiento = int(cur.execute(
-                        "SELECT COALESCE(MAX(asiento_id),0)+1 FROM libro_diario"
-                    ).fetchone()[0])
-                    lote_manual = "MANUAL-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-                    for cod, nombre, debe, haber in borrador_manual["detalle"]:
-                        cur.execute("""INSERT INTO libro_diario
-                            (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
-                            VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                            (borrador_manual["fecha"], nombre, debe, haber,
-                             borrador_manual["glosa"], borrador_manual["centro"],
-                             cod, nuevo_asiento, lote_manual, "Asiento manual"))
-                    conn.commit()
-                    registrar_auditoria(conn, "ASIENTO MANUAL EN PANTALLA",
-                                       f"Asiento {nuevo_asiento}; fecha {borrador_manual['fecha']}; "
-                                       f"glosa {borrador_manual['glosa']}; total {suma_debe}")
+                    guardado=contem_guardar_asientos(conn,[
+                        dict(fecha=borrador_manual['fecha'],codigo=cod,debe=debe,haber=haber,
+                             glosa=borrador_manual['glosa'],centro=borrador_manual['centro'])
+                        for cod,nombre,debe,haber in borrador_manual['detalle']])
+                    nuevo_asiento=guardado['asientos'][0]
                     st.session_state.pop("sgci_manual_borrador_validado", None)
                     sgci_exito(f"Asiento manual N.º {nuevo_asiento} contabilizado correctamente.")
                     st.rerun()
@@ -2620,8 +2609,9 @@ elif menu == "✍️ Asientos y Saldos":
     if df_rep_asientos.empty:
         st.caption("Aún no existen asientos manuales o saldos iniciales para imprimir.")
     else:
-        pdf = pdf_desde_dataframe("Asientos Manuales y Saldos Iniciales","CONTEM - Sistema Contable y Empresarial",df_rep_asientos,{"Debe","Haber"})
-        st.download_button("🖨️ Imprimir / PDF Asientos y Saldos",pdf,"asientos_y_saldos.pdf","application/pdf",key="pdf_asientos_saldos")
+        if contem_puede_exportar(conn,'contabilidad','Asientos y Saldos'):
+            pdf = pdf_desde_dataframe("Asientos Manuales y Saldos Iniciales","CONTEM - Sistema Contable y Empresarial",df_rep_asientos,{"Debe","Haber"})
+            st.download_button("🖨️ Imprimir / PDF Asientos y Saldos",pdf,"asientos_y_saldos.pdf","application/pdf",key="pdf_asientos_saldos")
 
     tipo_carga = st.radio("Seleccione el origen del lote", ["Saldo inicial", "Asiento manual"])
     archivo_asiento = st.file_uploader("Adjuntar matriz rellenada", type=["csv"], key="subir_asientos")
@@ -2676,51 +2666,13 @@ elif menu == "✍️ Asientos y Saldos":
 
                     if st.button("✅ REGISTRAR EN LIBRO DIARIO", type="primary"):
                         sgci_exigir_permiso(conn, 'contabilidad', 'contabilizar', 'Asientos y Saldos')
-                        prefix = "SALDO-INI-" if tipo_carga == "Saldo inicial" else "ASIENTOS-MAN-"
-                        lote = prefix + datetime.now().strftime("%Y%m%d-%H%M%S")
-                        cur = conn.cursor()
-                        base = siguiente_asiento(conn)
-
-                        mapa_asientos = {
-                            n: i + 1
-                            for i, n in enumerate(sorted(resultado["asiento"].unique()))
-                        }
-
                         try:
-                            for fila in resultado.itertuples():
-                                asiento = base + mapa_asientos[fila.asiento]
-                                cur.execute(
-                                    """
-                                    INSERT INTO libro_diario
-                                    (
-                                        fecha,
-                                        cuenta,
-                                        debe,
-                                        haber,
-                                        glosa,
-                                        centro_costo,
-                                        codigo_cuenta,
-                                        asiento_id,
-                                        lote_id,
-                                        origen
-                                    )
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                    """,
-                                    (
-                                        fila.fecha,
-                                        fila.cuenta,
-                                        fila.debe,
-                                        fila.haber,
-                                        fila.glosa,
-                                        fila.centro_costo,
-                                        fila.codigo,
-                                        asiento,
-                                        lote,
-                                        tipo_carga
-                                    )
-                                )
-
-                            conn.commit()
+                            guardado=contem_guardar_asientos(conn,[
+                                dict(fecha=fila.fecha,codigo=fila.codigo,debe=fila.debe,haber=fila.haber,
+                                     glosa=fila.glosa,centro=fila.centro_costo,grupo=fila.asiento)
+                                for fila in resultado.itertuples()],
+                                origen='Saldo inicial' if tipo_carga=='Saldo inicial' else 'Asiento manual')
+                            lote=guardado['lote']
                             sgci_exito(f"¡Registrado con éxito! Lote generado: {lote}")
                         except Exception as e:
                             conn.rollback()
@@ -2840,9 +2792,10 @@ elif menu == "👥 Clientes":
                 )
 
                 st.dataframe(mostrar, use_container_width=True, hide_index=True)
-                filas_pdf=[[r.Fecha,r.Documento,r.Glosa,money(r.Cargo),money(r.Abono),money(r.Saldo)] for r in mostrar.itertuples(index=False)]
-                pdf_ec=nomina_pdf("Estado de Cuenta de Cliente",seleccionado,["Fecha","Documento","Glosa","Cargo","Abono","Saldo"],filas_pdf,["","","TOTALES",money(cargo),money(abono),money(saldo)])
-                st.download_button("🖨️ Imprimir / PDF estado de cuenta",pdf_ec,f"estado_cuenta_cliente_{cliente_id}.pdf","application/pdf",key=f"pdf_cliente_{cliente_id}")
+                if contem_puede_exportar(conn,'cxc','Clientes y estados de cuenta'):
+                    filas_pdf=[[r.Fecha,r.Documento,r.Glosa,money(r.Cargo),money(r.Abono),money(r.Saldo)] for r in mostrar.itertuples(index=False)]
+                    pdf_ec=nomina_pdf("Estado de Cuenta de Cliente",seleccionado,["Fecha","Documento","Glosa","Cargo","Abono","Saldo"],filas_pdf,["","","TOTALES",money(cargo),money(abono),money(saldo)])
+                    st.download_button("🖨️ Imprimir / PDF estado de cuenta",pdf_ec,f"estado_cuenta_cliente_{cliente_id}.pdf","application/pdf",key=f"pdf_cliente_{cliente_id}")
 
     if sgci_vista_cliente == "Nuevo cliente":
         with st.form("nuevo_cliente"):
@@ -2936,9 +2889,10 @@ elif menu == "🏢 Proveedores":
 
                 mostrar_prov=df[["fecha","Documento","glosa","cargo","abono","saldo"]].copy()
                 st.dataframe(mostrar_prov,use_container_width=True,hide_index=True)
-                filas_pdf=[[r.fecha,r.Documento,r.glosa,money(r.cargo),money(r.abono),money(r.saldo)] for r in mostrar_prov.itertuples(index=False)]
-                pdf_ec=nomina_pdf("Estado de Cuenta de Proveedor",seleccionado,["Fecha","Documento","Glosa","Cargo","Abono","Saldo"],filas_pdf,["","","TOTALES",money(cargo),money(abono),money(saldo)])
-                st.download_button("🖨️ Imprimir / PDF estado de cuenta",pdf_ec,f"estado_cuenta_proveedor_{proveedor_id}.pdf","application/pdf",key=f"pdf_proveedor_{proveedor_id}")
+                if contem_puede_exportar(conn,'cxp','Proveedores y estados de cuenta'):
+                    filas_pdf=[[r.fecha,r.Documento,r.glosa,money(r.cargo),money(r.abono),money(r.saldo)] for r in mostrar_prov.itertuples(index=False)]
+                    pdf_ec=nomina_pdf("Estado de Cuenta de Proveedor",seleccionado,["Fecha","Documento","Glosa","Cargo","Abono","Saldo"],filas_pdf,["","","TOTALES",money(cargo),money(abono),money(saldo)])
+                    st.download_button("🖨️ Imprimir / PDF estado de cuenta",pdf_ec,f"estado_cuenta_proveedor_{proveedor_id}.pdf","application/pdf",key=f"pdf_proveedor_{proveedor_id}")
 
     if sgci_vista_proveedor == "Nuevo proveedor":
         with st.form("nuevo_proveedor"):
@@ -3129,14 +3083,15 @@ elif menu == "📒 Libro Diario":
         else:
             st.error("Diferencia contable detectada. Revise las partidas antes de continuar.")
         st.dataframe(formatear_montos_df(vista_diario), use_container_width=True, hide_index=True)
-        pdf = pdf_desde_dataframe(
-            "Libro Diario", "CONTEM - Sistema Contable y Empresarial",
-            vista_diario, {"Debe", "Haber"}
-        )
-        st.download_button(
-            "🖨️ Imprimir / PDF Libro Diario", pdf, "libro_diario.pdf",
-            "application/pdf", key="pdf_libro_diario"
-        )
+        if contem_puede_exportar(conn,'contabilidad','Libro Diario'):
+            pdf = pdf_desde_dataframe(
+                "Libro Diario", "CONTEM - Sistema Contable y Empresarial",
+                vista_diario, {"Debe", "Haber"}
+            )
+            st.download_button(
+                "🖨️ Imprimir / PDF Libro Diario", pdf, "libro_diario.pdf",
+                "application/pdf", key="pdf_libro_diario"
+            )
     else:
         st.info("No hay movimientos registrados en el Libro Diario.")
 
@@ -3163,8 +3118,10 @@ elif menu == "📚 Mayor":
         saldo = df.iloc[-1]["Saldo"]
         st.metric("Saldo", money(saldo))
         st.dataframe(formatear_montos_df(df), use_container_width=True, hide_index=True)
-        pdf = pdf_desde_dataframe("Libro Mayor",seleccion,df,{"Debe","Haber","Saldo"})
-        st.download_button("🖨️ Imprimir / PDF Libro Mayor",pdf,f"libro_mayor_{codigo.replace('.','_')}.pdf","application/pdf",key="pdf_libro_mayor")
+        if contem_puede_exportar(conn,'contabilidad','Libro Mayor'):
+            pdf = pdf_desde_dataframe("Libro Mayor",seleccion,df,{"Debe","Haber","Saldo"})
+            st.download_button("🖨️ Imprimir / PDF Libro Mayor",pdf,f"libro_mayor_{codigo.replace('.','_')}.pdf","application/pdf",key="pdf_libro_mayor")
+
 
 
 # ============================================================

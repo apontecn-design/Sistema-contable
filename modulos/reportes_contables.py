@@ -79,6 +79,7 @@ def obtener_mayor(
     hasta=None
 ):
 
+    sgci_autorizar_operacion(conn,'contabilidad','ver','Libro Mayor')
     plan = Plan(conn)
     if codigo not in plan.todos:
         return pd.DataFrame()
@@ -125,6 +126,7 @@ def balance_comprobacion(
     hasta=None
 ):
 
+    sgci_autorizar_operacion(conn,'contabilidad','ver','Balance de Comprobación')
     filtros = []
     params = []
 
@@ -176,6 +178,7 @@ def balance_comprobacion(
 
 def listar_lotes(conn):
 
+    sgci_autorizar_operacion(conn,'administracion','ver','Lotes')
     return pd.read_sql_query(
         """
         SELECT
