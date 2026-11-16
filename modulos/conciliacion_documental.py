@@ -412,6 +412,7 @@ def aplicar_pago_auxiliar_proveedor(conn, proveedor_id, pago_id, compra_ids):
 
 def sgci_crear_devoluciones_proveedor(conn):
     """Auxiliar para vincular reembolsos de proveedores con NC y factura sin duplicar el RCV."""
+    transaccion_previa=conn.in_transaction
     conn.execute("""CREATE TABLE IF NOT EXISTS sgci_devoluciones_proveedor (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         movimiento_id INTEGER NOT NULL UNIQUE,
@@ -424,7 +425,8 @@ def sgci_crear_devoluciones_proveedor(conn):
         fecha TEXT NOT NULL,
         glosa TEXT NOT NULL
     )""")
-    conn.commit()
+    if not transaccion_previa:
+        conn.commit()
 
 
 def sgci_contabilizar_devolucion_proveedor(conn, movimiento_id, proveedor_id,
@@ -435,52 +437,56 @@ def sgci_contabilizar_devolucion_proveedor(conn, movimiento_id, proveedor_id,
     """
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
     sgci_autorizar_operacion(conn, 'cxp', 'contabilizar', 'Pagos de proveedores')
-    sgci_crear_devoluciones_proveedor(conn)
-    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
-    if not mov or int(mov['conciliado'] or 0):
-        raise ValueError('El movimiento bancario no existe o ya está conciliado.')
-    monto = clp_round(float(mov['abono'] or 0))
-    if monto <= 0 or float(mov['cargo'] or 0) > 0:
-        raise ValueError('La devolución debe ser un abono bancario.')
-    if periodo_cerrado(conn, mov['fecha']):
-        raise ValueError('El período contable está cerrado.')
-    banco = conn.execute('SELECT * FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
-    if not banco or not banco['cuenta_contable']:
-        raise ValueError('La cuenta bancaria no tiene cuenta contable configurada.')
-    proveedor = conn.execute('SELECT * FROM proveedores WHERE id=?', (int(proveedor_id),)).fetchone()
-    if not proveedor:
-        raise ValueError('Proveedor no encontrado.')
-    nc = conn.execute('SELECT * FROM compras WHERE id=? AND proveedor_id=? AND tipo_doc IN (60,61)',
-                      (int(nota_credito_id), int(proveedor_id))).fetchone()
-    factura = conn.execute('SELECT * FROM compras WHERE id=? AND proveedor_id=? AND tipo_doc NOT IN (60,61)',
-                           (int(factura_id), int(proveedor_id))).fetchone()
-    if not nc or not factura or int(nc['id']) == int(factura['id']):
-        raise ValueError('Selecciona una nota de crédito y una factura válidas del mismo proveedor.')
-    roles = cargar_roles(conn)
-    rol_prov = roles.get('proveedores')
-    if not rol_prov:
-        raise ValueError('La cuenta contable de Proveedores no está configurada.')
-    codigo_prov, codigo_banco = rol_prov[0], banco['cuenta_contable']
-    if codigo_prov == codigo_banco:
-        raise ValueError('La cuenta de Banco no puede ser la misma que Proveedores.')
-    # La diferencia NC - factura es la base del reembolso. No permitir aplicarla dos veces.
-    disponible = clp_round(abs(float(nc['monto_total'] or 0)) - abs(float(factura['monto_total'] or 0)))
-    aplicado = conn.execute("""SELECT COALESCE(SUM(monto),0) FROM sgci_devoluciones_proveedor
-                              WHERE nota_credito_id=? AND factura_id=?""",
-                           (int(nota_credito_id), int(factura_id))).fetchone()[0]
-    restante = clp_round(disponible - float(aplicado or 0))
-    if disponible <= 0 or monto > restante:
-        raise ValueError(f'La diferencia disponible NC/factura es {money(max(0,restante))}; '
-                         f'no alcanza para el abono de {money(monto)}. Revisa los documentos.')
-    if conn.execute('SELECT 1 FROM sgci_devoluciones_proveedor WHERE movimiento_id=?',
-                    (int(movimiento_id),)).fetchone():
-        raise ValueError('Este abono ya tiene una devolución vinculada.')
-    nombre = limpiar_texto(proveedor['razon_social'] or proveedor['nombre'] or 'Proveedor')
-    detalle = limpiar_texto(glosa) or f'Devolución {nombre} - NC {nc["folio"]} / Factura {factura["folio"]}'
-    asiento = siguiente_asiento(conn) + 1
-    lote = 'DEV-PROV-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-    plan = Plan(conn)
-    try:
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'cxp', 'contabilizar', 'Pagos de proveedores')
+        sgci_crear_devoluciones_proveedor(conn)
+        mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+        if not mov or int(mov['conciliado'] or 0):
+            raise ValueError('El movimiento bancario no existe o ya está conciliado.')
+        monto = clp_round(float(mov['abono'] or 0))
+        if monto <= 0 or float(mov['cargo'] or 0) > 0:
+            raise ValueError('La devolución debe ser un abono bancario.')
+        if periodo_cerrado(conn, mov['fecha']):
+            raise ValueError('El período contable está cerrado.')
+        banco = conn.execute('SELECT * FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
+        if not banco or not banco['cuenta_contable']:
+            raise ValueError('La cuenta bancaria no tiene cuenta contable configurada.')
+        proveedor = conn.execute('SELECT * FROM proveedores WHERE id=?', (int(proveedor_id),)).fetchone()
+        if not proveedor:
+            raise ValueError('Proveedor no encontrado.')
+        nc = conn.execute('SELECT * FROM compras WHERE id=? AND proveedor_id=? AND tipo_doc IN (60,61)',
+                          (int(nota_credito_id), int(proveedor_id))).fetchone()
+        factura = conn.execute('SELECT * FROM compras WHERE id=? AND proveedor_id=? AND tipo_doc NOT IN (60,61)',
+                               (int(factura_id), int(proveedor_id))).fetchone()
+        if not nc or not factura or int(nc['id']) == int(factura['id']):
+            raise ValueError('Selecciona una nota de crédito y una factura válidas del mismo proveedor.')
+        roles = cargar_roles(conn)
+        rol_prov = roles.get('proveedores')
+        if not rol_prov:
+            raise ValueError('La cuenta contable de Proveedores no está configurada.')
+        codigo_prov, codigo_banco = rol_prov[0], banco['cuenta_contable']
+        if codigo_prov == codigo_banco:
+            raise ValueError('La cuenta de Banco no puede ser la misma que Proveedores.')
+        # La diferencia NC - factura es la base del reembolso. No permitir aplicarla dos veces.
+        disponible = clp_round(abs(float(nc['monto_total'] or 0)) - abs(float(factura['monto_total'] or 0)))
+        aplicado = conn.execute("""SELECT COALESCE(SUM(monto),0) FROM sgci_devoluciones_proveedor
+                                  WHERE nota_credito_id=? AND factura_id=?""",
+                               (int(nota_credito_id), int(factura_id))).fetchone()[0]
+        restante = clp_round(disponible - float(aplicado or 0))
+        if disponible <= 0 or monto > restante:
+            raise ValueError(f'La diferencia disponible NC/factura es {money(max(0,restante))}; '
+                             f'no alcanza para el abono de {money(monto)}. Revisa los documentos.')
+        if conn.execute('SELECT 1 FROM sgci_devoluciones_proveedor WHERE movimiento_id=?',
+                        (int(movimiento_id),)).fetchone():
+            raise ValueError('Este abono ya tiene una devolución vinculada.')
+        nombre = limpiar_texto(proveedor['razon_social'] or proveedor['nombre'] or 'Proveedor')
+        detalle = limpiar_texto(glosa) or f'Devolución {nombre} - NC {nc["folio"]} / Factura {factura["folio"]}'
+        asiento = siguiente_asiento(conn) + 1
+        lote = 'DEV-PROV-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        plan = Plan(conn)
         conn.execute("""INSERT INTO libro_diario
             (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
             VALUES (?,?,?,?,?,?,?,?,?)""",
@@ -502,12 +508,8 @@ def sgci_contabilizar_devolucion_proveedor(conn, movimiento_id, proveedor_id,
             (detalle,asiento,int(proveedor_id),int(movimiento_id)))
         if cur.rowcount != 1:
             raise ValueError('El movimiento dejó de estar pendiente; no se registró el asiento.')
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    registrar_auditoria(conn, 'DEVOLUCION PROVEEDOR',
-                        f'Movimiento {movimiento_id}, proveedor {proveedor_id}, NC {nota_credito_id}, factura {factura_id}, asiento {asiento}')
+        _sgci_auditar_auxiliar(conn, 'DEVOLUCION PROVEEDOR',
+                            f'Movimiento {movimiento_id}, proveedor {proveedor_id}, NC {nota_credito_id}, factura {factura_id}, asiento {asiento}')
     return asiento
 
 
@@ -521,59 +523,67 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
     Si el cargo bancario excede ese saldo, la diferencia puede imputarse a otra cuenta contable.
     Si el cargo es menor, se aplica parcialmente y el documento conserva saldo pendiente.
     """
-    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
-    if not mov:
-        raise ValueError("Movimiento bancario no encontrado.")
-    if int(mov["conciliado"] or 0) == 1:
-        raise ValueError("Este movimiento ya está conciliado.")
-    if float(mov["cargo"] or 0) <= 0:
-        raise ValueError("El pago a proveedor debe corresponder a un cargo/salida de la cuenta bancaria.")
-    if periodo_cerrado(conn, mov["fecha"]):
-        raise ValueError("El período contable de este movimiento está cerrado.")
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'cxp', 'contabilizar', 'Pagos de proveedores')
+        mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+        if not mov:
+            raise ValueError("Movimiento bancario no encontrado.")
+        if int(mov["conciliado"] or 0) == 1:
+            raise ValueError("Este movimiento ya está conciliado.")
+        if float(mov["abono"] or 0)>0:
+            raise ValueError("El pago debe ser un cargo sin abono simultáneo.")
+        if float(mov["cargo"] or 0) <= 0:
+            raise ValueError("El pago a proveedor debe corresponder a un cargo/salida de la cuenta bancaria.")
+        if periodo_cerrado(conn, mov["fecha"]):
+            raise ValueError("El período contable de este movimiento está cerrado.")
 
-    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
-    if not banco or not banco["cuenta_contable"]:
-        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+        banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+        if not banco or not banco["cuenta_contable"]:
+            raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
 
-    roles = cargar_roles(conn)
-    rol_prov = roles.get("proveedores")
-    if not rol_prov:
-        raise ValueError("La cuenta de Proveedores no está configurada.")
-    cuenta_proveedores = rol_prov[0]
-    cuenta_banco = banco["cuenta_contable"]
+        roles = cargar_roles(conn)
+        rol_prov = roles.get("proveedores")
+        if not rol_prov:
+            raise ValueError("La cuenta de Proveedores no está configurada.")
+        cuenta_proveedores = rol_prov[0]
+        cuenta_banco = banco["cuenta_contable"]
 
-    proveedor = conn.execute("SELECT * FROM proveedores WHERE id=?", (int(proveedor_id),)).fetchone()
-    if not proveedor:
-        raise ValueError("Proveedor no encontrado.")
+        proveedor = conn.execute("SELECT * FROM proveedores WHERE id=?", (int(proveedor_id),)).fetchone()
+        if not proveedor:
+            raise ValueError("Proveedor no encontrado.")
 
-    compra_ids = [int(x) for x in compra_ids]
-    if not compra_ids:
-        raise ValueError("Selecciona al menos un documento pendiente del proveedor.")
+        compra_ids = [int(x) for x in compra_ids]
+        if not compra_ids:
+            raise ValueError("Selecciona al menos un documento pendiente del proveedor.")
 
-    docs = documentos_pendientes_proveedor(conn, proveedor_id)
-    docs = docs[docs["id"].isin(compra_ids)].copy()
-    if docs.empty:
-        raise ValueError("Los documentos seleccionados ya no tienen saldo pendiente.")
+        docs = documentos_pendientes_proveedor(conn, proveedor_id)
+        docs = docs[docs["id"].isin(compra_ids)].copy()
+        if docs.empty or len(docs)!=len(set(compra_ids)):
+            raise ValueError("Los documentos seleccionados ya no tienen saldo pendiente.")
 
-    monto_banco = clp_round(abs(float(mov["cargo"] or 0)))
-    saldo_docs = clp_round(float(docs["pendiente"].sum()))
-    monto_proveedor = min(monto_banco, saldo_docs)
-    diferencia = clp_round(monto_banco - monto_proveedor)
+        monto_banco = clp_round(abs(float(mov["cargo"] or 0)))
+        saldo_docs = clp_round(float(docs["pendiente"].sum()))
+        monto_proveedor = min(monto_banco, saldo_docs)
+        diferencia = clp_round(monto_banco - monto_proveedor)
 
-    if diferencia > 0:
-        if not cuenta_diferencia:
-            raise ValueError(f"Existe una diferencia de {money(diferencia)}. Selecciona la cuenta contable donde deseas imputarla.")
-        if cuenta_diferencia in (cuenta_banco, cuenta_proveedores):
-            raise ValueError("La cuenta de diferencia debe ser distinta de Banco y Proveedores.")
+        if diferencia > 0:
+            if not cuenta_diferencia:
+                raise ValueError(f"Existe una diferencia de {money(diferencia)}. Selecciona la cuenta contable donde deseas imputarla.")
+            if cuenta_diferencia in (cuenta_banco, cuenta_proveedores):
+                raise ValueError("La cuenta de diferencia debe ser distinta de Banco y Proveedores.")
 
-    nombre_prov = limpiar_texto(proveedor["razon_social"] or proveedor["nombre"] or "Proveedor")
-    folios = ", ".join(str(x) for x in docs["folio"].tolist())
-    glosa = f"Pago proveedor {nombre_prov} - Doc. {folios}"
-    asiento_id = siguiente_asiento(conn) + 1
-    lote = "CONC-PROV-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    plan = Plan(conn)
+        if diferencia>0 and cuenta_diferencia not in Plan(conn).todos:
+            raise ValueError("La cuenta de diferencia no es válida.")
+        nombre_prov = limpiar_texto(proveedor["razon_social"] or proveedor["nombre"] or "Proveedor")
+        folios = ", ".join(str(x) for x in docs["folio"].tolist())
+        glosa = f"Pago proveedor {nombre_prov} - Doc. {folios}"
+        asiento_id = siguiente_asiento(conn) + 1
+        lote = "CONC-PROV-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        plan = Plan(conn)
 
-    try:
         # Proveedores solo por lo efectivamente aplicado a sus documentos.
         conn.execute("""INSERT INTO libro_diario
             (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
@@ -629,13 +639,8 @@ def contabilizar_pago_proveedor_desde_cartola(conn, movimiento_id, proveedor_id,
                         SET conciliado=1,observacion=?,asiento_id=?,match_tipo='PROVEEDOR',match_id=?,match_confianza=100
                         WHERE id=?""",
                      (observacion, asiento_id, int(proveedor_id), int(movimiento_id)))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-    registrar_auditoria(conn, "PAGO PROVEEDOR DESDE CARTOLA",
-                        f"Movimiento {movimiento_id} -> proveedor {proveedor_id}, aplicado {monto_proveedor}, diferencia {diferencia}, asiento {asiento_id}")
+        _sgci_auditar_auxiliar(conn, "PAGO PROVEEDOR DESDE CARTOLA",
+                            f"Movimiento {movimiento_id} -> proveedor {proveedor_id}, aplicado {monto_proveedor}, diferencia {diferencia}, asiento {asiento_id}")
     return asiento_id, aplicaciones, diferencia
 
 
@@ -648,41 +653,47 @@ def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id)
     El pago queda en el auxiliar del proveedor y puede producir temporalmente un saldo deudor
     hasta que se incorporen los saldos iniciales/documentos históricos.
     """
-    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
-    if not mov:
-        raise ValueError("Movimiento bancario no encontrado.")
-    if int(mov["conciliado"] or 0) == 1:
-        raise ValueError("Este movimiento ya está conciliado.")
-    if float(mov["cargo"] or 0) <= 0:
-        raise ValueError("El pago a proveedor debe corresponder a un cargo/salida de la cuenta bancaria.")
-    if periodo_cerrado(conn, mov["fecha"]):
-        raise ValueError("El período contable de este movimiento está cerrado.")
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'cxp', 'contabilizar', 'Pagos de proveedores')
+        mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+        if not mov:
+            raise ValueError("Movimiento bancario no encontrado.")
+        if int(mov["conciliado"] or 0) == 1:
+            raise ValueError("Este movimiento ya está conciliado.")
+        if float(mov["abono"] or 0)>0:
+            raise ValueError("El pago debe ser un cargo sin abono simultáneo.")
+        if float(mov["cargo"] or 0) <= 0:
+            raise ValueError("El pago a proveedor debe corresponder a un cargo/salida de la cuenta bancaria.")
+        if periodo_cerrado(conn, mov["fecha"]):
+            raise ValueError("El período contable de este movimiento está cerrado.")
 
-    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
-    if not banco or not banco["cuenta_contable"]:
-        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+        banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+        if not banco or not banco["cuenta_contable"]:
+            raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
 
-    roles = cargar_roles(conn)
-    rol_prov = roles.get("proveedores")
-    if not rol_prov:
-        raise ValueError("La cuenta de Proveedores no está configurada.")
-    cuenta_proveedores = rol_prov[0]
-    cuenta_banco = banco["cuenta_contable"]
-    if cuenta_banco == cuenta_proveedores:
-        raise ValueError("La cuenta bancaria y la cuenta de Proveedores no pueden ser la misma.")
+        roles = cargar_roles(conn)
+        rol_prov = roles.get("proveedores")
+        if not rol_prov:
+            raise ValueError("La cuenta de Proveedores no está configurada.")
+        cuenta_proveedores = rol_prov[0]
+        cuenta_banco = banco["cuenta_contable"]
+        if cuenta_banco == cuenta_proveedores:
+            raise ValueError("La cuenta bancaria y la cuenta de Proveedores no pueden ser la misma.")
 
-    proveedor = conn.execute("SELECT * FROM proveedores WHERE id=?", (int(proveedor_id),)).fetchone()
-    if not proveedor:
-        raise ValueError("Proveedor no encontrado.")
+        proveedor = conn.execute("SELECT * FROM proveedores WHERE id=?", (int(proveedor_id),)).fetchone()
+        if not proveedor:
+            raise ValueError("Proveedor no encontrado.")
 
-    monto = abs(float(mov["cargo"] or 0))
-    nombre_prov = limpiar_texto(proveedor["razon_social"] or proveedor["nombre"] or "Proveedor")
-    glosa = f"Pago proveedor {nombre_prov} - saldo anterior / sin documento"
-    asiento_id = siguiente_asiento(conn) + 1
-    lote = "CONC-PROV-SD-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    plan = Plan(conn)
+        monto = abs(float(mov["cargo"] or 0))
+        nombre_prov = limpiar_texto(proveedor["razon_social"] or proveedor["nombre"] or "Proveedor")
+        glosa = f"Pago proveedor {nombre_prov} - saldo anterior / sin documento"
+        asiento_id = siguiente_asiento(conn) + 1
+        lote = "CONC-PROV-SD-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        plan = Plan(conn)
 
-    try:
         for codigo, debe, haber in [(cuenta_proveedores, monto, 0.0), (cuenta_banco, 0.0, monto)]:
             conn.execute("""INSERT INTO libro_diario
                 (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
@@ -698,13 +709,8 @@ def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id)
                             match_id=?,match_confianza=100
                         WHERE id=?""",
                      (glosa, asiento_id, int(proveedor_id), int(movimiento_id)))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-    registrar_auditoria(conn, "PAGO PROVEEDOR SIN DOCUMENTO",
-                        f"Movimiento {movimiento_id} -> proveedor {proveedor_id}, asiento {asiento_id}")
+        _sgci_auditar_auxiliar(conn, "PAGO PROVEEDOR SIN DOCUMENTO",
+                            f"Movimiento {movimiento_id} -> proveedor {proveedor_id}, asiento {asiento_id}")
     return asiento_id
 
 
