@@ -714,6 +714,26 @@ def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id)
     return asiento_id
 
 
+def _sgci_validar_asiento_reversible(conn,mov,lineas):
+    import math
+    cargo,abono=float(mov['cargo'] or 0),float(mov['abono'] or 0)
+    if not all(math.isfinite(v) and v>=0 for v in (cargo,abono)) or (cargo>0)==(abono>0):
+        raise ValueError('La naturaleza del movimiento requiere revisión.')
+    monto=cargo or abono
+    if not lineas or any(not math.isfinite(float(l[c] or 0)) or float(l[c] or 0)<0 for l in lineas for c in ('debe','haber')):
+        raise ValueError('El asiento contiene importes inválidos.')
+    if any(abs(sum(float(l[c] or 0) for l in lineas)-monto)>0.01 for c in ('debe','haber')):
+        raise ValueError('El asiento no cuadra con el importe del movimiento.')
+    banco=conn.execute('SELECT cuenta_contable FROM bancos WHERE id=?',(mov['banco_id'],)).fetchone()
+    if not banco or not banco['cuenta_contable']:
+        raise ValueError('Banco sin cuenta contable configurada.')
+    bancarias=[l for l in lineas if l['codigo_cuenta']==banco['cuenta_contable']]
+    if len(bancarias)!=1 or abs(float(bancarias[0]['debe'] or 0)-abono)>0.01 or abs(float(bancarias[0]['haber'] or 0)-cargo)>0.01:
+        raise ValueError('La línea bancaria no coincide con la cartola.')
+    if conn.execute('SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?',(mov['asiento_id'],mov['id'])).fetchone():
+        raise ValueError('El asiento está vinculado a más de un movimiento.')
+
+
 def revertir_abono_cliente_cartola(conn, movimiento_id):
     """Reversión conservadora y atómica de conciliación de cliente.
 
@@ -722,68 +742,70 @@ def revertir_abono_cliente_cartola(conn, movimiento_id):
     """
     sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
     sgci_autorizar_operacion(conn, 'cxc', 'anular', 'Pagos de clientes')
-    mov = conn.execute('SELECT * FROM cartola_bancaria WHERE id=?', (int(movimiento_id),)).fetchone()
-    if not mov or int(mov['conciliado'] or 0) != 1 or mov['match_tipo'] not in ('CLIENTE_ANTICIPO', 'CLIENTE'):
-        raise ValueError('Selecciona un abono de cliente conciliado.')
-    if float(mov['abono'] or 0) <= 0 or float(mov['cargo'] or 0) > 0:
-        raise ValueError('El movimiento no es un abono bancario válido.')
-    if not mov['asiento_id'] or periodo_cerrado(conn, mov['fecha']):
-        raise ValueError('No existe asiento vinculado o el período original está cerrado.')
-    lineas = conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id', (mov['asiento_id'],)).fetchall()
-    if not lineas or abs(sum(float(l['debe'] or 0)-float(l['haber'] or 0) for l in lineas)) > 0.01:
-        raise ValueError('El asiento original no existe o no está cuadrado.')
-    lotes = {l['lote_id'] for l in lineas}
-    if len(lotes) != 1 or not next(iter(lotes)):
-        raise ValueError('El asiento original no tiene lote único; requiere revisión manual.')
-    lote = next(iter(lotes))
-    origenes = {l['origen'] for l in lineas}
-    permitidos = {'CONCILIACION_ANTICIPO_CLIENTE', 'CONCILIACION_COBRO_CLIENTE',
-                  'CONCILIACION_DIFERENCIA_CLIENTE'}
-    if not origenes.issubset(permitidos):
-        raise ValueError('El asiento contiene orígenes no compatibles con la reversión automática.')
-    if conn.execute('SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?',
-                    (mov['asiento_id'], int(movimiento_id))).fetchone():
-        raise ValueError('El asiento pertenece a más de un movimiento bancario.')
-    if conn.execute('SELECT 1 FROM libro_diario WHERE lote_id=? AND asiento_id<>?',
-                    (lote, mov['asiento_id'])).fetchone():
-        raise ValueError('El lote original aparece en otros asientos.')
-    pagos = conn.execute('''SELECT * FROM pagos_clientes WHERE cartola_id=? OR lote_id=?
-                          ORDER BY id''', (int(movimiento_id), lote)).fetchall()
-    if len(pagos) != 1:
-        raise ValueError('No se identificó un único abono del auxiliar; no se modificó nada.')
-    pago = pagos[0]
-    if pago['cliente_id'] is None or int(pago['cliente_id']) != int(mov['match_id'] or -1):
-        raise ValueError('El cliente del auxiliar no coincide con la conciliación.')
-    if pago['lote_id'] != lote:
-        raise ValueError('El abono auxiliar no pertenece al lote contable original.')
-    if pago['cartola_id'] is not None and int(pago['cartola_id']) != int(movimiento_id):
-        raise ValueError('El abono está enlazado a otra cartola.')
-    if conn.execute('SELECT 1 FROM aplicaciones_clientes WHERE pago_id=? LIMIT 1', (pago['id'],)).fetchone():
-        raise ValueError('El abono ya tiene aplicaciones a facturas; reviértelas por su procedimiento específico.')
-    if tabla_existe(conn, 'sgci_aplicaciones_apertura_clientes'):
-        if conn.execute('SELECT 1 FROM sgci_aplicaciones_apertura_clientes WHERE pago_id=? OR movimiento_id=? LIMIT 1',
-                        (pago['id'], int(movimiento_id))).fetchone():
-            raise ValueError('El abono tiene aplicaciones a apertura; no puede revertirse automáticamente.')
-    # No revertir cobros parcialmente aplicados ni con distribución documental.
-    if mov['match_tipo'] == 'CLIENTE':
-        raise ValueError('Los cobros aplicados a facturas requieren reversión documental; esta función solo revierte anticipos sin aplicar.')
-    if origenes != {'CONCILIACION_ANTICIPO_CLIENTE'}:
-        raise ValueError('El asiento no corresponde exclusivamente a un anticipo de cliente.')
-    if abs(float(pago['monto_recibido'] or 0) - float(mov['abono'] or 0)) > 0.01:
-        raise ValueError('El importe del auxiliar no coincide con el abono bancario.')
-    if abs(float(pago['monto'] or 0)) > 0.01:
-        raise ValueError('El anticipo ya tiene movimientos auxiliares; requiere revisión.')
-    banco = conn.execute('SELECT cuenta_contable FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
-    if not banco or not banco['cuenta_contable']:
-        raise ValueError('Banco sin cuenta contable configurada.')
-    debe_banco = sum(float(l['debe'] or 0) for l in lineas if l['codigo_cuenta'] == banco['cuenta_contable'])
-    if abs(debe_banco - float(mov['abono'] or 0)) > 0.01:
-        raise ValueError('El asiento no coincide con el ingreso bancario.')
-    # Transacción única: reverso + auxiliar + liberación de cartola + auditoría.
-    try:
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
         conn.execute('BEGIN IMMEDIATE')
         sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
         sgci_autorizar_operacion(conn, 'cxc', 'anular', 'Pagos de clientes')
+        mov = conn.execute('SELECT * FROM cartola_bancaria WHERE id=?', (int(movimiento_id),)).fetchone()
+        if not mov or int(mov['conciliado'] or 0) != 1 or mov['match_tipo'] not in ('CLIENTE_ANTICIPO', 'CLIENTE'):
+            raise ValueError('Selecciona un abono de cliente conciliado.')
+        if float(mov['abono'] or 0) <= 0 or float(mov['cargo'] or 0) > 0:
+            raise ValueError('El movimiento no es un abono bancario válido.')
+        if not mov['asiento_id'] or periodo_cerrado(conn, mov['fecha']):
+            raise ValueError('No existe asiento vinculado o el período original está cerrado.')
+        lineas = conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id', (mov['asiento_id'],)).fetchall()
+        _sgci_validar_asiento_reversible(conn,mov,lineas)
+        if not lineas or abs(sum(float(l['debe'] or 0)-float(l['haber'] or 0) for l in lineas)) > 0.01:
+            raise ValueError('El asiento original no existe o no está cuadrado.')
+        lotes = {l['lote_id'] for l in lineas}
+        if len(lotes) != 1 or not next(iter(lotes)):
+            raise ValueError('El asiento original no tiene lote único; requiere revisión manual.')
+        lote = next(iter(lotes))
+        origenes = {l['origen'] for l in lineas}
+        permitidos = {'CONCILIACION_ANTICIPO_CLIENTE', 'CONCILIACION_COBRO_CLIENTE',
+                      'CONCILIACION_DIFERENCIA_CLIENTE'}
+        if not origenes.issubset(permitidos):
+            raise ValueError('El asiento contiene orígenes no compatibles con la reversión automática.')
+        if conn.execute('SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?',
+                        (mov['asiento_id'], int(movimiento_id))).fetchone():
+            raise ValueError('El asiento pertenece a más de un movimiento bancario.')
+        if conn.execute('SELECT 1 FROM libro_diario WHERE lote_id=? AND asiento_id<>?',
+                        (lote, mov['asiento_id'])).fetchone():
+            raise ValueError('El lote original aparece en otros asientos.')
+        pagos = conn.execute('''SELECT * FROM pagos_clientes WHERE cartola_id=? OR lote_id=?
+                              ORDER BY id''', (int(movimiento_id), lote)).fetchall()
+        if len(pagos) != 1:
+            raise ValueError('No se identificó un único abono del auxiliar; no se modificó nada.')
+        pago = pagos[0]
+        if pago['cliente_id'] is None or int(pago['cliente_id']) != int(mov['match_id'] or -1):
+            raise ValueError('El cliente del auxiliar no coincide con la conciliación.')
+        if pago['lote_id'] != lote:
+            raise ValueError('El abono auxiliar no pertenece al lote contable original.')
+        if pago['cartola_id'] is not None and int(pago['cartola_id']) != int(movimiento_id):
+            raise ValueError('El abono está enlazado a otra cartola.')
+        if conn.execute('SELECT 1 FROM aplicaciones_clientes WHERE pago_id=? LIMIT 1', (pago['id'],)).fetchone():
+            raise ValueError('El abono ya tiene aplicaciones a facturas; reviértelas por su procedimiento específico.')
+        if tabla_existe(conn, 'sgci_aplicaciones_apertura_clientes'):
+            if conn.execute('SELECT 1 FROM sgci_aplicaciones_apertura_clientes WHERE pago_id=? OR movimiento_id=? LIMIT 1',
+                            (pago['id'], int(movimiento_id))).fetchone():
+                raise ValueError('El abono tiene aplicaciones a apertura; no puede revertirse automáticamente.')
+        # No revertir cobros parcialmente aplicados ni con distribución documental.
+        if mov['match_tipo'] == 'CLIENTE':
+            raise ValueError('Los cobros aplicados a facturas requieren reversión documental; esta función solo revierte anticipos sin aplicar.')
+        if origenes != {'CONCILIACION_ANTICIPO_CLIENTE'}:
+            raise ValueError('El asiento no corresponde exclusivamente a un anticipo de cliente.')
+        if abs(float(pago['monto_recibido'] or 0) - float(mov['abono'] or 0)) > 0.01:
+            raise ValueError('El importe del auxiliar no coincide con el abono bancario.')
+        if abs(float(pago['monto'] or 0)) > 0.01:
+            raise ValueError('El anticipo ya tiene movimientos auxiliares; requiere revisión.')
+        banco = conn.execute('SELECT cuenta_contable FROM bancos WHERE id=?', (mov['banco_id'],)).fetchone()
+        if not banco or not banco['cuenta_contable']:
+            raise ValueError('Banco sin cuenta contable configurada.')
+        debe_banco = sum(float(l['debe'] or 0) for l in lineas if l['codigo_cuenta'] == banco['cuenta_contable'])
+        if abs(debe_banco - float(mov['abono'] or 0)) > 0.01:
+            raise ValueError('El asiento no coincide con el ingreso bancario.')
+        # Transacción única: reverso + auxiliar + liberación de cartola + auditoría.
         nuevo = siguiente_asiento(conn) + 1
         rev_lote = 'REV-CLI-' + datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         for l in lineas:
@@ -805,65 +827,63 @@ def revertir_abono_cliente_cartola(conn, movimiento_id):
             raise ValueError('La cartola cambió durante la operación.')
         conn.execute('''INSERT INTO auditoria(fecha_hora,usuario,accion,detalle)
                         VALUES(?,?,?,?)''',
-                     (datetime.now().isoformat(timespec='seconds'), 'SGCI',
+                     (datetime.now().isoformat(timespec='seconds'), sgci_identidad_actual(),
                       'REVERSO ANTICIPO CLIENTE',
                       f"Cartola {movimiento_id}; abono auxiliar {pago['id']}; asiento original {mov['asiento_id']}; reverso {nuevo}"))
-        conn.commit()
-        return nuevo
-    except Exception:
-        conn.rollback()
-        raise
+    return nuevo
 
 
 def revertir_pago_proveedor_cartola(conn, movimiento_id):
     """Reversión atómica de pago bancario a proveedor, con comprobaciones de trazabilidad."""
     sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
     sgci_autorizar_operacion(conn, 'cxp', 'anular', 'Pagos de proveedores')
-    mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
-    if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo'] not in ('PROVEEDOR','PROVEEDOR_SIN_DOCUMENTO'):
-        raise ValueError('El movimiento no es un pago conciliado a proveedor.')
-    if not mov['asiento_id'] or periodo_cerrado(conn,mov['fecha']):
-        raise ValueError('No hay asiento vinculado o el período está cerrado.')
-    lineas=conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id',(mov['asiento_id'],)).fetchall()
-    if not lineas or abs(sum(float(l['debe'] or 0)-float(l['haber'] or 0) for l in lineas))>0.01:
-        raise ValueError('El asiento original no existe o no está cuadrado.')
-    lotes={l['lote_id'] for l in lineas}
-    if len(lotes)!=1 or not next(iter(lotes)):
-        raise ValueError('El asiento original no tiene un lote único.')
-    lote=next(iter(lotes))
-    origenes={l['origen'] for l in lineas}
-    if not origenes.issubset({'CONCILIACION_BANCARIA','CONCILIACION_PAGO_PROVEEDOR','CONCILIACION_DIFERENCIA_PROVEEDOR','CONCILIACION_PAGO_PROVEEDOR_SIN_DOCUMENTO'}):
-        raise ValueError('El asiento contiene orígenes que requieren revisión manual.')
-    if conn.execute('SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?',(mov['asiento_id'],movimiento_id)).fetchone():
-        raise ValueError('El asiento está vinculado a más de un movimiento.')
-    pagos=conn.execute('SELECT * FROM pagos_proveedores WHERE lote_id=?',(lote,)).fetchall()
-    if not pagos and mov['match_tipo']=='PROVEEDOR' and str(lote).startswith('CONC-BANCO-'):
-        compra=conn.execute('SELECT proveedor_id FROM compras WHERE id=?',(mov['match_id'],)).fetchone()
-        if not compra: raise ValueError('No se encontró el documento vinculado.')
-        pagos=conn.execute("""SELECT DISTINCT p.* FROM pagos_proveedores p
-            JOIN aplicaciones_proveedores a ON a.pago_id=p.id
-            WHERE p.proveedor_id=? AND p.fecha=? AND a.compra_id=? AND ABS(p.monto-?)<0.01""",
-            (compra['proveedor_id'],mov['fecha'],mov['match_id'],float(mov['cargo'] or 0))).fetchall()
-    if len(pagos)!=1:
-        raise ValueError('No se encontró un pago único asociado; no se realizó ningún cambio.')
-    pago=pagos[0]
-    if not str(lote).startswith('CONC-BANCO-') and int(pago['proveedor_id'])!=int(mov['match_id']):
-        raise ValueError('El proveedor no coincide con la conciliación.')
-    aplicaciones=conn.execute('SELECT * FROM aplicaciones_proveedores WHERE pago_id=?',(pago['id'],)).fetchall()
-    aplicado=sum(abs(float(a['monto'] or 0)) for a in aplicaciones)
-    if mov['match_tipo']=='PROVEEDOR' and (not aplicaciones or abs(aplicado-float(pago['monto'] or 0))>0.01):
-        raise ValueError('Las aplicaciones del pago fueron modificadas; requiere revisión.')
-    if mov['match_tipo']=='PROVEEDOR_SIN_DOCUMENTO' and aplicaciones:
-        raise ValueError('Este pago sin documento ya fue aplicado; requiere revisión.')
-    if str(lote).startswith('CONC-BANCO-'):
-        if len(aplicaciones)!=1 or int(aplicaciones[0]['compra_id'])!=int(mov['match_id']):
-            raise ValueError('El documento asociado no coincide; requiere revisión.')
-    nuevo=siguiente_asiento(conn)+1
-    rev_lote='REV-PROV-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-    try:
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
         conn.execute('BEGIN IMMEDIATE')
         sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
         sgci_autorizar_operacion(conn, 'cxp', 'anular', 'Pagos de proveedores')
+        mov=conn.execute("SELECT * FROM cartola_bancaria WHERE id=?",(int(movimiento_id),)).fetchone()
+        if not mov or int(mov['conciliado'] or 0)!=1 or mov['match_tipo'] not in ('PROVEEDOR','PROVEEDOR_SIN_DOCUMENTO'):
+            raise ValueError('El movimiento no es un pago conciliado a proveedor.')
+        if not mov['asiento_id'] or periodo_cerrado(conn,mov['fecha']):
+            raise ValueError('No hay asiento vinculado o el período está cerrado.')
+        lineas=conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id',(mov['asiento_id'],)).fetchall()
+        _sgci_validar_asiento_reversible(conn,mov,lineas)
+        if not lineas or abs(sum(float(l['debe'] or 0)-float(l['haber'] or 0) for l in lineas))>0.01:
+            raise ValueError('El asiento original no existe o no está cuadrado.')
+        lotes={l['lote_id'] for l in lineas}
+        if len(lotes)!=1 or not next(iter(lotes)):
+            raise ValueError('El asiento original no tiene un lote único.')
+        lote=next(iter(lotes))
+        origenes={l['origen'] for l in lineas}
+        if not origenes.issubset({'CONCILIACION_BANCARIA','CONCILIACION_PAGO_PROVEEDOR','CONCILIACION_DIFERENCIA_PROVEEDOR','CONCILIACION_PAGO_PROVEEDOR_SIN_DOCUMENTO'}):
+            raise ValueError('El asiento contiene orígenes que requieren revisión manual.')
+        if conn.execute('SELECT 1 FROM cartola_bancaria WHERE asiento_id=? AND id<>?',(mov['asiento_id'],movimiento_id)).fetchone():
+            raise ValueError('El asiento está vinculado a más de un movimiento.')
+        pagos=conn.execute('SELECT * FROM pagos_proveedores WHERE lote_id=?',(lote,)).fetchall()
+        if not pagos and mov['match_tipo']=='PROVEEDOR' and str(lote).startswith('CONC-BANCO-'):
+            compra=conn.execute('SELECT proveedor_id FROM compras WHERE id=?',(mov['match_id'],)).fetchone()
+            if not compra: raise ValueError('No se encontró el documento vinculado.')
+            pagos=conn.execute("""SELECT DISTINCT p.* FROM pagos_proveedores p
+                JOIN aplicaciones_proveedores a ON a.pago_id=p.id
+                WHERE p.proveedor_id=? AND p.fecha=? AND a.compra_id=? AND ABS(p.monto-?)<0.01""",
+                (compra['proveedor_id'],mov['fecha'],mov['match_id'],float(mov['cargo'] or 0))).fetchall()
+        if len(pagos)!=1:
+            raise ValueError('No se encontró un pago único asociado; no se realizó ningún cambio.')
+        pago=pagos[0]
+        if not str(lote).startswith('CONC-BANCO-') and int(pago['proveedor_id'])!=int(mov['match_id']):
+            raise ValueError('El proveedor no coincide con la conciliación.')
+        aplicaciones=conn.execute('SELECT * FROM aplicaciones_proveedores WHERE pago_id=?',(pago['id'],)).fetchall()
+        aplicado=sum(abs(float(a['monto'] or 0)) for a in aplicaciones)
+        if mov['match_tipo']=='PROVEEDOR' and (not aplicaciones or abs(aplicado-float(pago['monto'] or 0))>0.01):
+            raise ValueError('Las aplicaciones del pago fueron modificadas; requiere revisión.')
+        if mov['match_tipo']=='PROVEEDOR_SIN_DOCUMENTO' and aplicaciones:
+            raise ValueError('Este pago sin documento ya fue aplicado; requiere revisión.')
+        if str(lote).startswith('CONC-BANCO-'):
+            if len(aplicaciones)!=1 or int(aplicaciones[0]['compra_id'])!=int(mov['match_id']):
+                raise ValueError('El documento asociado no coincide; requiere revisión.')
+        nuevo=siguiente_asiento(conn)+1
+        rev_lote='REV-PROV-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         for l in lineas:
             conn.execute("""INSERT INTO libro_diario
                 (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
@@ -878,32 +898,34 @@ def revertir_pago_proveedor_cartola(conn, movimiento_id):
             WHERE id=? AND conciliado=1 AND asiento_id=?""",(int(movimiento_id),mov['asiento_id']))
         if cur.rowcount!=1: raise ValueError('El movimiento cambió durante la operación.')
         conn.execute("""INSERT INTO auditoria(fecha_hora,usuario,accion,detalle) VALUES(?,?,?,?)""",
-            (datetime.now().isoformat(timespec='seconds'),'SGCI','REVERSO PAGO PROVEEDOR',
+            (datetime.now().isoformat(timespec='seconds'),sgci_identidad_actual(),'REVERSO PAGO PROVEEDOR',
              f"Cartola {movimiento_id}; pago {pago['id']}; asiento original {mov['asiento_id']}; reverso {nuevo}"))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
     return nuevo
 
 
 def corregir_conciliacion_manual(conn, movimiento_id):
     """Revierte contablemente una imputación manual bancaria y reabre el movimiento para corregirlo."""
     sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
-    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
-    if not mov or int(mov["conciliado"] or 0) != 1:
-        raise ValueError("El movimiento no está conciliado.")
-    if mov["match_tipo"] != "IMPUTACION_MANUAL" or not mov["asiento_id"]:
-        raise ValueError("Solo se puede corregir desde aquí una imputación manual bancaria.")
-    lineas = conn.execute("SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id", (mov["asiento_id"],)).fetchall()
-    if not lineas:
-        raise ValueError("No encontré el asiento original de la imputación.")
-    if periodo_cerrado(conn, mov["fecha"]):
-        raise ValueError("El período contable está cerrado; no se puede reabrir este movimiento.")
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'anular', 'Conciliación bancaria')
+        mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+        if not mov or int(mov["conciliado"] or 0) != 1:
+            raise ValueError("El movimiento no está conciliado.")
+        if mov["match_tipo"] != "IMPUTACION_MANUAL" or not mov["asiento_id"]:
+            raise ValueError("Solo se puede corregir desde aquí una imputación manual bancaria.")
+        lineas = conn.execute("SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id", (mov["asiento_id"],)).fetchall()
+        _sgci_validar_asiento_reversible(conn,mov,lineas)
+        if not lineas:
+            raise ValueError("No encontré el asiento original de la imputación.")
+        if periodo_cerrado(conn, mov["fecha"]):
+            raise ValueError("El período contable está cerrado; no se puede reabrir este movimiento.")
 
-    nuevo_asiento = siguiente_asiento(conn) + 1
-    lote = "REV-CONC-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    try:
+        if len(lineas)!=2 or any(l['origen']!='CONCILIACION_BANCARIA_MANUAL' for l in lineas):
+            raise ValueError('El asiento contiene líneas ajenas a la imputación manual.')
+        nuevo_asiento = siguiente_asiento(conn) + 1
+        lote = "REV-CONC-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         for l in lineas:
             conn.execute("""INSERT INTO libro_diario
                 (fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
@@ -913,15 +935,9 @@ def corregir_conciliacion_manual(conn, movimiento_id):
                  nuevo_asiento, lote, "REVERSO_CONCILIACION_BANCARIA"))
         conn.execute("""UPDATE cartola_bancaria SET conciliado=0,observacion=NULL,asiento_id=NULL,
                         match_tipo=NULL,match_id=NULL,match_confianza=NULL WHERE id=?""", (int(movimiento_id),))
-        conn.commit()
-    except Exception:
-        conn.rollback(); raise
-    registrar_auditoria(conn, "CORRECCIÓN CONCILIACIÓN", f"Movimiento {movimiento_id}; reverso asiento {nuevo_asiento}")
+        _sgci_auditar_auxiliar(conn, "CORRECCIÓN CONCILIACIÓN", f"Movimiento {movimiento_id}; reverso asiento {nuevo_asiento}")
     return nuevo_asiento
 
-# ============================================================
-# NÓMINA - lógica y reportes
-# ============================================================
 
 def instalar_cuentas_nomina(conn):
     cuentas = [
