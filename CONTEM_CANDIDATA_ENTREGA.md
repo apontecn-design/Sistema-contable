@@ -111,3 +111,11 @@ El pago a documentos, pago sin documento y devolución de proveedor reservan esc
 Diecinueve pruebas nuevas, incluidas seis de concurrencia real con dos conexiones, verifican pagos/devoluciones únicos, factura y diferencia NC/factura sin sobreaplicación y asientos distintos para pagos válidos distintos. Cubren fallos de auditoría, revocación bajo reserva, períodos cerrados, pagos parciales, diferencias y conservación de compras. Suite completa: 543 pruebas correctas, 34 pantallas sin errores y 57 tablas históricas intactas en copia privada. AppTest ejecutó los tres formularios reales en copia aislada: asientos cuadrados, importes y aplicaciones correctos y auditoría confirmada, sin duplicar compras ni IVA.
 
 Continúan pendientes las sugerencias genéricas y otras rutas, además de la aceptación completa de perfiles y flujos. La barrera empresarial general permanece activa.
+
+## Sugerencias e imputaciones bancarias con transacción protegida — 16 de noviembre de 2026
+
+La confirmación de sugerencias y las imputaciones a una o varias cuentas reservan escritura antes de consultar y asignar asiento. Revalidan permisos y confirman asiento, conciliación, aplicaciones/obligación y auditoría juntos con la identidad efectiva. Rechazan transacciones previas sin confirmarlas ni revertirlas. Las sugerencias vuelven a comprobar saldo y naturaleza de compra, venta u obligación bajo la reserva; no aceptan una coincidencia obsoleta. Se rechazan movimientos ambiguos/no finitos/negativos y contrapartidas de obligación inexistentes o iguales al banco.
+
+Veintidós pruebas nuevas cubren rutas válidas, permisos revocados, fallo de auditoría, períodos cerrados, sugerencias obsoletas, naturaleza y cuentas inválidas y seis escenarios de concurrencia real con dos conexiones. No se duplica la misma operación ni se sobreaplica una factura u obligación compartida; movimientos válidos distintos reciben asientos distintos. Suite completa: 565 pruebas correctas, 34 pantallas sin errores y 57 tablas históricas intactas sobre copia privada. AppTest ejecutó sugerencia, una cuenta y varias cuentas desde las pantallas reales en copia aislada, con asientos cuadrados y auditoría confirmada.
+
+La auditoría de reversos y otras rutas y la aceptación final de perfiles y flujos siguen pendientes. No se retira la barrera empresarial general.

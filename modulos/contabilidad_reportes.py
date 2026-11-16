@@ -702,100 +702,125 @@ def contabilizar_conciliacion_bancaria(conn, movimiento_id, candidato_tipo, cand
         sgci_autorizar_operacion(conn,'cxc' if candidato_tipo=='CLIENTE' else 'cxp','contabilizar',
             'Pagos de clientes' if candidato_tipo=='CLIENTE' else 'Pagos de proveedores')
     """Confirma una coincidencia, genera el asiento bancario y deja trazabilidad."""
-    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
-    if not mov:
-        raise ValueError("Movimiento bancario no encontrado.")
-    if int(mov["conciliado"] or 0) == 1:
-        raise ValueError("Este movimiento ya está conciliado.")
-    if periodo_cerrado(conn, mov["fecha"]):
-        raise ValueError("El período contable de este movimiento está cerrado.")
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+        sgci_autorizar_operacion(conn, 'banco', 'conciliar', 'Conciliación bancaria')
+        if candidato_tipo in ('CLIENTE','PROVEEDOR'):
+            sgci_autorizar_operacion(conn,'cxc' if candidato_tipo=='CLIENTE' else 'cxp','contabilizar',
+                'Pagos de clientes' if candidato_tipo=='CLIENTE' else 'Pagos de proveedores')
+        mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
+        if not mov:
+            raise ValueError("Movimiento bancario no encontrado.")
+        if int(mov["conciliado"] or 0) == 1:
+            raise ValueError("Este movimiento ya está conciliado.")
+        if periodo_cerrado(conn, mov["fecha"]):
+            raise ValueError("El período contable de este movimiento está cerrado.")
 
-    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
-    if not banco or not banco["cuenta_contable"]:
-        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+        import math
+        cargo,abono=float(mov['cargo'] or 0),float(mov['abono'] or 0)
+        if not math.isfinite(cargo) or not math.isfinite(abono) or cargo<0 or abono<0 or (cargo>0 and abono>0):
+            raise ValueError('El movimiento debe tener un solo cargo o abono válido.')
+        banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+        if not banco or not banco["cuenta_contable"]:
+            raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
 
-    monto = abs(float(mov["cargo"] or mov["abono"] or 0))
-    es_cargo = float(mov["cargo"] or 0) > 0
-    if monto <= 0:
-        raise ValueError("El movimiento no tiene monto para conciliar.")
+        monto = abs(float(mov["cargo"] or mov["abono"] or 0))
+        es_cargo = float(mov["cargo"] or 0) > 0
+        if monto <= 0:
+            raise ValueError("El movimiento no tiene monto para conciliar.")
 
-    cuenta_contraparte = None
-    descripcion = ""
-    entidad_id = None
-    documento_id = int(candidato_id)
-    roles = cargar_roles(conn)
+        cuenta_contraparte = None
+        descripcion = ""
+        entidad_id = None
+        documento_id = int(candidato_id)
+        roles = cargar_roles(conn)
 
-    if candidato_tipo == "PROVEEDOR":
-        r = conn.execute("""SELECT c.*,COALESCE(p.razon_social,p.nombre,'Proveedor') entidad
-                            FROM compras c LEFT JOIN proveedores p ON p.id=c.proveedor_id WHERE c.id=?""", (documento_id,)).fetchone()
-        if not r:
-            raise ValueError("Compra no encontrada.")
-        cuenta_contraparte = roles.get("proveedores")[0] if roles.get("proveedores") else None
-        descripcion = f"Pago proveedor {r['entidad']} Doc. {r['folio']}"
-        entidad_id = r["proveedor_id"]
-    elif candidato_tipo == "CLIENTE":
-        r = conn.execute("""SELECT v.*,COALESCE(c.razon_social,c.nombre,'Cliente') entidad
-                            FROM ventas v LEFT JOIN clientes c ON c.id=v.cliente_id WHERE v.id=?""", (documento_id,)).fetchone()
-        if not r:
-            raise ValueError("Venta no encontrada.")
-        cuenta_contraparte = roles.get("clientes")[0] if roles.get("clientes") else None
-        descripcion = f"Cobro cliente {r['entidad']} Doc. {r['folio']}"
-        entidad_id = r["cliente_id"]
-    elif candidato_tipo == "MANUAL":
-        r = conn.execute("SELECT * FROM obligaciones_manuales WHERE id=? AND conciliado=0", (documento_id,)).fetchone()
-        if not r:
-            raise ValueError("La obligación manual no existe o ya fue conciliada.")
-        cuenta_contraparte = r["codigo_cuenta"]
-        descripcion = r["descripcion"]
-    else:
-        raise ValueError("Tipo de coincidencia no reconocido.")
+        if candidato_tipo == "PROVEEDOR":
+            r = conn.execute("""SELECT c.*,COALESCE(p.razon_social,p.nombre,'Proveedor') entidad
+                                FROM compras c LEFT JOIN proveedores p ON p.id=c.proveedor_id WHERE c.id=?""", (documento_id,)).fetchone()
+            if not r:
+                raise ValueError("Compra no encontrada.")
+            cuenta_contraparte = roles.get("proveedores")[0] if roles.get("proveedores") else None
+            descripcion = f"Pago proveedor {r['entidad']} Doc. {r['folio']}"
+            entidad_id = r["proveedor_id"]
+        elif candidato_tipo == "CLIENTE":
+            r = conn.execute("""SELECT v.*,COALESCE(c.razon_social,c.nombre,'Cliente') entidad
+                                FROM ventas v LEFT JOIN clientes c ON c.id=v.cliente_id WHERE v.id=?""", (documento_id,)).fetchone()
+            if not r:
+                raise ValueError("Venta no encontrada.")
+            cuenta_contraparte = roles.get("clientes")[0] if roles.get("clientes") else None
+            descripcion = f"Cobro cliente {r['entidad']} Doc. {r['folio']}"
+            entidad_id = r["cliente_id"]
+        elif candidato_tipo == "MANUAL":
+            r = conn.execute("SELECT * FROM obligaciones_manuales WHERE id=? AND conciliado=0", (documento_id,)).fetchone()
+            if not r:
+                raise ValueError("La obligación manual no existe o ya fue conciliada.")
+            cuenta_contraparte = r["codigo_cuenta"]
+            descripcion = r["descripcion"]
+        else:
+            raise ValueError("Tipo de coincidencia no reconocido.")
 
-    if not cuenta_contraparte:
-        raise ValueError("La operación no tiene cuenta contable de contrapartida.")
+        if candidato_tipo=='PROVEEDOR':
+            pendientes=documentos_pendientes_proveedor(conn,entidad_id)
+            pendiente=pendientes[pendientes.id==documento_id]
+            if not es_cargo or pendiente.empty or abs(float(pendiente.iloc[0]['pendiente'])-monto)>0.01:
+                raise ValueError('La compra ya no coincide con el cargo y saldo pendiente.')
+        elif candidato_tipo=='CLIENTE':
+            pendientes=documentos_pendientes_cliente(conn,entidad_id)
+            pendiente=pendientes[pendientes.id==documento_id]
+            if es_cargo or pendiente.empty or abs(float(pendiente.iloc[0]['pendiente'])-monto)>0.01:
+                raise ValueError('La venta ya no coincide con el abono y saldo pendiente.')
+        elif r['tipo']!=('PAGO' if es_cargo else 'ABONO') or abs(float(r['monto'] or 0)-monto)>0.01:
+            raise ValueError('La obligación ya no coincide con el monto y naturaleza del movimiento.')
+        if not cuenta_contraparte:
+            raise ValueError("La operación no tiene cuenta contable de contrapartida.")
 
-    asiento_id = siguiente_asiento(conn) + 1
-    lote = "CONC-BANCO-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-    fecha = mov["fecha"]
-    cuenta_banco = banco["cuenta_contable"]
-    plan = Plan(conn)
+        asiento_id = siguiente_asiento(conn) + 1
+        lote = "CONC-BANCO-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        fecha = mov["fecha"]
+        cuenta_banco = banco["cuenta_contable"]
+        plan = Plan(conn)
+        if cuenta_contraparte not in plan.todos or cuenta_contraparte==cuenta_banco:
+            raise ValueError('La contrapartida debe existir y ser distinta de la cuenta bancaria.')
 
-    # Cargo bancario: Debe contrapartida / Haber Banco.
-    # Abono bancario: Debe Banco / Haber contrapartida.
-    lineas = [
-        (cuenta_contraparte, monto, 0.0),
-        (cuenta_banco, 0.0, monto),
-    ] if es_cargo else [
-        (cuenta_banco, monto, 0.0),
-        (cuenta_contraparte, 0.0, monto),
-    ]
+        # Cargo bancario: Debe contrapartida / Haber Banco.
+        # Abono bancario: Debe Banco / Haber contrapartida.
+        lineas = [
+            (cuenta_contraparte, monto, 0.0),
+            (cuenta_banco, 0.0, monto),
+        ] if es_cargo else [
+            (cuenta_banco, monto, 0.0),
+            (cuenta_contraparte, 0.0, monto),
+        ]
 
-    for codigo, debe, haber in lineas:
-        nombre = plan.todos.get(codigo, codigo)
-        conn.execute("""INSERT INTO libro_diario
-            (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
-            VALUES(?,?,?,?,?,?,?,?,?)""",
-            (fecha, nombre, debe, haber, descripcion, codigo, asiento_id, lote, "CONCILIACION_BANCARIA"))
+        for codigo, debe, haber in lineas:
+            nombre = plan.todos.get(codigo, codigo)
+            conn.execute("""INSERT INTO libro_diario
+                (fecha,cuenta,debe,haber,glosa,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (fecha, nombre, debe, haber, descripcion, codigo, asiento_id, lote, "CONCILIACION_BANCARIA"))
 
-    if candidato_tipo == "PROVEEDOR":
-        cur = conn.execute("""INSERT INTO pagos_proveedores(fecha,proveedor_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
-                              VALUES(?,?,?,?,?,?,?)""", (fecha, entidad_id, monto, "Banco", cuenta_banco, descripcion, lote))
-        conn.execute("INSERT INTO aplicaciones_proveedores(pago_id,compra_id,monto) VALUES(?,?,?)", (cur.lastrowid, documento_id, monto))
-    elif candidato_tipo == "CLIENTE":
-        cur = conn.execute("""INSERT INTO pagos_clientes(fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
-                              VALUES(?,?,?,?,?,?,?)""", (fecha, entidad_id, monto, "Banco", cuenta_banco, descripcion, lote))
-        conn.execute("INSERT INTO aplicaciones_clientes(pago_id,venta_id,monto) VALUES(?,?,?)", (cur.lastrowid, documento_id, monto))
-    else:
-        conn.execute("""UPDATE obligaciones_manuales
-                        SET conciliado=1,fecha_conciliacion=?,cartola_id=?,asiento_id=? WHERE id=?""",
-                     (datetime.now().isoformat(timespec="seconds"), movimiento_id, asiento_id, documento_id))
+        if candidato_tipo == "PROVEEDOR":
+            cur = conn.execute("""INSERT INTO pagos_proveedores(fecha,proveedor_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
+                                  VALUES(?,?,?,?,?,?,?)""", (fecha, entidad_id, monto, "Banco", cuenta_banco, descripcion, lote))
+            conn.execute("INSERT INTO aplicaciones_proveedores(pago_id,compra_id,monto) VALUES(?,?,?)", (cur.lastrowid, documento_id, monto))
+        elif candidato_tipo == "CLIENTE":
+            cur = conn.execute("""INSERT INTO pagos_clientes(fecha,cliente_id,monto,medio_pago,cuenta_banco,glosa,lote_id)
+                                  VALUES(?,?,?,?,?,?,?)""", (fecha, entidad_id, monto, "Banco", cuenta_banco, descripcion, lote))
+            conn.execute("INSERT INTO aplicaciones_clientes(pago_id,venta_id,monto) VALUES(?,?,?)", (cur.lastrowid, documento_id, monto))
+        else:
+            conn.execute("""UPDATE obligaciones_manuales
+                            SET conciliado=1,fecha_conciliacion=?,cartola_id=?,asiento_id=? WHERE id=?""",
+                         (datetime.now().isoformat(timespec="seconds"), movimiento_id, asiento_id, documento_id))
 
-    confianza = 100.0
-    conn.execute("""UPDATE cartola_bancaria
-                    SET conciliado=1,observacion=?,asiento_id=?,match_tipo=?,match_id=?,match_confianza=?
-                    WHERE id=?""",
-                 (descripcion, asiento_id, candidato_tipo, documento_id, confianza, movimiento_id))
-    conn.commit()
-    registrar_auditoria(conn, "CONCILIACIÓN BANCARIA", f"Movimiento {movimiento_id} -> {candidato_tipo} {documento_id}, asiento {asiento_id}")
+        confianza = 100.0
+        conn.execute("""UPDATE cartola_bancaria
+                        SET conciliado=1,observacion=?,asiento_id=?,match_tipo=?,match_id=?,match_confianza=?
+                        WHERE id=?""",
+                     (descripcion, asiento_id, candidato_tipo, documento_id, confianza, movimiento_id))
+        _sgci_auditar_auxiliar(conn, "CONCILIACIÓN BANCARIA", f"Movimiento {movimiento_id} -> {candidato_tipo} {documento_id}, asiento {asiento_id}")
     return asiento_id
 
 
@@ -806,44 +831,51 @@ def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, 
     Cargo: Debe contrapartida / Haber Banco.
     Abono: Debe Banco / Haber contrapartida.
     """
-    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
-    if not mov:
-        raise ValueError("Movimiento bancario no encontrado.")
-    if int(mov["conciliado"] or 0) == 1:
-        raise ValueError("Este movimiento ya está conciliado.")
-    if periodo_cerrado(conn, mov["fecha"]):
-        raise ValueError("El período contable de este movimiento está cerrado.")
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+        mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (movimiento_id,)).fetchone()
+        if not mov:
+            raise ValueError("Movimiento bancario no encontrado.")
+        if int(mov["conciliado"] or 0) == 1:
+            raise ValueError("Este movimiento ya está conciliado.")
+        if periodo_cerrado(conn, mov["fecha"]):
+            raise ValueError("El período contable de este movimiento está cerrado.")
 
-    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
-    if not banco or not banco["cuenta_contable"]:
-        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+        import math
+        cargo,abono=float(mov['cargo'] or 0),float(mov['abono'] or 0)
+        if not math.isfinite(cargo) or not math.isfinite(abono) or cargo<0 or abono<0 or (cargo>0 and abono>0):
+            raise ValueError('El movimiento debe tener un solo cargo o abono válido.')
+        banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+        if not banco or not banco["cuenta_contable"]:
+            raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
 
-    plan = Plan(conn)
-    if codigo_cuenta not in plan.todos:
-        raise ValueError("La cuenta de contrapartida no existe en el plan de cuentas.")
-    if codigo_cuenta == banco["cuenta_contable"]:
-        raise ValueError("La contrapartida no puede ser la misma cuenta bancaria.")
+        plan = Plan(conn)
+        if codigo_cuenta not in plan.todos:
+            raise ValueError("La cuenta de contrapartida no existe en el plan de cuentas.")
+        if codigo_cuenta == banco["cuenta_contable"]:
+            raise ValueError("La contrapartida no puede ser la misma cuenta bancaria.")
 
-    monto = abs(float(mov["cargo"] or mov["abono"] or 0))
-    es_cargo = float(mov["cargo"] or 0) > 0
-    if monto <= 0:
-        raise ValueError("El movimiento no tiene monto para contabilizar.")
+        monto = abs(float(mov["cargo"] or mov["abono"] or 0))
+        es_cargo = float(mov["cargo"] or 0) > 0
+        if monto <= 0:
+            raise ValueError("El movimiento no tiene monto para contabilizar.")
 
-    glosa = limpiar_texto(descripcion) or limpiar_texto(mov["descripcion"]) or "Imputación manual bancaria"
-    asiento_id = siguiente_asiento(conn) + 1
-    lote = "CONC-MANUAL-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-    fecha = mov["fecha"]
-    cuenta_banco = banco["cuenta_contable"]
+        glosa = limpiar_texto(descripcion) or limpiar_texto(mov["descripcion"]) or "Imputación manual bancaria"
+        asiento_id = siguiente_asiento(conn) + 1
+        lote = "CONC-MANUAL-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        fecha = mov["fecha"]
+        cuenta_banco = banco["cuenta_contable"]
 
-    lineas = [
-        (codigo_cuenta, monto, 0.0),
-        (cuenta_banco, 0.0, monto),
-    ] if es_cargo else [
-        (cuenta_banco, monto, 0.0),
-        (codigo_cuenta, 0.0, monto),
-    ]
+        lineas = [
+            (codigo_cuenta, monto, 0.0),
+            (cuenta_banco, 0.0, monto),
+        ] if es_cargo else [
+            (cuenta_banco, monto, 0.0),
+            (codigo_cuenta, 0.0, monto),
+        ]
 
-    try:
         for codigo, debe, haber in lineas:
             nombre = plan.todos.get(codigo, codigo)
             conn.execute("""INSERT INTO libro_diario
@@ -856,13 +888,8 @@ def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, 
                             match_id=NULL,match_confianza=100
                         WHERE id=?""",
                      (glosa, asiento_id, movimiento_id))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-
-    registrar_auditoria(conn, "IMPUTACIÓN BANCARIA MANUAL",
-                        f"Movimiento {movimiento_id} -> cuenta {codigo_cuenta}, asiento {asiento_id}")
+        _sgci_auditar_auxiliar(conn, "IMPUTACIÓN BANCARIA MANUAL",
+                            f"Movimiento {movimiento_id} -> cuenta {codigo_cuenta}, asiento {asiento_id}")
     return asiento_id
 
 
@@ -871,45 +898,52 @@ def contabilizar_imputacion_manual_bancaria(conn, movimiento_id, codigo_cuenta, 
 def contabilizar_imputacion_multiple_bancaria(conn, movimiento_id, distribuciones, descripcion=None):
     sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
     """Distribuye un único movimiento bancario entre varias cuentas y lo concilia en un solo asiento."""
-    mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
-    if not mov:
-        raise ValueError("Movimiento bancario no encontrado.")
-    if int(mov["conciliado"] or 0) == 1:
-        raise ValueError("Este movimiento ya está conciliado.")
-    if periodo_cerrado(conn, mov["fecha"]):
-        raise ValueError("El período contable de este movimiento está cerrado.")
-    banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
-    if not banco or not banco["cuenta_contable"]:
-        raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn, 'banco', 'contabilizar', 'Conciliación bancaria')
+        mov = conn.execute("SELECT * FROM cartola_bancaria WHERE id=?", (int(movimiento_id),)).fetchone()
+        if not mov:
+            raise ValueError("Movimiento bancario no encontrado.")
+        if int(mov["conciliado"] or 0) == 1:
+            raise ValueError("Este movimiento ya está conciliado.")
+        if periodo_cerrado(conn, mov["fecha"]):
+            raise ValueError("El período contable de este movimiento está cerrado.")
+        import math
+        cargo,abono=float(mov['cargo'] or 0),float(mov['abono'] or 0)
+        if not math.isfinite(cargo) or not math.isfinite(abono) or cargo<0 or abono<0 or (cargo>0 and abono>0):
+            raise ValueError('El movimiento debe tener un solo cargo o abono válido.')
+        banco = conn.execute("SELECT * FROM bancos WHERE id=?", (mov["banco_id"],)).fetchone()
+        if not banco or not banco["cuenta_contable"]:
+            raise ValueError("La cuenta bancaria no tiene una cuenta contable configurada.")
 
-    monto = clp_round(abs(float(mov["cargo"] or mov["abono"] or 0)))
-    es_cargo = float(mov["cargo"] or 0) > 0
-    if monto <= 0:
-        raise ValueError("El movimiento no tiene monto para contabilizar.")
+        monto = clp_round(abs(float(mov["cargo"] or mov["abono"] or 0)))
+        es_cargo = float(mov["cargo"] or 0) > 0
+        if monto <= 0:
+            raise ValueError("El movimiento no tiene monto para contabilizar.")
 
-    plan = Plan(conn)
-    cuenta_banco = banco["cuenta_contable"]
-    limpias = []
-    for codigo, importe in distribuciones:
-        importe = clp_round(float(importe or 0))
-        if importe <= 0:
-            continue
-        if codigo not in plan.todos:
-            raise ValueError(f"La cuenta {codigo} no existe en el plan de cuentas.")
-        if codigo == cuenta_banco:
-            raise ValueError("La cuenta bancaria no puede usarse como contrapartida.")
-        limpias.append((codigo, importe))
-    if len(limpias) < 2:
-        raise ValueError("Ingresa al menos dos distribuciones con monto mayor que cero.")
-    total = clp_round(sum(x[1] for x in limpias))
-    if total != monto:
-        raise ValueError(f"La distribución suma {money(total)} y debe sumar exactamente {money(monto)}.")
+        plan = Plan(conn)
+        cuenta_banco = banco["cuenta_contable"]
+        limpias = []
+        for codigo, importe in distribuciones:
+            importe = clp_round(float(importe or 0))
+            if importe <= 0:
+                continue
+            if codigo not in plan.todos:
+                raise ValueError(f"La cuenta {codigo} no existe en el plan de cuentas.")
+            if codigo == cuenta_banco:
+                raise ValueError("La cuenta bancaria no puede usarse como contrapartida.")
+            limpias.append((codigo, importe))
+        if len(limpias) < 2:
+            raise ValueError("Ingresa al menos dos distribuciones con monto mayor que cero.")
+        total = clp_round(sum(x[1] for x in limpias))
+        if total != monto:
+            raise ValueError(f"La distribución suma {money(total)} y debe sumar exactamente {money(monto)}.")
 
-    glosa = limpiar_texto(descripcion) or limpiar_texto(mov["descripcion"]) or "Imputación bancaria distribuida"
-    asiento_id = siguiente_asiento(conn) + 1
-    lote = "CONC-MULTI-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-    fecha = mov["fecha"]
-    try:
+        glosa = limpiar_texto(descripcion) or limpiar_texto(mov["descripcion"]) or "Imputación bancaria distribuida"
+        asiento_id = siguiente_asiento(conn) + 1
+        lote = "CONC-MULTI-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        fecha = mov["fecha"]
         # Cargo/salida: varias cuentas al Debe y Banco al Haber.
         # Abono/entrada: Banco al Debe y varias cuentas al Haber.
         if es_cargo:
@@ -926,12 +960,8 @@ def contabilizar_imputacion_multiple_bancaria(conn, movimiento_id, distribucione
                         SET conciliado=1,observacion=?,asiento_id=?,match_tipo='IMPUTACION_MULTIPLE',
                             match_id=NULL,match_confianza=100 WHERE id=?""",
                      (f"{glosa} | {detalle}", asiento_id, int(movimiento_id)))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    registrar_auditoria(conn, "IMPUTACIÓN BANCARIA MÚLTIPLE",
-                        f"Movimiento {movimiento_id} distribuido en {len(limpias)} cuentas, asiento {asiento_id}")
+        _sgci_auditar_auxiliar(conn, "IMPUTACIÓN BANCARIA MÚLTIPLE",
+                            f"Movimiento {movimiento_id} distribuido en {len(limpias)} cuentas, asiento {asiento_id}")
     return asiento_id
 
 def documentos_pendientes_cliente(conn, cliente_id):
