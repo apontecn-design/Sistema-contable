@@ -384,6 +384,28 @@ def tes_comprobante_autorizado(conn, sid, exportar=False):
     return pago
 
 
+def tes_asiento_pago_autorizado(conn, sid, exportar=False):
+    sgci_autorizar_operacion(conn,'tesoreria','ver','Confirmación de pagos')
+    sgci_autorizar_operacion(conn,'contabilidad','ver','Libro Diario')
+    if exportar:
+        sgci_autorizar_operacion(conn,'tesoreria','exportar','Confirmación de pagos')
+        sgci_autorizar_operacion(conn,'contabilidad','exportar','Libro Diario')
+    return pd.read_sql_query('''SELECT l.fecha,l.codigo_cuenta,l.cuenta,l.debe,l.haber,l.glosa
+        FROM libro_diario l WHERE l.asiento_id=(SELECT p.asiento_id
+        FROM tes_confirmaciones_pago p JOIN tes_solicitudes s ON s.id=p.solicitud_id
+        WHERE p.solicitud_id=? AND s.estado='CONTABILIZADA') ORDER BY l.id''',conn,params=(sid,))
+
+
+def tes_conciliacion_pago_autorizada(conn, sid):
+    sgci_autorizar_operacion(conn,'tesoreria','ver','Confirmación de pagos')
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    return bool(conn.execute("""SELECT 1 FROM cartola_bancaria c
+        JOIN tes_confirmaciones_pago p ON p.solicitud_id=c.match_id AND p.asiento_id=c.asiento_id
+        JOIN tes_solicitudes s ON s.id=p.solicitud_id
+        WHERE c.match_tipo='TESORERIA' AND c.match_id=? AND c.conciliado=1
+        AND s.estado='CONTABILIZADA' LIMIT 1""",(sid,)).fetchone())
+
+
 def pantalla_tesoreria(conn):
     sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Solicitudes de fondos')
     st.title('💼 Tesorería · Solicitudes de fondos')
@@ -669,11 +691,16 @@ def pantalla_tesoreria(conn):
                 st.success(f"Pago contabilizado · Asiento {pago['asiento_id'] if pago else '—'}.")
                 if pago:
                     tes_vista_comprobante(conn,sid)
-                    conciliado=conn.execute("SELECT id FROM cartola_bancaria WHERE match_tipo='TESORERIA' AND match_id=? AND conciliado=1",(sid,)).fetchone()
-                    st.info('Conciliada con cartola bancaria.' if conciliado else 'Pendiente de conciliación bancaria.')
-                    asientos_tes=pd.read_sql_query('SELECT fecha,codigo_cuenta,cuenta,debe,haber,glosa FROM libro_diario WHERE asiento_id=? ORDER BY id',conn,params=(pago['asiento_id'],))
-                    st.dataframe(asientos_tes,hide_index=True,use_container_width=True)
-                    tes_boton_imprimir(conn,f'Asiento {pago["asiento_id"]}',asientos_tes,f'asiento_{sid}',submodulo='Confirmación de pagos')
+                    if sgci_puede_submodulo(conn,'banco','Conciliación bancaria','ver'):
+                        conciliado=tes_conciliacion_pago_autorizada(conn,sid)
+                        st.info('Conciliada con cartola bancaria.' if conciliado else 'Pendiente de conciliación bancaria.')
+                    if sgci_puede_submodulo(conn,'contabilidad','Libro Diario','ver'):
+                        asientos_tes=tes_asiento_pago_autorizado(conn,sid)
+                        st.dataframe(asientos_tes,hide_index=True,use_container_width=True)
+                        if (sgci_puede_submodulo(conn,'contabilidad','Libro Diario','exportar') and
+                                sgci_puede_submodulo(conn,'tesoreria','Confirmación de pagos','exportar')):
+                            asientos_exportar=tes_asiento_pago_autorizado(conn,sid,exportar=True)
+                            tes_boton_imprimir(conn,f'Asiento {pago["asiento_id"]}',asientos_exportar,f'asiento_{sid}',submodulo='Confirmación de pagos')
     with tab_historial:
         st.subheader('Historial de solicitudes y pagos')
         if not sgci_puede_submodulo(conn,'tesoreria','Historial','ver'):
