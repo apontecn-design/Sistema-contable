@@ -1729,6 +1729,79 @@ def guardar_saldo_inicial_cliente(conn, cliente_id, monto):
         _sgci_auditar_auxiliar(conn,'SALDO INICIAL CLIENTE',f'cliente:{cliente_id}; monto:{monto}')
 
 
+def banco_secciones_autorizadas(conn):
+    secciones=('Cuentas bancarias','Cargar cartola','Movimiento manual','Conciliación','Operaciones manuales','Movimientos')
+    return [(s,'Conciliación bancaria' if s in ('Conciliación','Operaciones manuales') else 'Bancos y cartolas') for s in secciones
+        if sgci_puede_submodulo(conn,'banco','Conciliación bancaria' if s in ('Conciliación','Operaciones manuales') else 'Bancos y cartolas','ver')]
+
+
+def banco_cuentas_movimientos(conn):
+    sgci_autorizar_operacion(conn,'banco','ver','Bancos y cartolas')
+    return pd.read_sql_query('SELECT id,nombre FROM bancos WHERE activo=1 ORDER BY nombre',conn)
+
+
+def banco_movimientos_autorizados(conn,banco_id):
+    sgci_autorizar_operacion(conn,'banco','ver','Bancos y cartolas')
+    filtros=['cb.banco_id=?'];parametros=[int(banco_id)]
+    grupos=[('cxc','Pagos de clientes',('CLIENTE','CLIENTE_ANTICIPO')),
+            ('cxp','Pagos de proveedores',('PROVEEDOR','PROVEEDOR_SIN_DOCUMENTO','DEVOLUCION_PROVEEDOR')),
+            ('tesoreria','Historial',('TESORERIA',))]
+    for modulo,sub,tipos in grupos:
+        if not sgci_puede_submodulo(conn,modulo,sub,'ver'):
+            filtros.append("UPPER(COALESCE(cb.match_tipo,'')) NOT IN ("+','.join('?' for _ in tipos)+')');parametros.extend(tipos)
+    if not sgci_puede_submodulo(conn,'nomina','Anticipos y préstamos','ver'):
+        filtros.append("UPPER(COALESCE(cb.match_tipo,''))<>'NOMINA_ANTICIPO'")
+    else:
+        ids=sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual())
+        if ids is not None:
+            if not ids:filtros.append("UPPER(COALESCE(cb.match_tipo,''))<>'NOMINA_ANTICIPO'")
+            else:
+                filtros.append("(UPPER(COALESCE(cb.match_tipo,''))<>'NOMINA_ANTICIPO' OR cb.match_id IN (SELECT id FROM nomina_anticipos WHERE trabajador_id IN ("+','.join('?' for _ in ids)+')))')
+                parametros.extend(sorted(ids))
+    datos=pd.read_sql_query("""SELECT cb.fecha,cb.descripcion,cb.referencia,cb.cargo,cb.abono,cb.saldo,
+        CASE WHEN cb.conciliado=1 THEN 'Sí' ELSE 'No' END conciliado,
+        cb.origen,cb.match_tipo,cb.match_id,cb.asiento_id,cb.observacion FROM cartola_bancaria cb WHERE """+
+        ' AND '.join(filtros)+' ORDER BY cb.fecha,cb.id DESC',conn,params=parametros)
+    datos.attrs['vista_restringida']=len(filtros)>1
+    if datos.attrs['vista_restringida']:datos['saldo']=None
+    return datos
+
+
+def banco_reversibles_proveedor(conn,banco_id):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    sgci_autorizar_operacion(conn,'cxp','ver','Pagos de proveedores')
+    return pd.read_sql_query("""SELECT id,fecha,descripcion,referencia,cargo,asiento_id
+        FROM cartola_bancaria WHERE banco_id=? AND conciliado=1
+        AND match_tipo IN ('PROVEEDOR','PROVEEDOR_SIN_DOCUMENTO') ORDER BY fecha DESC,id DESC""",conn,params=(int(banco_id),))
+
+
+def banco_reversibles_cliente(conn,banco_id):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    sgci_autorizar_operacion(conn,'cxc','ver','Pagos de clientes')
+    return pd.read_sql_query("""SELECT cb.id,cb.fecha,cb.descripcion,cb.referencia,cb.abono,cb.asiento_id,c.razon_social AS cliente
+        FROM cartola_bancaria cb LEFT JOIN clientes c ON c.id=cb.match_id
+        WHERE cb.banco_id=? AND cb.conciliado=1 AND cb.match_tipo='CLIENTE_ANTICIPO'
+        AND COALESCE(cb.abono,0)>0 ORDER BY cb.fecha DESC,cb.id DESC""",conn,params=(int(banco_id),))
+
+
+def banco_reversibles_nomina(conn,banco_id):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    sgci_autorizar_operacion(conn,'nomina','ver','Anticipos y préstamos')
+    ids=sgci_rrhh_ids_autorizados(conn,sgci_identidad_actual())
+    filtros=['cb.banco_id=?',"cb.conciliado=1","cb.match_tipo='NOMINA_ANTICIPO'",'COALESCE(a.anulado,0)=0'];parametros=[int(banco_id)]
+    if ids is not None:
+        filtros.append('a.trabajador_id IN ('+','.join('?' for _ in ids)+')' if ids else '0');parametros.extend(sorted(ids))
+    return pd.read_sql_query('''SELECT cb.id,cb.fecha,cb.descripcion,cb.cargo,cb.asiento_id,a.id anticipo_id,t.nombre trabajador
+        FROM cartola_bancaria cb JOIN nomina_anticipos a ON a.id=cb.match_id
+        JOIN nomina_trabajadores t ON t.id=a.trabajador_id WHERE '''+' AND '.join(filtros)+' ORDER BY cb.fecha DESC,cb.id DESC',conn,params=parametros)
+
+
+def banco_corregibles_manual(conn,banco_id):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    return pd.read_sql_query("""SELECT id,fecha,descripcion,cargo,abono,asiento_id FROM cartola_bancaria
+        WHERE banco_id=? AND conciliado=1 AND match_tipo='IMPUTACION_MANUAL' ORDER BY fecha,id DESC""",conn,params=(int(banco_id),))
+
+
 def banco_entidades_pago(conn, modulo):
     sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
     if modulo not in ('cxc','cxp'):raise ValueError('Módulo de pago inválido.')

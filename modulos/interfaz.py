@@ -927,13 +927,19 @@ elif menu == "🏦 Bancos y Cartolas":
     st.caption("Gestión bancaria, cartolas, movimientos y conciliación bancaria.")
     # La navegación se guarda en session_state: st.tabs vuelve a la primera pestaña
     # en cada rerun (selectbox, radio, botones, conciliaciones, etc.).
-    banco_secciones = ["Cuentas bancarias", "Cargar cartola", "Movimiento manual", "Conciliación", "Operaciones manuales", "Movimientos"]
+    banco_submodulos=dict(banco_secciones_autorizadas(conn))
+    banco_secciones=list(banco_submodulos)
+    if not banco_secciones:
+        st.info('Tu perfil no tiene secciones bancarias autorizadas.')
+        st.stop()
     if st.session_state.get("sgci_banco_seccion") not in banco_secciones:
-        st.session_state["sgci_banco_seccion"] = "Conciliación"
+        st.session_state["sgci_banco_seccion"] = "Conciliación" if "Conciliación" in banco_secciones else banco_secciones[0]
     banco_seccion = st.selectbox(
         "Sección bancaria", banco_secciones,
         key="sgci_banco_seccion", label_visibility="collapsed"
     )
+
+    sgci_exigir_permiso(conn,'banco','ver',banco_submodulos[banco_seccion])
 
     if banco_seccion == "Cuentas bancarias":
         df = pd.read_sql_query("SELECT b.id AS ID,b.nombre AS Banco,b.numero_cuenta AS Cuenta,b.tipo AS Tipo,b.moneda AS Moneda,b.cuenta_contable AS Cuenta_Contable,b.saldo_inicial AS Saldo_Inicial FROM bancos b WHERE activo=1 ORDER BY nombre", conn)
@@ -1625,19 +1631,19 @@ elif menu == "🏦 Bancos y Cartolas":
             st.dataframe(ops, use_container_width=True, hide_index=True)
 
     if banco_seccion == "Movimientos":
-        bancos = pd.read_sql_query("SELECT id,nombre FROM bancos WHERE activo=1 ORDER BY nombre", conn)
+        bancos = banco_cuentas_movimientos(conn)
         if not bancos.empty:
             label = st.selectbox("Cuenta", [f"{r.id} - {r.nombre}" for r in bancos.itertuples()], key="mov_banco")
-            dfm = pd.read_sql_query("""SELECT fecha,descripcion,referencia,cargo,abono,saldo,
-                                        CASE WHEN conciliado=1 THEN 'Sí' ELSE 'No' END conciliado,
-                                        origen,match_tipo,match_id,asiento_id,observacion
-                                        FROM cartola_bancaria WHERE banco_id=? ORDER BY fecha,id DESC""", conn, params=[int(label.split(" - ")[0])])
+            banco_mov_id=int(label.split(' - ')[0])
+            dfm=banco_movimientos_autorizados(conn,banco_mov_id)
             st.dataframe(dfm, use_container_width=True, hide_index=True)
+            if dfm.attrs.get('vista_restringida'):
+                st.caption('Vista limitada a tus permisos. Se omiten los saldos de cartola porque no se muestran todos los movimientos.')
 
-            pagos_para_revertir=pd.read_sql_query("""SELECT id,fecha,descripcion,referencia,cargo,asiento_id
-                FROM cartola_bancaria WHERE banco_id=? AND conciliado=1
-                AND match_tipo IN ('PROVEEDOR','PROVEEDOR_SIN_DOCUMENTO')
-                ORDER BY fecha DESC,id DESC""",conn,params=[int(label.split(' - ')[0])])
+            if not sgci_puede_submodulo(conn,'banco','Conciliación bancaria','ver'):
+                st.caption('Los controles de reversión requieren acceso a Conciliación bancaria.')
+                st.stop()
+            pagos_para_revertir=banco_reversibles_proveedor(conn,banco_mov_id) if sgci_puede_submodulo(conn,'cxp','Pagos de proveedores','ver') else pd.DataFrame()
             if not pagos_para_revertir.empty:
                 st.divider()
                 st.subheader('Revertir conciliación de proveedor')
@@ -1655,14 +1661,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     except Exception as e:
                         st.error(f'No se realizaron cambios: {e}')
 
-            abonos_cliente_reversibles = pd.read_sql_query("""SELECT cb.id,cb.fecha,cb.descripcion,cb.referencia,
-                    cb.abono,cb.asiento_id,c.razon_social AS cliente
-                    FROM cartola_bancaria cb
-                    LEFT JOIN clientes c ON c.id=cb.match_id
-                    WHERE cb.banco_id=? AND cb.conciliado=1
-                      AND cb.match_tipo='CLIENTE_ANTICIPO' AND COALESCE(cb.abono,0)>0
-                    ORDER BY cb.fecha DESC,cb.id DESC""", conn,
-                    params=[int(label.split(' - ')[0])])
+            abonos_cliente_reversibles=banco_reversibles_cliente(conn,banco_mov_id) if sgci_puede_submodulo(conn,'cxc','Pagos de clientes','ver') else pd.DataFrame()
             if not abonos_cliente_reversibles.empty:
                 st.divider()
                 st.subheader('Revertir conciliación de abonos de clientes')
@@ -1702,13 +1701,7 @@ elif menu == "🏦 Bancos y Cartolas":
                         except Exception:
                             st.error('No se pudo completar el reverso. No se guardaron cambios; revisa el estado del cobro antes de reintentar.')
 
-            anticipos_reversibles=pd.read_sql_query("""SELECT cb.id,cb.fecha,cb.descripcion,cb.cargo,cb.asiento_id,
-                a.id anticipo_id,t.nombre trabajador
-                FROM cartola_bancaria cb JOIN nomina_anticipos a ON a.id=cb.match_id
-                JOIN nomina_trabajadores t ON t.id=a.trabajador_id
-                WHERE cb.banco_id=? AND cb.conciliado=1 AND cb.match_tipo='NOMINA_ANTICIPO'
-                AND COALESCE(a.anulado,0)=0 ORDER BY cb.fecha DESC,cb.id DESC""",conn,
-                params=[int(label.split(' - ')[0])])
+            anticipos_reversibles=banco_reversibles_nomina(conn,banco_mov_id) if sgci_puede_submodulo(conn,'nomina','Anticipos y préstamos','ver') else pd.DataFrame()
             if not anticipos_reversibles.empty:
                 st.divider()
                 st.subheader('Revertir anticipo de trabajador mal conciliado')
@@ -1726,10 +1719,7 @@ elif menu == "🏦 Bancos y Cartolas":
                     except Exception as e:
                         st.error(f'No se realizaron cambios: {e}')
 
-            corregibles = pd.read_sql_query("""SELECT id,fecha,descripcion,cargo,abono,asiento_id
-                                               FROM cartola_bancaria
-                                               WHERE banco_id=? AND conciliado=1 AND match_tipo='IMPUTACION_MANUAL'
-                                               ORDER BY fecha,id DESC""", conn, params=[int(label.split(" - ")[0])])
+            corregibles=banco_corregibles_manual(conn,banco_mov_id)
             if not corregibles.empty:
                 st.divider()
                 st.subheader("Corregir imputación manual")
