@@ -362,6 +362,28 @@ def tes_descargar_adjunto(conn, sid, adjunto_id):
     return fila['nombre'], bytes(fila['contenido'])
 
 
+def tes_historial_autorizado(conn, exportar=False):
+    sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Historial')
+    if exportar:
+        sgci_autorizar_operacion(conn, 'tesoreria', 'exportar', 'Historial')
+    return pd.read_sql_query("""SELECT s.id AS solicitud, s.fecha, s.beneficiario, s.concepto,
+        s.estado, COALESCE(SUM(d.monto),0) AS monto, p.fecha_pago, p.referencia,
+        p.asiento_id FROM tes_solicitudes s
+        LEFT JOIN tes_solicitud_detalle d ON d.solicitud_id=s.id
+        LEFT JOIN tes_confirmaciones_pago p ON p.solicitud_id=s.id
+        GROUP BY s.id ORDER BY s.id DESC""",conn)
+
+
+def tes_comprobante_autorizado(conn, sid, exportar=False):
+    sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Confirmación de pagos')
+    if exportar:
+        sgci_autorizar_operacion(conn, 'tesoreria', 'exportar', 'Confirmación de pagos')
+    pago=conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?',(sid,)).fetchone()
+    if pago is None:
+        raise ValueError('Comprobante no disponible para esta solicitud.')
+    return pago
+
+
 def pantalla_tesoreria(conn):
     sgci_autorizar_operacion(conn, 'tesoreria', 'ver', 'Solicitudes de fondos')
     st.title('💼 Tesorería · Solicitudes de fondos')
@@ -479,9 +501,9 @@ def pantalla_tesoreria(conn):
             filtro_estado=st.selectbox('Filtrar por estado',['Todos']+sorted(solicitudes.estado.unique().tolist()),key='tes_estado_filtro')
             solicitudes_visibles=solicitudes if filtro_estado=='Todos' else solicitudes[solicitudes.estado==filtro_estado]
             st.dataframe(solicitudes_visibles, hide_index=True, use_container_width=True)
-            tes_boton_imprimir('Solicitudes '+filtro_estado,solicitudes_visibles,'solicitudes_'+filtro_estado.lower())
+            tes_boton_imprimir(conn,'Solicitudes '+filtro_estado,solicitudes_visibles,'solicitudes_'+filtro_estado.lower())
             pendientes_imp=solicitudes[solicitudes.estado=='PENDIENTE_CONTABILIZACION']
-            tes_boton_imprimir('Pendientes de contabilización',pendientes_imp,'pendientes_contabilizacion')
+            tes_boton_imprimir(conn,'Pendientes de contabilización',pendientes_imp,'pendientes_contabilizacion')
             ids = solicitudes.id.astype(int).tolist()
             sid = st.selectbox('Selecciona una solicitud', ids, format_func=lambda n: f'SF-{n:06d}', key='tes_solicitud_actual')
             fila = conn.execute('SELECT * FROM tes_solicitudes WHERE id=?', (sid,)).fetchone()
@@ -491,14 +513,14 @@ def pantalla_tesoreria(conn):
             detalle_vista=detalle.copy()
             detalle_vista=detalle_vista.rename(columns={'tratamiento':'tratamiento declarado'})
             st.dataframe(detalle_vista, hide_index=True, use_container_width=True)
-            tes_boton_imprimir(f'Detalle SF-{sid:06d}',detalle_vista,f'detalle_{sid}')
+            tes_boton_imprimir(conn,f'Detalle SF-{sid:06d}',detalle_vista,f'detalle_{sid}')
             st.metric('Total solicitado', money(detalle.monto.sum()))
             if sgci_puede_submodulo(conn,'tesoreria','Solicitudes de fondos','exportar'):
                 for adj in conn.execute('SELECT id,nombre FROM tes_adjuntos WHERE solicitud_id=? ORDER BY id',(sid,)):
                     nombre_adjunto, contenido_adjunto = tes_descargar_adjunto(conn,sid,adj['id'])
                     st.download_button('Descargar adjunto: '+nombre_adjunto,contenido_adjunto,
                         file_name=nombre_adjunto,key=f'tes_adjunto_{adj["id"]}')
-            if fila['estado'] in ('BORRADOR','ENVIADA','APROBADA','PENDIENTE_CONTABILIZACION'):
+            if fila['estado'] in ('BORRADOR','ENVIADA','APROBADA','PENDIENTE_CONTABILIZACION') and sgci_puede_submodulo(conn,'tesoreria','Confirmación de pagos','ver'):
                 st.markdown('#### Clasificación contable por línea')
                 st.caption('Cada concepto se imputa a su propia cuenta. Una sola transferencia genera un asiento con varios débitos y un crédito bancario total.')
                 detalles_db=conn.execute('SELECT id,descripcion,monto,compra_id,cuenta_contable,tratamiento FROM tes_solicitud_detalle WHERE solicitud_id=? ORDER BY id',(sid,)).fetchall()
@@ -558,7 +580,7 @@ def pantalla_tesoreria(conn):
                     tes_cambiar_estado(conn,sid,'RECHAZADA')
                     st.session_state['tes_preferir_listado']=True
                     st.rerun()
-            elif fila['estado'] == 'APROBADA':
+            elif fila['estado']=='APROBADA' and sgci_puede_submodulo(conn,'tesoreria','Confirmación de pagos','ver'):
                 sin_dte_ap=detalle['compra_id'].isna().any()
                 cuenta_ap=None
                 faltan=conn.execute("SELECT COUNT(*) FROM tes_solicitud_detalle WHERE solicitud_id=? AND compra_id IS NULL AND COALESCE(cuenta_contable, '') = ''", (sid,)).fetchone()[0]
@@ -605,7 +627,7 @@ def pantalla_tesoreria(conn):
                             st.error('Ya existe una confirmación de pago para esta solicitud.')
                         except Exception as e:
                             st.error(f'No se pudo registrar el comprobante: {e}')
-            elif fila['estado'] == 'PENDIENTE_CONTABILIZACION':
+            elif fila['estado']=='PENDIENTE_CONTABILIZACION' and sgci_puede_submodulo(conn,'tesoreria','Confirmación de pagos','ver'):
                 pago = conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?', (sid,)).fetchone()
                 st.warning('Pago confirmado, pero el asiento aún no se ha generado. La cartola se conciliará después.')
                 if pago and pago['error_contabilizacion']:
@@ -620,7 +642,7 @@ def pantalla_tesoreria(conn):
                 if pago:
                     st.write(f"**Medio:** {pago['medio']} · **Fecha:** {pago['fecha_pago']} · **Banco:** {pago['banco_descripcion']}")
                     st.write(f"**Referencia:** {pago['referencia']}")
-                    tes_vista_comprobante(pago,sid)
+                    tes_vista_comprobante(conn,sid)
                     bancos_disponibles=conn.execute('SELECT id,nombre,numero_cuenta,cuenta_contable FROM bancos WHERE activo=1 ORDER BY nombre').fetchall()
                     opciones_bancos={f"{b['nombre']} · {b['numero_cuenta'] or 'Sin número'} · {b['cuenta_contable'] or 'SIN CUENTA'}":int(b['id']) for b in bancos_disponibles}
                     predef_banco=next((i for i,k in enumerate(['Seleccionar banco']+list(opciones_bancos)) if opciones_bancos.get(k)==pago['banco_id']),0)
@@ -642,30 +664,31 @@ def pantalla_tesoreria(conn):
                             with conn:
                                 conn.execute('UPDATE tes_confirmaciones_pago SET error_contabilizacion=? WHERE solicitud_id=? AND asiento_id IS NULL',(str(exc),sid))
                             st.error(str(exc))
-            elif fila['estado']=='CONTABILIZADA':
+            elif fila['estado']=='CONTABILIZADA' and sgci_puede_submodulo(conn,'tesoreria','Confirmación de pagos','ver'):
                 pago=conn.execute('SELECT * FROM tes_confirmaciones_pago WHERE solicitud_id=?',(sid,)).fetchone()
                 st.success(f"Pago contabilizado · Asiento {pago['asiento_id'] if pago else '—'}.")
                 if pago:
-                    tes_vista_comprobante(pago,sid)
+                    tes_vista_comprobante(conn,sid)
                     conciliado=conn.execute("SELECT id FROM cartola_bancaria WHERE match_tipo='TESORERIA' AND match_id=? AND conciliado=1",(sid,)).fetchone()
                     st.info('Conciliada con cartola bancaria.' if conciliado else 'Pendiente de conciliación bancaria.')
                     asientos_tes=pd.read_sql_query('SELECT fecha,codigo_cuenta,cuenta,debe,haber,glosa FROM libro_diario WHERE asiento_id=? ORDER BY id',conn,params=(pago['asiento_id'],))
                     st.dataframe(asientos_tes,hide_index=True,use_container_width=True)
-                    tes_boton_imprimir(f'Asiento {pago["asiento_id"]}',asientos_tes,f'asiento_{sid}')
+                    tes_boton_imprimir(conn,f'Asiento {pago["asiento_id"]}',asientos_tes,f'asiento_{sid}',submodulo='Confirmación de pagos')
     with tab_historial:
         st.subheader('Historial de solicitudes y pagos')
-        historial=pd.read_sql_query("""SELECT s.id AS solicitud, s.fecha, s.beneficiario, s.concepto,
-            s.estado, COALESCE(SUM(d.monto),0) AS monto, p.fecha_pago, p.referencia,
-            p.asiento_id FROM tes_solicitudes s
-            LEFT JOIN tes_solicitud_detalle d ON d.solicitud_id=s.id
-            LEFT JOIN tes_confirmaciones_pago p ON p.solicitud_id=s.id
-            GROUP BY s.id ORDER BY s.id DESC""",conn)
-        if historial.empty:
-            st.info('Aún no hay movimientos.')
+        if not sgci_puede_submodulo(conn,'tesoreria','Historial','ver'):
+            st.info('No tienes autorización para consultar el historial.')
         else:
-            st.dataframe(formatear_montos_df(historial),hide_index=True,use_container_width=True)
-            st.download_button('Descargar historial CSV',historial.to_csv(index=False).encode('utf-8-sig'),
-                file_name='CONTEM_historial_tesoreria.csv',mime='text/csv')
+            historial=tes_historial_autorizado(conn)
+            if historial.empty:
+                st.info('Aún no hay movimientos.')
+            else:
+                st.dataframe(formatear_montos_df(historial),hide_index=True,use_container_width=True)
+                if sgci_puede_submodulo(conn,'tesoreria','Historial','exportar'):
+                    historial_exportar=tes_historial_autorizado(conn,exportar=True)
+                    st.download_button('Descargar historial CSV',historial_exportar.to_csv(index=False).encode('utf-8-sig'),
+                        file_name='CONTEM_historial_tesoreria.csv',mime='text/csv')
+
 
 
 # ============================================================

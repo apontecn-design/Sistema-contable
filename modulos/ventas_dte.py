@@ -499,7 +499,12 @@ def tes_reporte_imprimible(titulo, datos):
     return buffer.getvalue()
 
 
-def tes_boton_imprimir(titulo,df,key):
+def tes_boton_imprimir(conn,titulo,df,key,submodulo='Solicitudes de fondos'):
+    if not (sgci_puede_submodulo(conn,'tesoreria',submodulo,'ver') and
+            sgci_puede_submodulo(conn,'tesoreria',submodulo,'exportar')):
+        return
+    sgci_autorizar_operacion(conn,'tesoreria','ver',submodulo)
+    sgci_autorizar_operacion(conn,'tesoreria','exportar',submodulo)
     try:
         st.download_button('🖨️ Imprimir / PDF · '+titulo,
             data=tes_reporte_imprimible(titulo,df),file_name='SGCI_'+key+'.pdf',
@@ -508,7 +513,8 @@ def tes_boton_imprimir(titulo,df,key):
         st.caption('Para imprimir en PDF, instalar reportlab en requirements.txt.')
 
 
-def tes_vista_comprobante(pago,sid):
+def tes_vista_comprobante(conn,sid):
+    pago=tes_comprobante_autorizado(conn,sid)
     nombre=str(pago['nombre_comprobante'] or '')
     datos=bytes(pago['comprobante'])
     if st.button('👁️ Visualizar comprobante',key=f'tes_view_{sid}'):
@@ -523,7 +529,9 @@ def tes_vista_comprobante(pago,sid):
             st.image(datos,caption=nombre,use_container_width=True)
         else:
             st.warning('Formato no compatible con vista previa.')
-        st.download_button('⬇️ Descargar desde el visor',datos,file_name=nombre,key=f'tes_view_download_{sid}')
+        if sgci_puede_submodulo(conn,'tesoreria','Confirmación de pagos','exportar'):
+            autorizado=tes_comprobante_autorizado(conn,sid,exportar=True)
+            st.download_button('⬇️ Descargar desde el visor',bytes(autorizado['comprobante']),file_name=nombre,key=f'tes_view_download_{sid}')
 
 
 def tes_conciliar_pago(conn,movimiento_id,solicitud_id):
