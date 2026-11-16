@@ -4,6 +4,7 @@ conn = conectar()
 crear_esquema(conn)
 oc_crear_tablas(conn)
 tes_crear_tablas(conn)
+sgci_saldos_apertura_clientes(conn)
 sgci_crear_devoluciones_proveedor(conn)
 sgci_crear_seguridad(conn)
 dte_crear_tablas(conn)
@@ -1426,26 +1427,20 @@ elif menu == "🏦 Bancos y Cartolas":
                         cli_label=st.selectbox("Cliente",cli_labels,key=f"cobro_cli_{movimiento_id}")
                         cli_id=int(cli_label.split(" | ",1)[0])
                         docs_cli=banco_documentos_pago(conn,'cxc',cli_id)
-                        sgci_saldos_apertura_clientes(conn)
+                        apertura_cliente=cliente_saldo_inicial(conn,cli_id)
                         with st.expander("📘 Saldo inicial 2026 del cliente (auxiliar, sin asiento contable)"):
-                            registro=conn.execute("SELECT monto FROM sgci_apertura_clientes WHERE cliente_id=?",(cli_id,)).fetchone()
-                            monto_reg=int(registro[0]) if registro else 0
+                            monto_reg=apertura_cliente['monto']
                             saldo_nuevo=st.number_input("Saldo inicial total del cliente al 01-01-2026 (CLP)",
                                 min_value=0,step=1000,value=monto_reg,key=f"apert_cli_monto_{cli_id}")
                             st.caption("Solo registra el auxiliar; el saldo ya está en el Libro Diario. Verifica que coincida con el detalle del asiento de apertura.")
                             if st.button("Guardar saldo inicial auxiliar",key=f"apert_cli_save_{cli_id}"):
-                                sgci_exigir_permiso(conn, 'cxc', 'editar', 'Clientes y estados de cuenta')
-                                aplicado=conn.execute("SELECT COALESCE(SUM(monto),0) FROM sgci_aplicaciones_apertura_clientes WHERE cliente_id=?",(cli_id,)).fetchone()[0]
-                                if int(saldo_nuevo)<int(aplicado):
-                                    st.error("El saldo inicial no puede ser menor que lo ya aplicado.")
-                                else:
-                                    conn.execute("""INSERT INTO sgci_apertura_clientes(cliente_id,monto,observacion)
-                                      VALUES(?,?,'Saldo de apertura ya contabilizado')
-                                      ON CONFLICT(cliente_id) DO UPDATE SET monto=excluded.monto""",(cli_id,int(saldo_nuevo)))
-                                    conn.commit()
+                                try:
+                                    guardar_saldo_inicial_cliente(conn,cli_id,saldo_nuevo)
                                     sgci_exito("Saldo inicial auxiliar guardado; no se generó asiento.")
                                     st.rerun()
-                        apertura_disponible=sgci_saldo_apertura_disponible(conn,cli_id)
+                                except (ValueError,PermissionError,RuntimeError) as exc:
+                                    st.error(str(exc))
+                        apertura_disponible=apertura_cliente['disponible']
                         st.caption(f"Saldo de apertura disponible para aplicar: {money(apertura_disponible)}")
                         with st.expander("🧩 Cobro mixto: varias facturas + saldo inicial"):
                             st.caption("Marca las facturas de 2026 y asigna la parte del cobro correspondiente a 2025. Un solo asiento Banco / Clientes.")

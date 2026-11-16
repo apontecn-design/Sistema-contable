@@ -951,13 +951,15 @@ def documentos_pendientes_cliente(conn, cliente_id):
 
 def sgci_saldos_apertura_clientes(conn):
     """Auxiliar histórico, sin crear nuevos asientos de apertura."""
+    transaccion_previa=conn.in_transaction
     conn.execute("""CREATE TABLE IF NOT EXISTS sgci_apertura_clientes (
         cliente_id INTEGER PRIMARY KEY, monto INTEGER NOT NULL,
         observacion TEXT, fecha TEXT DEFAULT '2026-01-01')""")
     conn.execute("""CREATE TABLE IF NOT EXISTS sgci_aplicaciones_apertura_clientes (
         movimiento_id INTEGER PRIMARY KEY, cliente_id INTEGER NOT NULL,
         monto INTEGER NOT NULL, pago_id INTEGER, fecha TEXT NOT NULL)""")
-    conn.commit()
+    if not transaccion_previa:
+        conn.commit()
 
 def sgci_saldo_apertura_disponible(conn, cliente_id):
     sgci_saldos_apertura_clientes(conn)

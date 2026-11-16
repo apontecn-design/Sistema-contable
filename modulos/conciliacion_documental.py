@@ -1590,6 +1590,42 @@ def nomina_registrar_pago_activo(conn, tabla, registro_id, fecha, monto, cuenta_
     return asiento
 
 
+def cliente_saldo_inicial(conn, cliente_id):
+    sgci_autorizar_operacion(conn,'cxc','ver','Pagos de clientes')
+    cliente_id=_sgci_monto_auxiliar(cliente_id)
+    fila=conn.execute('SELECT monto FROM sgci_apertura_clientes WHERE cliente_id=?',(cliente_id,)).fetchone()
+    aplicado=conn.execute('SELECT COALESCE(SUM(monto),0) FROM sgci_aplicaciones_apertura_clientes WHERE cliente_id=?',(cliente_id,)).fetchone()[0]
+    monto=int(fila[0]) if fila else 0
+    return {'monto':monto,'aplicado':int(aplicado),'disponible':monto-int(aplicado)}
+
+
+def guardar_saldo_inicial_cliente(conn, cliente_id, monto):
+    """Actualiza solo el auxiliar histórico; auditoría y cambio se confirman juntos."""
+    sgci_autorizar_operacion(conn,'cxc','editar','Clientes y estados de cuenta')
+    cliente_id=_sgci_monto_auxiliar(cliente_id)
+    from decimal import Decimal, InvalidOperation
+    try:
+        valor=Decimal(str(monto))
+        if not valor.is_finite() or valor<0 or valor!=valor.to_integral_value() or valor>9223372036854775807:
+            raise ValueError('El saldo debe ser un entero no negativo en CLP.')
+    except (InvalidOperation,TypeError):
+        raise ValueError('El saldo debe ser un entero no negativo en CLP.') from None
+    monto=int(valor)
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn,'cxc','editar','Clientes y estados de cuenta')
+        if not conn.execute('SELECT 1 FROM clientes WHERE id=?',(cliente_id,)).fetchone():
+            raise ValueError('Cliente no encontrado.')
+        aplicado=conn.execute('SELECT COALESCE(SUM(monto),0) FROM sgci_aplicaciones_apertura_clientes WHERE cliente_id=?',(cliente_id,)).fetchone()[0]
+        if monto<int(aplicado):
+            raise ValueError('El saldo inicial no puede ser menor que lo ya aplicado.')
+        conn.execute("""INSERT INTO sgci_apertura_clientes(cliente_id,monto,observacion)
+            VALUES(?,?,'Saldo de apertura ya contabilizado')
+            ON CONFLICT(cliente_id) DO UPDATE SET monto=excluded.monto""",(cliente_id,monto))
+        _sgci_auditar_auxiliar(conn,'SALDO INICIAL CLIENTE',f'cliente:{cliente_id}; monto:{monto}')
+
+
 def banco_entidades_pago(conn, modulo):
     sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
     if modulo not in ('cxc','cxp'):raise ValueError('Módulo de pago inválido.')
