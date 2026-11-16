@@ -714,6 +714,87 @@ def contabilizar_pago_proveedor_sin_documento(conn, movimiento_id, proveedor_id)
     return asiento_id
 
 
+def sgci_cobros_traza_esquema(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS sgci_cobros_traza(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,movimiento_id INTEGER NOT NULL,
+        pago_id INTEGER NOT NULL,asiento_id INTEGER NOT NULL UNIQUE,
+        huella TEXT NOT NULL,revertido INTEGER NOT NULL DEFAULT 0 CHECK(revertido IN (0,1)))''')
+    conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS sgci_cobro_traza_activa ON sgci_cobros_traza(movimiento_id) WHERE revertido=0')
+
+
+def _sgci_huella_cobro(conn,pago_id,asiento_id):
+    import hashlib,json
+    pago=conn.execute('SELECT * FROM pagos_clientes WHERE id=?',(pago_id,)).fetchone()
+    if pago is None:raise ValueError('No existe el cobro original del auxiliar.')
+    aplicaciones=[dict(r) for r in conn.execute('SELECT * FROM aplicaciones_clientes WHERE pago_id=? ORDER BY id',(pago_id,))]
+    apertura=[dict(r) for r in conn.execute('SELECT * FROM sgci_aplicaciones_apertura_clientes WHERE pago_id=? ORDER BY movimiento_id',(pago_id,))] if tabla_existe(conn,'sgci_aplicaciones_apertura_clientes') else []
+    documentos=[dict(r) for r in conn.execute('''SELECT id,cliente_id,tipo_doc,monto_total FROM ventas
+        WHERE id IN (SELECT venta_id FROM aplicaciones_clientes WHERE pago_id=?) ORDER BY id''',(pago_id,))]
+    lineas=[dict(r) for r in conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id',(asiento_id,))]
+    datos={'pago':dict(pago),'aplicaciones':aplicaciones,'apertura':apertura,'documentos':documentos,'lineas':lineas}
+    return hashlib.sha256(json.dumps(datos,sort_keys=True,ensure_ascii=False,allow_nan=False).encode('utf8')).hexdigest()
+
+
+def _sgci_guardar_traza_cobro(conn,movimiento_id,pago_id,asiento_id):
+    if not conn.in_transaction:raise RuntimeError('La trazabilidad debe guardarse con el cobro.')
+    sgci_cobros_traza_esquema(conn)
+    conn.execute('INSERT INTO sgci_cobros_traza(movimiento_id,pago_id,asiento_id,huella) VALUES(?,?,?,?)',
+        (int(movimiento_id),int(pago_id),int(asiento_id),_sgci_huella_cobro(conn,pago_id,asiento_id)))
+
+
+def cobros_documentales_reversibles(conn,banco_id):
+    sgci_autorizar_operacion(conn,'banco','ver','Conciliación bancaria')
+    sgci_autorizar_operacion(conn,'cxc','ver','Pagos de clientes')
+    return pd.read_sql_query('''SELECT cb.id,cb.fecha,cb.descripcion,cb.abono,cb.asiento_id
+        FROM cartola_bancaria cb JOIN sgci_cobros_traza t
+        ON t.movimiento_id=cb.id AND t.asiento_id=cb.asiento_id AND t.revertido=0
+        WHERE cb.banco_id=? AND cb.conciliado=1 AND cb.match_tipo='CLIENTE'
+        ORDER BY cb.fecha DESC,cb.id DESC''',conn,params=(int(banco_id),))
+
+
+def revertir_cobro_documental_cliente(conn,movimiento_id):
+    sgci_autorizar_operacion(conn,'banco','anular','Conciliación bancaria')
+    sgci_autorizar_operacion(conn,'cxc','anular','Pagos de clientes')
+    _sgci_exigir_sin_transaccion(conn)
+    with conn:
+        conn.execute('BEGIN IMMEDIATE')
+        sgci_autorizar_operacion(conn,'banco','anular','Conciliación bancaria')
+        sgci_autorizar_operacion(conn,'cxc','anular','Pagos de clientes')
+        mov=conn.execute('SELECT * FROM cartola_bancaria WHERE id=?',(int(movimiento_id),)).fetchone()
+        if not mov or not mov['asiento_id'] or int(mov['conciliado'] or 0)!=1 or mov['match_tipo']!='CLIENTE':
+            raise ValueError('El movimiento no es un cobro documental conciliado.')
+        if periodo_cerrado(conn,mov['fecha']):raise ValueError('El período original está cerrado.')
+        if not tabla_existe(conn,'sgci_cobros_traza'):raise ValueError('El cobro histórico requiere revisión manual de sus aplicaciones.')
+        traza=conn.execute('SELECT * FROM sgci_cobros_traza WHERE movimiento_id=? AND asiento_id=? AND revertido=0',(mov['id'],mov['asiento_id'])).fetchone()
+        if not traza:raise ValueError('El cobro histórico requiere revisión manual de sus aplicaciones.')
+        if traza['huella']!=_sgci_huella_cobro(conn,traza['pago_id'],mov['asiento_id']):
+            raise ValueError('El cobro, sus documentos o aplicaciones cambiaron; requiere revisión manual.')
+        pago=conn.execute('SELECT * FROM pagos_clientes WHERE id=?',(traza['pago_id'],)).fetchone()
+        lineas=conn.execute('SELECT * FROM libro_diario WHERE asiento_id=? ORDER BY id',(mov['asiento_id'],)).fetchall()
+        _sgci_validar_asiento_reversible(conn,mov,lineas)
+        permitidos={'CONCILIACION_COBRO_CLIENTE','CONCILIACION_DIFERENCIA_CLIENTE','CONCILIACION_BANCARIA'}
+        if not lineas or not all(l['origen'] in permitidos for l in lineas):raise ValueError('El asiento contiene líneas ajenas al cobro.')
+        if float(mov['abono'] or 0)<=0 or float(mov['cargo'] or 0)>0:raise ValueError('El cobro no es un abono bancario.')
+        if pago['cartola_id'] is not None and int(pago['cartola_id'])!=int(mov['id']):raise ValueError('El auxiliar está vinculado a otra cartola.')
+        lotes={l['lote_id'] for l in lineas}
+        if len(lotes)!=1 or pago['lote_id'] not in lotes:raise ValueError('El lote del auxiliar no coincide con el asiento.')
+        nuevo=siguiente_asiento(conn)+1
+        lote='REV-COBRO-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        for l in lineas:
+            conn.execute('''INSERT INTO libro_diario(fecha,cuenta,debe,haber,glosa,centro_costo,codigo_cuenta,asiento_id,lote_id,origen)
+                VALUES(?,?,?,?,?,?,?,?,?,?)''',(mov['fecha'],l['cuenta'],l['haber'],l['debe'],
+                f"Reverso cobro documental, cartola {mov['id']}, asiento {mov['asiento_id']}",l['centro_costo'],l['codigo_cuenta'],nuevo,lote,'REVERSO_COBRO_DOCUMENTAL'))
+        conn.execute('DELETE FROM aplicaciones_clientes WHERE pago_id=?',(pago['id'],))
+        if tabla_existe(conn,'sgci_aplicaciones_apertura_clientes'):
+            conn.execute('DELETE FROM sgci_aplicaciones_apertura_clientes WHERE pago_id=?',(pago['id'],))
+        conn.execute('DELETE FROM pagos_clientes WHERE id=?',(pago['id'],))
+        conn.execute('UPDATE sgci_cobros_traza SET revertido=1 WHERE id=?',(traza['id'],))
+        conn.execute('''UPDATE cartola_bancaria SET conciliado=0,observacion=NULL,asiento_id=NULL,
+            match_tipo=NULL,match_id=NULL,match_confianza=NULL WHERE id=?''',(mov['id'],))
+        _sgci_auditar_auxiliar(conn,'REVERSO COBRO DOCUMENTAL',f"Cartola {mov['id']}; pago {pago['id']}; original {mov['asiento_id']}; reverso {nuevo}")
+    return nuevo
+
+
 def _sgci_validar_asiento_reversible(conn,mov,lineas):
     import math
     cargo,abono=float(mov['cargo'] or 0),float(mov['abono'] or 0)

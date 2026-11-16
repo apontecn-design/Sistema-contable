@@ -6,6 +6,7 @@ oc_crear_tablas(conn)
 tes_crear_tablas(conn)
 sgci_saldos_apertura_clientes(conn)
 sgci_crear_devoluciones_proveedor(conn)
+sgci_cobros_traza_esquema(conn)
 sgci_crear_seguridad(conn)
 dte_crear_tablas(conn)
 sgci_empresa_esquema(conn)
@@ -1681,6 +1682,25 @@ elif menu == "🏦 Bancos y Cartolas":
                         st.rerun()
                     except Exception as e:
                         st.error(f'No se realizaron cambios: {e}')
+
+            if sgci_puede_submodulo(conn,'cxc','Pagos de clientes','ver'):
+                cobros_reversibles=cobros_documentales_reversibles(conn,int(label.split(' - ')[0]))
+                if not cobros_reversibles.empty:
+                    st.divider()
+                    st.subheader('Revertir cobro aplicado a documentos')
+                    st.caption('Solo cobros con trazabilidad y aplicaciones intactas. Conserva el asiento original, crea su reverso y reabre las facturas o el saldo de apertura aplicado.')
+                    opciones_cobro={f"{r.id} | {r.fecha} | {money(r.abono)} | asiento {r.asiento_id} | {r.descripcion}":int(r.id) for r in cobros_reversibles.itertuples()}
+                    cobro_sel=st.selectbox('Cobro documental para revertir',list(opciones_cobro),key='sgci_rev_cobro_sel')
+                    cobro_conf=st.checkbox('Confirmo que deseo revertir este cobro y sus aplicaciones a documentos o apertura.',key='sgci_rev_cobro_conf')
+                    if st.button('↩️ Revertir cobro documental',disabled=not cobro_conf,key='sgci_rev_cobro_btn'):
+                        try:
+                            nuevo=revertir_cobro_documental_cliente(conn,opciones_cobro[cobro_sel])
+                            sgci_exito(f'Asiento reverso {nuevo} creado. Cobro retirado del auxiliar y movimiento pendiente.')
+                            st.rerun()
+                        except (ValueError,PermissionError,RuntimeError) as exc:
+                            st.error(f'No se realizaron cambios: {exc}')
+                        except Exception:
+                            st.error('No se pudo completar el reverso. No se guardaron cambios; revisa el estado del cobro antes de reintentar.')
 
             anticipos_reversibles=pd.read_sql_query("""SELECT cb.id,cb.fecha,cb.descripcion,cb.cargo,cb.asiento_id,
                 a.id anticipo_id,t.nombre trabajador

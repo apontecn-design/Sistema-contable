@@ -21,6 +21,7 @@ def preparar(test):
                 'agregar_columna':esquema.agregar_columna,
                 'sgci_autorizar_operacion':usuarios.sgci_autorizar_operacion,
                 'sgci_puede_submodulo':usuarios.sgci_puede_submodulo,
+                '_sgci_guardar_traza_cobro':conciliacion_documental._sgci_guardar_traza_cobro,
                 'tabla_existe':esquema.tabla_existe,
                 'sgci_identidad_actual':lambda:'finanzas@example.com',
                 'periodo_cerrado':contabilidad_reportes.periodo_cerrado,

@@ -820,6 +820,8 @@ def contabilizar_conciliacion_bancaria(conn, movimiento_id, candidato_tipo, cand
                         SET conciliado=1,observacion=?,asiento_id=?,match_tipo=?,match_id=?,match_confianza=?
                         WHERE id=?""",
                      (descripcion, asiento_id, candidato_tipo, documento_id, confianza, movimiento_id))
+        if candidato_tipo=='CLIENTE':
+            _sgci_guardar_traza_cobro(conn,movimiento_id,cur.lastrowid,asiento_id)
         _sgci_auditar_auxiliar(conn, "CONCILIACIÓN BANCARIA", f"Movimiento {movimiento_id} -> {candidato_tipo} {documento_id}, asiento {asiento_id}")
     return asiento_id
 
@@ -1057,6 +1059,7 @@ def sgci_cobro_mixto(conn,movimiento_id,cliente_id,venta_ids,monto_apertura):
         conn.execute("""UPDATE cartola_bancaria SET conciliado=1,observacion=?,asiento_id=?,
                         match_tipo='CLIENTE',match_id=?,match_confianza=100 WHERE id=?""",
                      (glosa,asiento,int(cliente_id),int(movimiento_id)))
+        _sgci_guardar_traza_cobro(conn,movimiento_id,cur.lastrowid,asiento)
         _sgci_auditar_auxiliar(conn,'COBRO MIXTO CLIENTE',
             f'movimiento:{movimiento_id}; cliente:{cliente_id}; apertura:{apertura}; asiento:{asiento}')
     return asiento
@@ -1138,6 +1141,7 @@ def contabilizar_cobro_cliente_desde_cartola(conn, movimiento_id, cliente_id, ve
         obs=glosa + (f" | Sobrante {money(diferencia)} -> {cuenta_diferencia}" if diferencia>0 else "")
         conn.execute("""UPDATE cartola_bancaria SET conciliado=1,observacion=?,asiento_id=?,match_tipo='CLIENTE',match_id=?,match_confianza=100 WHERE id=?""",
                      (obs,asiento,int(cliente_id),int(movimiento_id)))
+        _sgci_guardar_traza_cobro(conn,movimiento_id,cur.lastrowid,asiento)
         _sgci_auditar_auxiliar(conn,"COBRO CLIENTE DESDE CARTOLA",
                             f"Movimiento {movimiento_id} -> cliente {cliente_id}, aplicado {monto_cliente}, sobrante {diferencia}, asiento {asiento}")
     return asiento,aplicaciones,diferencia
