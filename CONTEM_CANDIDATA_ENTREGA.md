@@ -1,0 +1,181 @@
+# CONTEM V1.0 — candidata consolidada para aceptación, 16 de noviembre de 2026
+
+**Estado: implementación consolidada validada localmente; pendiente de publicación y aceptación autenticada en pruebas. No se ha publicado producción.** Activo en pruebas: 997849b563c694c8d97f98d12ebe7510aec73e82. Los cambios locales posteriores forman un único lote de cierre; no se entregan como versiones menores separadas.
+
+## Los once requisitos y su cierre
+
+| Punto | Estado de la candidata |
+|---|---|
+| 1. Interfaz | Se conserva la interfaz aprobada, con las mismas secciones y campos para el propietario. |
+| 2. Multiusuario | Perfiles y excepciones efectivos, menús filtrados y revocación; activación empresarial controlada por CONTEM_MULTIUSUARIO_HABILITADO=SI. Por defecto NO conserva el portal anterior. Cuentas con solo liquidación personal conservan su portal. RR. HH. filtra trabajadores; informes globales requieren alcance todos. Nueve perfiles de lectura recorrieron 42 vistas y nueve revocaciones en sesiones simuladas, sin errores. Pendiente aceptación con Supabase real antes de habilitar producción. |
+| 3. Balance | Ocho columnas, cuadraturas, PDF y Excel implementados y probados. |
+| 4. Tesorería | Solicitud, adjuntos, aprobación, comprobante, clasificación, obligación de origen y pago probados. Lecturas/exportaciones independientes y catálogos con permisos de sus módulos. La obligación de origen exige confirmación operativa de beneficiario y saldo pendiente. |
+| 5. Bancos | Importación, duplicados, conciliación, imputaciones y reversos probados. Alta y vinculación bancaria ahora validan y auditan de forma atómica. |
+| 6. Compras y OC | Creación, modificación, anulación, PDF y asociación de OC implementados; RCV y períodos cerrados protegidos. |
+| 7. RR. HH. | Se conserva cálculo y contabilización existente. Alcance propio/autorizados/todos, servicios por trabajador y exportaciones probados. Portal/PDF/revocación reales ya verificados por el propietario. |
+| 8. Históricos | 57 tablas originales conservadas tras inicialización y recorrido de propietario; pruebas de escritura solo en copias y datos sintéticos. |
+| 9. Identidad | CONTEM en pantallas y encabezados de informes; identificadores SGCI técnicos conservados. |
+| 10. Regresión | 689 pruebas correctas; 34 vistas del propietario; 51 recorridos de perfiles y revocación simulados sin errores. Asiento manual desde pantalla real: cuadrado, auditado y borrador retirado. Falta aceptación autenticada de la candidata consolidada en Render. |
+| 11. Producción | Procedimiento de respaldo, recuperación, configuración, despliegue y retorno preparado. Persistencia/recuperación de pruebas ya ensayadas. Faltan respaldo productivo reciente, preflight y autorización expresa final para main/producción. |
+
+## Cambios agrupados del cierre
+
+- Asiento manual y carga de saldos: servicio único que reserva escritura antes de validar cuentas, cierre, montos enteros, fechas y cuadratura; numera asientos dentro de la reserva y confirma lote y auditoría juntos. Un error rechaza todo el lote y respeta transacciones previas.
+- F29: revalida autorización y cierre bajo reserva, bloquea un período ya compensado y confirma asiento/control/auditoría juntos. Se conserva el cálculo existente; no presenta declaraciones tributarias.
+- Cierre/reapertura: revalida estado y cuadratura bajo reserva y guarda auditoría conjunta; no depende únicamente de una vista previa.
+- DTE: cada pestaña valida su lectura antes de consultar. Descargas y reportes requieren exportación del submódulo correspondiente. No cambia su carácter documental independiente del RCV.
+- Exportaciones: se agregan controles faltantes en diario, mayor, estados financieros, asientos, estados de cuenta, partidas abiertas y anticipos/préstamos. El enriquecimiento XML también exige lectura documental.
+- Catálogos de Tesorería y vistas cruzadas exigen permisos de sus fuentes; una vista de conciliación auxiliar o cierre indica las lecturas adicionales necesarias antes de consultar.
+
+## Condiciones restantes de liberación
+
+1. Publicar este único lote revisado en integración, CI y despliegue de pruebas. Activar el acceso empresarial únicamente en pruebas para la aceptación. No tocar main.
+2. Aceptar con cuentas Supabase reales navegación autorizada, denegación/revocación y alcance laboral. Las sesiones AppTest simuladas no acreditan autenticación real.
+3. Obtener respaldo productivo actual, ejecutar comprobaciones finales y recibir autorización expresa de producción. Registrar versión de retorno y verificar después del despliegue sin escrituras de prueba.
+
+No se añaden funcionalidades opcionales a esta liberación. Los apartados posteriores son el historial de desarrollo y conservan cifras y estados de sus fechas; esta cabecera describe la candidata actual.
+
+## Referencia contable del formato
+
+La estructura y tratamiento de signos se contrastaron con las [instrucciones del balance de ocho columnas del SII](https://www.sii.cl/declaraciones_juradas/suplemento/2012/form1847.htm) y el [formato publicado por SUSESO](https://www.suseso.gob.cl/621/w3-propertyvalue-754069.html). Se implementa un reporte contable; no se genera ni presenta automáticamente una declaración jurada tributaria.
+
+## Revisión del 12 de noviembre
+
+Se añaden doce pruebas de auxiliares: autorización antes de consultas, separación entre Compras y Ventas, anulación con filtro de módulo, montos CLP sin truncamiento, auditoría en la misma transacción, reversión ante fallos y dos sesiones concurrentes que no pueden consumir dos veces el saldo. La inicialización de tablas respeta transacciones pendientes del llamador. Se repiten las 34 pantallas y la comparación de 57 tablas históricas sin cambios.
+
+Las dos ejecuciones de GitHub del commit b549432 terminaron correctamente: 43251786735 y 43251802287. Las antiguas de 0544b7c siguen en cola; su cancelación manual falló. Render desplegó b549432 en Sistema-contable-1 mediante dep-dbqu0hdckfvc738hgke0, estado live. Se combinaron únicamente las variables no secretas de staging, preservando las existentes. La sesión anónima comprobó HTTP 200, salud ok, formulario visible y ejecución sin errores. El propietario aportó las direcciones de Supabase de ambos servicios: son proyectos distintos. No se han probado credenciales ni completado flujos autenticados.
+
+También se exige el permiso específico de Pagos de clientes o Pagos de proveedores al registrar pagos; una denegación individual se comprueba antes de consultar o escribir. La suite completa conserva 457 pruebas correctas.
+
+La entrega de anticipos y préstamos de nómina exige autorización interna de Contabilización y filtra el trabajador por alcance antes de leer el movimiento. La tabla admitida se limita a anticipos y préstamos. La operación bloquea reintentos, anulaciones, períodos cerrados, datos desactualizados y cuentas bancarias inválidas; asiento, estado y auditoría se guardan en una sola transacción. Siete pruebas adicionales cubren estos controles y la reversión ante fallos. El acceso empresarial general de empleados sigue restringido.
+
+El propietario confirmó que pudo iniciar sesión y ver el panel principal del servicio de pruebas. Esto no certifica otros perfiles ni todos los flujos. Se protege también el alcance de RR. HH. al registrar anticipos desde cartola y al revertirlos: trabajadores ajenos se rechazan y los reversos consultan el anticipo con filtro SQL por trabajador autorizado. La auditoría del reverso identifica al usuario real. Se añaden seis pruebas con SQLite y servicios reales, incluyendo creación/reverso cuadrado, revocación del alcance, autorizaciones individuales y ausencia de consultas bancarias cuando no existe alcance.
+
+La creación y el reverso de anticipos desde cartola ahora toman la reserva de escritura antes de leer estado y calcular el número de asiento. Revalidan el permiso dentro de la transacción y guardan auditoría junto a los cambios. No confirman ni revierten transacciones pendientes del llamador. Ocho pruebas nuevas cubren fallos de auditoría sin cambios parciales, dos sesiones sobre el mismo anticipo o reverso, movimientos simultáneos con asientos distintos y conservación de transacciones ajenas. La marca CARTOLA:1 se compara como token completo para no confundirse con CARTOLA:10. La suite completa pasa 357 pruebas.
+
+El alta de clientes y proveedores ahora se ejecuta mediante un servicio con autorización por submódulo, validación de datos y transacción conjunta con la auditoría. Los formularios conservan sus campos y presentación. Ocho pruebas cubren separación de permisos, denegaciones, revocación, datos inválidos, duplicados, transacciones previas y rollback si falla la auditoría. Además se guardó un cliente y un proveedor desde los formularios reales con AppTest sobre una copia privada: ambos quedaron auditados, sin errores y sin nuevos asientos contables. La suite completa pasa 365 pruebas.
+
+Plan de Cuentas: creación y edición pasan por un servicio que exige el permiso específico, valida datos y jerarquía y guarda auditoría en la misma transacción. No modifica códigos ni asientos históricos al editar. La exportación exige ver y exportar antes de consultar los datos y generar el PDF. Trece pruebas cubren denegaciones, revocación, alcance por submódulo, duplicados, cuentas inexistentes, ciclos, datos inválidos, rollback y transacciones ajenas. AppTest sobre copia privada comprobó creación, edición, auditoría, PDF generado y diario intacto. La suite completa pasa 378 pruebas. Los formularios y la presentación aprobada se conservan.
+
+El guardado y recálculo de liquidaciones pasa por un servicio con permiso específico y alcance por trabajador. Rechaza liquidaciones y períodos contabilizados o cerrados, períodos con asiento, importes no finitos y transacciones ajenas pendientes. Conserva los campos y el SQL de cálculo existentes; no introduce nuevos cálculos legales. Liquidación, período y auditoría se guardan juntos. Once pruebas nuevas incluyen contabilización real seguida de intento de recálculo, privacidad y rollback. AppTest sobre copia privada verificó guardado de borrador y rechazo visible de un período contabilizado, sin cambios al rechazar. Se conserva además la categoría histórica Gastos al editar nombres del plan; su regresión añade otra prueba. Suite completa: 390 pruebas correctas.
+
+Anticipos y préstamos: servicios internos exigen crear en Anticipos y préstamos, comprueban alcance y trabajador activo y guardan registro, calendario y auditoría en la misma transacción. Se validan montos, períodos y calendarios; se bloquean anticipos retroactivos en nómina contabilizada y movimientos en períodos contables cerrados. Se conserva el cálculo mensual de cuota y saldo. Las fechas sugeridas del calendario parten de la fecha del préstamo en vez de fechas fijas de 2026. Parámetros AFP/UF: autorización interna de edición, validación y auditoría atómica; UF de períodos contabilizados/cerrados no se modifica. No se añaden ni actualizan automáticamente tasas legales. Se añaden 23 pruebas; suite completa 413 correctas. AppTest guardó anticipo, préstamo mensual, calendario, AFP y UF sobre copia privada, todos auditados, sin excepciones y con diario histórico intacto.
+
+Ficha, documentos y vacaciones: servicios autorizados por acción y alcance guardan ficha/historial, adjuntos, movimientos y decisiones con auditoría atómica. Crear fichas requiere alcance global; editar conserva la fecha original de creación y el tipo de cuenta. No se sobrescriben condiciones que afecten liquidaciones contabilizadas; corregir datos no previsionales sin cambiar condiciones conserva su historial. Documentos PDF mantienen el límite de 8 MB, nombre saneado y huella; lectura y descarga comprueban alcance y exportación. Los descuentos de vacaciones recalculan saldo bajo reserva de escritura; dos sesiones no pueden consumirlo dos veces. Solicitar/aprobar no descuenta días ni genera asientos. Anular requiere su acción específica. Las consultas principales de ficha, documentos, vacaciones y movimientos filtran en SQL; el PDF de ficha y CSV de vacaciones exigen exportar. Se añaden 32 pruebas, con suite completa de 445 correctas. AppTest comprobó ficha, historial, cuenta bancaria y ciclo manual de vacaciones sobre copia privada, con PDF/CSV sin errores y diario intacto. La auditoría general de reportes y demás módulos y las sesiones reales por perfil siguen pendientes.
+
+Reportes globales y contabilización: servicios comprueban lectura, exportación y alcance global antes de consultar nómina. El historial individual sigue filtrado por trabajador. La vista previa contable requiere permiso y alcance global; la contabilización revalida permisos dentro de la reserva de escritura y guarda auditoría en la misma transacción que asiento y estados. Se elimina la auditoría posterior desde la pantalla para evitar confirmaciones parciales. Doce pruebas nuevas cubren privacidad, revocación, exportación y fallo de auditoría con reversión completa. Suite completa: 457 pruebas; 34 pantallas sin excepciones y 57 tablas históricas sin cambios sobre copia privada.
+
+Validación manual del propietario en pruebas: la segunda cuenta entró al portal personal y abrió el PDF con su nombre y período. Al denegar Exportar en Liquidación mensual, se bloqueó preparar el PDF; al restaurar el valor original volvió a funcionar. Esta prueba confirma esa ruta y la regeneración del documento, no certifica todos los perfiles, registros ajenos ni el acceso empresarial general, que sigue restringido. No se publican identidades ni documentos personales.
+
+## Persistencia y recuperación comprobadas en pruebas — 12 de noviembre de 2026
+
+Sobre el código 7d19117ba892760514d2640a129919d0b84aef2a se descargaron dos respaldos privados del servicio de pruebas, antes y después de redesplegar la misma versión. Se compararon 57 tablas en ambos sentidos: esquema, contenido y secuencias de identificadores idénticos; integridad correcta y ninguna infracción de claves foráneas. El reinicio terminó live y la pantalla de acceso funcionó sin excepciones.
+
+Ambos respaldos se restauraron en copias locales aisladas mediante SQLite Backup API; se conservaron esquema y contenido y las verificaciones de integridad y relaciones pasaron. Esto comprueba la persistencia observada y el ensayo local de recuperación de esos respaldos. No se restauró la base activa ni se ejecutó recuperación sobre producción. Los archivos privados permanecen fuera del repositorio. La aceptación de perfiles operativos y flujos pendientes sigue abierta.
+
+## Panel principal con permisos por componente — 13 de noviembre de 2026
+
+Inicio consulta cada indicador y listado mediante un servicio que exige el permiso del submódulo correspondiente. Inicio por sí solo no concede lectura del diario, saldos bancarios, conciliaciones, Tesorería ni proveedores. Las excepciones individuales y su revocación se aplican en la siguiente consulta. Se conserva la presentación del administrador y los cálculos existentes. La inicialización aditiva de Tesorería queda junto a las demás inicializaciones del sistema.
+
+Diez pruebas nuevas cubren aislamiento de consultas, permisos independientes, denegación, revocación, importes y períodos, validación y conservación de transacciones pendientes. Suite completa: 467 pruebas correctas. Se verificaron 34 pantallas sin excepciones y 57 tablas históricas sin cambios en una copia privada. Continúan pendientes las consultas cruzadas de Bancos a datos laborales y la auditoría de otras rutas; la barrera general de perfiles se mantiene.
+
+## Anticipos desde Bancos con permisos laborales — 13 de noviembre de 2026
+
+El selector de trabajadores para anticipos de cartola exige ver Conciliación bancaria y Anticipos y préstamos. Devuelve únicamente trabajadores activos dentro del alcance laboral efectivo y solo los campos necesarios. La opción de Nómina se oculta cuando falta su permiso de lectura. Crear y revertir anticipos exige, además del permiso bancario, crear o anular respectivamente en Anticipos y préstamos; ambos permisos se revalidan dentro de la transacción. Se conserva el cálculo, la contabilización, la auditoría atómica y el reverso existentes.
+
+Siete pruebas nuevas cubren alcance, campos, inactivos, revocación, denegación antes de leer datos laborales, permisos de acción independientes y rechazo completo al revocar permisos al entrar en la transacción. Suite completa: 474 pruebas correctas; 34 pantallas sin excepciones y 57 tablas históricas sin cambios sobre copia privada. La barrera empresarial general permanece y las otras consultas cruzadas siguen pendientes de auditoría.
+
+## Consultas cruzadas y acciones de conciliación — 13 de noviembre de 2026
+
+Los selectores de clientes/proveedores, sus documentos y devoluciones y los pagos de Tesorería usados por Bancos pasan por servicios con permisos bancarios y del módulo de origen. Las opciones sin lectura autorizada se ocultan. Las sugerencias automáticas omiten consultas a auxiliares sin autorización. Confirmar sugerencias que generan asientos exige contabilizar en Bancos y en el auxiliar correspondiente; pagos, cobros, devoluciones y reversos exigen su acción específica en Pagos de clientes o proveedores.
+
+La vinculación de pagos ya contabilizados en Tesorería exige lectura de Historial y conciliar en Bancos, revalida ambos permisos dentro de la transacción y rechaza transacciones previas sin revertirlas. Sigue sin crear un asiento adicional. Trece pruebas nuevas cubren aislamiento de consultas, denegaciones, revocación, permisos de acciones y conservación de transacciones. Suite completa: 487 pruebas correctas; 34 pantallas sin excepciones y 57 tablas históricas intactas sobre copia privada. AppTest ejercitó los selectores reales de proveedor, cliente, devolución y Tesorería sin pagos ni cambios al diario.
+
+Esto no cierra toda la auditoría: el saldo inicial auxiliar de clientes todavía tiene guardado directo desde la pantalla, y varios servicios bancarios históricos necesitan revisar reserva de escritura y auditoría atómica. Se mantiene la barrera empresarial general y queda pendiente la aceptación completa por perfil y de los flujos finales.
+
+## Saldo inicial auxiliar de clientes — 16 de noviembre de 2026
+
+El formulario usa un servicio con permiso de edición de Clientes y estados de cuenta. Valida importes enteros no negativos, existencia del cliente y que el saldo no sea inferior a lo ya aplicado. Reserva escritura antes de comprobar aplicaciones y revalida permisos; cambio y auditoría se guardan en la misma transacción. Rechaza transacciones previas sin confirmarlas ni revertirlas. La lectura exige ver Pagos de clientes. La inicialización aditiva de tablas se ejecuta junto al resto del arranque y preserva transacciones previas.
+
+Diez pruebas nuevas; suite completa de 497 pruebas correctas, 34 pantallas sin excepciones y 57 tablas históricas conservadas sobre copia privada. AppTest comprobó guardado y auditoría desde el formulario real, diario intacto y rechazo visible de una reducción inferior a lo aplicado sin cambios. La auditoría de otros servicios bancarios y su concurrencia sigue pendiente; se mantiene la barrera empresarial general.
+
+## Cobro mixto con transacción y concurrencia protegidas — 16 de noviembre de 2026
+
+El cobro que combina facturas y saldo de apertura reserva escritura antes de leer cartola, aplicaciones y número de asiento. Revalida permisos bancarios y de Pagos de clientes dentro de esa reserva. El asiento, pago, aplicaciones, conciliación y auditoría se confirman juntos; un fallo revierte toda la operación. Rechaza transacciones previas sin confirmarlas ni revertirlas. La aplicación de apertura exige un entero no negativo y no trunca fracciones; se rechaza un movimiento con cargo y abono simultáneos.
+
+Doce pruebas nuevas cubren cobro cuadrado, aplicaciones, factura ajena, importes inválidos, revocación, fallo de auditoría, conservación de transacciones y concurrencia real con dos conexiones SQLite. Dos sesiones sobre el mismo movimiento producen un solo cobro; dos movimientos no pueden sobreaplicar la apertura compartida; movimientos válidos distintos generan asientos distintos. Suite completa: 509 pruebas correctas; 34 pantallas sin errores y 57 tablas históricas intactas sobre copia privada. AppTest contabilizó y concilió un cobro sintético desde el formulario en copia aislada: asiento cuadrado, aplicaciones y auditoría correctas, sin errores.
+
+Los otros servicios de cobros, pagos y sugerencias todavía requieren su revisión de transacciones y auditoría. Se mantiene la barrera empresarial general y la aceptación de perfiles y flujos sigue pendiente.
+
+## Cobros y anticipos de clientes con confirmación atómica — 16 de noviembre de 2026
+
+Los cobros a facturas y anticipos sin documento reservan escritura antes de leer cartola, saldos y número de asiento. Revalidan permisos bancarios y de Pagos de clientes; pago, aplicaciones, conciliación, asiento y auditoría se confirman juntos. La auditoría usa la identidad efectiva del usuario. Se preservan transacciones ajenas. Ambas rutas rechazan movimientos con cargo y abono simultáneos; el anticipo también comprueba período cerrado y cuenta válida. Una selección que mezcle facturas propias y ajenas o sin saldo se rechaza completa.
+
+Quince pruebas nuevas cubren cobro exacto/parcial, sobrante, anticipo conservado sin aplicar a facturas, cuentas inválidas, períodos cerrados, revocación, fallo de auditoría y concurrencia con dos conexiones. No se duplica el mismo cobro o anticipo, no se sobreaplica una factura y anticipos válidos distintos generan asientos distintos. Suite completa: 524 pruebas correctas, 34 pantallas sin errores y 57 tablas históricas intactas sobre copia privada. AppTest ejecutó ambos formularios reales en copia aislada: asientos cuadrados, aplicaciones y efectivo correctos, auditoría confirmada y sin excepciones.
+
+La revisión transaccional de pagos/devoluciones de proveedores y sugerencias genéricas continúa pendiente, junto con otras rutas y la aceptación final de perfiles y flujos. Se mantiene la barrera empresarial general.
+
+## Pagos y devoluciones de proveedores con transacción protegida — 16 de noviembre de 2026
+
+El pago a documentos, pago sin documento y devolución de proveedor reservan escritura antes de consultar cartola, saldos y número de asiento. Revalidan permisos de Bancos y Pagos de proveedores. Asiento, auxiliar, aplicaciones, conciliación y auditoría se confirman juntos con la identidad efectiva; un error revierte toda la operación. Se preservan transacciones ajenas y la inicialización de devoluciones no las confirma. Se rechazan movimientos con cargo/abono simultáneos y selecciones parcialmente ajenas o sin saldo; se valida la existencia de la cuenta para diferencias.
+
+Diecinueve pruebas nuevas, incluidas seis de concurrencia real con dos conexiones, verifican pagos/devoluciones únicos, factura y diferencia NC/factura sin sobreaplicación y asientos distintos para pagos válidos distintos. Cubren fallos de auditoría, revocación bajo reserva, períodos cerrados, pagos parciales, diferencias y conservación de compras. Suite completa: 543 pruebas correctas, 34 pantallas sin errores y 57 tablas históricas intactas en copia privada. AppTest ejecutó los tres formularios reales en copia aislada: asientos cuadrados, importes y aplicaciones correctos y auditoría confirmada, sin duplicar compras ni IVA.
+
+Continúan pendientes las sugerencias genéricas y otras rutas, además de la aceptación completa de perfiles y flujos. La barrera empresarial general permanece activa.
+
+## Sugerencias e imputaciones bancarias con transacción protegida — 16 de noviembre de 2026
+
+La confirmación de sugerencias y las imputaciones a una o varias cuentas reservan escritura antes de consultar y asignar asiento. Revalidan permisos y confirman asiento, conciliación, aplicaciones/obligación y auditoría juntos con la identidad efectiva. Rechazan transacciones previas sin confirmarlas ni revertirlas. Las sugerencias vuelven a comprobar saldo y naturaleza de compra, venta u obligación bajo la reserva; no aceptan una coincidencia obsoleta. Se rechazan movimientos ambiguos/no finitos/negativos y contrapartidas de obligación inexistentes o iguales al banco.
+
+Veintidós pruebas nuevas cubren rutas válidas, permisos revocados, fallo de auditoría, períodos cerrados, sugerencias obsoletas, naturaleza y cuentas inválidas y seis escenarios de concurrencia real con dos conexiones. No se duplica la misma operación ni se sobreaplica una factura u obligación compartida; movimientos válidos distintos reciben asientos distintos. Suite completa: 565 pruebas correctas, 34 pantallas sin errores y 57 tablas históricas intactas sobre copia privada. AppTest ejecutó sugerencia, una cuenta y varias cuentas desde las pantallas reales en copia aislada, con asientos cuadrados y auditoría confirmada.
+
+La auditoría de reversos y otras rutas y la aceptación final de perfiles y flujos siguen pendientes. No se retira la barrera empresarial general.
+
+## Reversos bancarios con lectura protegida y trazabilidad — 16 de noviembre de 2026
+
+Los reversos de anticipo de cliente, pagos de proveedor y corrección de imputación manual reservan escritura antes de consultar datos y asignar asiento. Revalidan permisos bajo la reserva y confirman reverso, cambios auxiliares, liberación de cartola y auditoría juntos, con la identidad efectiva. Preservan transacciones ajenas y asientos originales. Un control compartido exige importes válidos, total acorde con la cartola, línea bancaria única con sentido correcto y asiento no compartido con otra cartola. La corrección manual rechaza líneas de otros orígenes.
+
+Diecisiete pruebas nuevas cubren cuatro ciclos de reversión (proveedor con/sin documento), auditoría, rollback, permisos revocados, períodos cerrados, aplicaciones posteriores de anticipos/pagos sin documento y aplicaciones documentales alteradas en importe. Incluyen cuatro concurrencias reales: sin duplicar los tres tipos de reverso y con asientos distintos para reversos válidos distintos. Suite completa: 582 pruebas correctas, 34 pantallas sin errores y 57 tablas históricas intactas. AppTest ejecutó los cuatro reversos desde la pantalla sobre SQLite sintético aislado: originales intactos, auxiliares retirados y saldo neto cero por cuenta.
+
+Se conserva la limitación: los cobros de cliente aplicados a facturas o apertura no se revierten mediante el reverso de anticipos; requieren procedimiento documental. Tampoco se habilitan nuevos tipos de reverso ni se retira la barrera empresarial general. Otras rutas y la aceptación final de perfiles/flujos siguen pendientes.
+
+
+## Corrección documental de cobros nuevos — 16 de noviembre de 2026
+
+Se registra con cada cobro nuevo a facturas, mixto o creado desde sugerencias una huella de su auxiliar, aplicaciones, documentos y asiento dentro de la misma transacción. Una tabla aditiva conserva la traza activa y su estado de reversión. No se reconstruyen huellas de cobros históricos.
+
+El servicio de reversión documental exige permisos de Bancos y Pagos de clientes, reserva escritura y revalida permisos, período, huella y línea bancaria. Si el estado original permanece intacto, conserva el asiento original, crea el reverso, retira solo las aplicaciones y pago propios, reabre la cartola y marca la traza como revertida junto con la auditoría. No retira aplicaciones de otros pagos. Cambios posteriores o falta de huella bloquean la operación para revisión manual. La pantalla conserva el diseño y añade el control de corrección necesario en Movimientos.
+
+Veinte pruebas nuevas cubren ciclos de cobro a factura, mixto, sugerencia, parcial, sobrante y solo apertura; alteraciones, permisos, período cerrado, rollback y concurrencia real. Suite completa: 602 pruebas correctas, 34 pantallas sin errores y 57 tablas históricas intactas. AppTest verificó tres reversos documentales desde la pantalla en SQLite sintético, con originales intactos, neto cero por cuenta, facturas/apertura reabiertas y trazas conservadas. Se probó además un fallo de auditoría visible sin cambios, seguido de reintento correcto. Sigue pendiente la aceptación real de perfiles y flujos y la auditoría de otras rutas; no se retira la barrera empresarial general.
+
+
+## Origen de obligaciones contabilizadas en Tesorería — 16 de noviembre de 2026
+
+La clasificación permite vincular cada línea de obligación sin DTE a una línea acreedora de pasivo ya contabilizado. Requiere permiso de contabilizar en Tesorería y leer Libro Diario y confirmación expresa del operador de que corresponde al beneficiario, sigue pendiente y no fue pagada por otro medio. Se guarda una huella del asiento origen y evento del vínculo. Se excluyen orígenes de RCV, DTE, nómina, conciliación, reversos y pagos y los lotes asociados a compras, que deben seguir sus auxiliares propios.
+
+Al pagar, se reserva escritura y revalida permiso, huella, saldo del origen, saldo acreedor de la cuenta y montos repetidos dentro de la solicitud. El asiento debita la cuenta de pasivo y acredita banco; no reconoce otra vez el gasto. Una tabla aditiva registra aplicaciones al origen. Asiento, aplicación, estado y evento de auditoría se confirman juntos. Solicitudes distintas no pueden agotar el mismo origen dos veces. Los casos sin vínculo, con origen modificado o cuenta cambiada siguen bloqueados. Los pagos ajenos al registro de Tesorería no se identifican automáticamente por beneficiario: la confirmación operativa es obligatoria y el saldo global es un control adicional, no un sustituto del detalle auxiliar.
+
+Veintiuna pruebas nuevas; suite completa: 623 correctas, 34 pantallas sin errores y 57 tablas históricas intactas. Se ensayó vínculo, envío y aprobación desde UI; confirmación de comprobante por servicio real y contabilización desde UI sobre SQLite sintético. El origen y el gasto permanecen intactos, con débito al pasivo y crédito bancario correctos. Se mantienen pendientes la auditoría completa de rutas y la aceptación real de perfiles/flujos; no se retira la barrera empresarial general.
+
+
+## Permisos de listados bancarios y reversos — 16 de noviembre de 2026
+
+Las secciones bancarias se ofrecen según el submódulo de lectura y se revalida ese permiso antes de ejecutar la sección. Movimientos consulta cuentas y cartola mediante servicios autorizados. Los movimientos identificados como clientes, proveedores, devoluciones, Tesorería o nómina se filtran en SQL según permisos del auxiliar; en nómina se aplica el alcance laboral autorizado. Los tipos se comparan normalizando mayúsculas. Cuando la vista es parcial se omiten los saldos de cartola y se informa al usuario. El administrador conserva todos los movimientos, saldos y secciones.
+
+Los listados de reversos de proveedor, cliente y nómina exigen lectura de Conciliación bancaria y del auxiliar correspondiente; el de nómina filtra trabajadores antes de devolver sus nombres. Las correcciones manuales exigen lectura de Conciliación. La UI no consulta ni muestra listados de auxiliares no autorizados. Esto protege las relaciones identificadas del sistema; el acceso a la información bancaria bruta sigue gobernado por el permiso bancario y no se certifica todavía toda la aplicación multiusuario.
+
+Quince pruebas nuevas cubren submódulos independientes, denegación antes de leer datos, excepciones/revocación, alcance laboral, filtros de banco, proyecciones, variantes de mayúsculas, lectura sin confirmar transacciones y vista completa del propietario. Suite completa: 638 pruebas correctas; 34 pantallas sin errores y 57 tablas históricas intactas. AppTest comprobó que la vista de administrador mantiene los cuatro reversos funcionales, originales intactos y neto cero por cuenta. Se mantiene la barrera empresarial general hasta completar las otras consultas/operaciones y aceptación de perfiles/flujos.
+
+## Consultas y exportaciones de Tesorería — 16 de noviembre de 2026
+
+El historial exige lectura de Historial antes de consultar solicitudes y pagos; su CSV exige además exportación del mismo submódulo, revalidada antes de preparar el archivo. El visor obtiene el comprobante por solicitud mediante un servicio que exige lectura de Confirmación de pagos. Su botón de descarga exige además Exportar y vuelve a consultar con autorización. La vista previa entrega el documento al navegador para visualizarlo: no constituye protección contra extracción de bytes por un usuario autorizado para verlo.
+
+Los PDF de solicitudes y detalles requieren lectura y exportación de Solicitudes de fondos; el PDF del asiento usa Confirmación de pagos. Los controles de clasificación, confirmación y detalle del pago solo se ejecutan con lectura de Confirmación de pagos. El propietario conserva el diseño y las opciones. El acceso general a la pantalla sigue requiriendo Solicitudes de fondos; aún no se afirma una auditoría completa de las rutas empresariales.
+
+Trece pruebas nuevas cubren permisos independientes, denegación antes de consultar, revocación, proyección y total, solicitud inexistente, lectura sin confirmar transacciones ajenas, generación de PDF y visor sin descarga. Se verificaron 34 pantallas sin errores y 57 tablas históricas intactas. Flujo UI de vínculo, aprobación y contabilización correcto en SQLite sintético, con confirmación por servicio real, origen intacto y sin duplicar gasto. Se mantiene la barrera empresarial de empleados y queda aceptación real por perfiles y flujos antes de producción.
+
+## Información contable y conciliación desde Tesorería — 16 de noviembre de 2026
+
+La consulta del asiento de un pago exige lectura de Confirmación de pagos y del Libro Diario antes de leer datos. El PDF requiere además Exportar en ambos submódulos. El asiento se obtiene a partir de la solicitud contabilizada y su confirmación, conservando la proyección anterior y sin aceptar un identificador arbitrario de asiento. La consulta del estado de conciliación exige lectura de Confirmación de pagos y de Conciliación bancaria; la cartola debe coincidir con la solicitud y su asiento. La interfaz no llama ni muestra esas consultas cuando falta el permiso correspondiente. El propietario conserva las vistas completas y el diseño.
+
+Doce pruebas nuevas cubren permisos cruzados, revocación, exportación, denegación antes de SELECT, conservación de transacciones y vínculo exacto de solicitud/asiento/cartola. Suite completa: 663 pruebas correctas; 34 pantallas sin errores y 57 tablas históricas intactas. El flujo de vínculo/aprobación/contabilización en SQLite sintético conserva el origen, sin duplicar gasto y con pasivo/banco correctos. Se mantiene la barrera empresarial; quedan otras rutas y aceptación real de perfiles/flujos antes de producción.

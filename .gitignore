@@ -1,0 +1,16 @@
+# Nunca versionar datos de clientes ni credenciales.
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+.env
+.env.*
+*.pem
+*.key
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
