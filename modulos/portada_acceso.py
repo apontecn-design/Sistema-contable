@@ -51,13 +51,14 @@ CSS = '''
 [data-testid="stTextInput"] input {min-height:48px;background:#f7faf8;color:#214e35;}
 [data-testid="stTextInput"]>div>div {border-radius:12px;border-color:#dbe5de;background:#f7faf8;}
 [data-testid="stTextInput"]>div>div:focus-within {border-color:#198057;box-shadow:0 0 0 3px #15865312;}
-[data-testid="stFormSubmitButton"] button[kind="primary"] {min-height:49px;background:#0b704d!important;border-color:#0b704d!important;border-radius:12px;font-weight:650;box-shadow:0 7px 16px #0b704d18;}
-[data-testid="stFormSubmitButton"] button[kind="primary"]:hover {background:#07583d!important;}
+[data-testid="stFormSubmitButton"] button {min-height:49px;background:#0b704d!important;border-color:#0b704d!important;color:#fff!important;border-radius:12px;font-weight:650;box-shadow:0 7px 16px #0b704d18;}
+[data-testid="stFormSubmitButton"] button:hover {background:#07583d!important;}
 [data-testid="stRadio"] [role="radiogroup"] {gap:8px;flex-wrap:wrap;padding:0 0 10px;}
 [data-testid="stRadio"] label {border:1px solid #e0e9e2;border-radius:9px;padding:7px 9px;margin:0;font-size:11px;}
 [data-testid="stRadio"] label p {font-size:11px;color:#577363;}
 [data-testid="stRadio"] label:has(input:checked) {background:#eaf5ed;border-color:#b5d4bf;}
 [data-testid="stRadio"] label:has(input:checked) p {color:#075c3e;font-weight:600;}
+[data-testid="stRadioOption"][data-selected="true"]>div>div:first-child {background-color:#0b704d!important;border-color:#0b704d!important;}
 .contem-acceso-footer {border-top:1px solid #edf1ee;margin-top:24px;padding-top:18px;display:flex;align-items:center;gap:8px;color:#829186;font-size:11px;line-height:1.5;}
 .contem-acceso-footer svg {width:15px;height:18px;flex-shrink:0;color:#39805b;}
 .contem-portada-footer {text-align:center;color:#849589;font-size:10px;letter-spacing:.025em;margin-top:23px;}
