@@ -18,7 +18,7 @@ class TestInicioSinSesion(unittest.TestCase):
         fake.session_state={}
         fake.set_page_config=lambda *a,**k:None
         fake.markdown=lambda *a,**k:None
-        fake.columns=lambda *a,**k:[Contexto(),Contexto(),Contexto()]
+        fake.columns=lambda anchos,**k:[Contexto() for _ in anchos]
         fake.title=lambda *a,**k:None
         fake.radio=lambda _label,opts,**k:opts[0]
         fake.form=lambda *a,**k:Contexto()

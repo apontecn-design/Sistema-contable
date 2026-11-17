@@ -208,14 +208,14 @@ if "authenticated" not in st.session_state:
 
 if not sgci_sesion_valida():
     sgci_cerrar_sesion()
-    st.markdown("<br><br>", unsafe_allow_html=True)
-    _, col2, _ = st.columns([1, 2, 1])
+    from modulos.portada_acceso import preparar_portada_acceso, ENCABEZADO_ACCESO, PIE_ACCESO
+    col2 = preparar_portada_acceso(st)
     with col2:
-        st.title("🔐 Acceso Restringido - CONTEM")
+        st.markdown(ENCABEZADO_ACCESO,unsafe_allow_html=True)
         supabase_disponible = bool(sgci_supabase_config())
-        opciones = (["Correo y contraseña", "Recuperar contraseña", "Acceso de respaldo (Argon2)"]
-                    if supabase_disponible else ["Acceso de respaldo (Argon2)"])
-        modo = st.radio("Método de acceso", opciones, horizontal=False)
+        opciones = (["Correo y contraseña", "Recuperar contraseña", "Acceso de administración"]
+                    if supabase_disponible else ["Acceso de administración"])
+        modo = st.radio("Método de acceso", opciones, horizontal=True,label_visibility='collapsed')
         if modo == "Correo y contraseña":
             with st.form("sgci_supabase_login"):
                 correo = st.text_input("Correo electrónico").strip().lower()
@@ -232,7 +232,7 @@ if not sgci_sesion_valida():
                     except ValueError as error:
                         st.error(str(error))
         elif modo == "Recuperar contraseña":
-            st.info("Solicita un código de recuperación al correo registrado en Supabase.")
+            st.info("Solicita un código de recuperación al correo de tu cuenta.")
             with st.form("sgci_recuperacion_solicitud"):
                 correo = st.text_input("Correo registrado", key="sgci_recuperar_correo").strip().lower()
                 solicitar = st.form_submit_button("Enviar código")
@@ -245,7 +245,7 @@ if not sgci_sesion_valida():
                         st.success("Si el correo está registrado, recibirás instrucciones de recuperación.")
                     except ValueError as error:
                         st.error(str(error))
-            st.caption("La plantilla 'Reset password' de Supabase debe incluir {{ .Token }} para mostrar el código de seis dígitos.")
+            st.caption("Si no recibes el código, consulta al administrador de tu organización.")
             with st.form("sgci_recuperacion_confirmacion"):
                 correo_codigo = st.text_input("Correo electrónico", key="sgci_codigo_correo").strip().lower()
                 codigo = st.text_input("Código recibido por correo")
@@ -271,9 +271,9 @@ if not sgci_sesion_valida():
                         st.error(str(error))
         else:
             if not os.environ.get("SGCI_PASSWORD_HASH", "").strip().startswith("$argon2"):
-                st.error("El acceso de respaldo no está configurado en Render.")
+                st.error("El acceso de administración no está disponible. Consulta al responsable del sistema.")
             else:
-                st.info("Acceso temporal de respaldo para el administrador.")
+                st.info("Acceso de respaldo reservado al administrador.")
                 with st.form("sgci_login_form", clear_on_submit=False):
                     pwd = st.text_input("Contraseña de respaldo", type="password")
                     ingresar = st.form_submit_button("Ingresar al Sistema", type="primary", use_container_width=True)
@@ -284,6 +284,8 @@ if not sgci_sesion_valida():
                         st.rerun()
                     else:
                         st.error("Contraseña incorrecta.")
+        st.markdown(PIE_ACCESO,unsafe_allow_html=True)
+    st.markdown('<div class="contem-portada-footer">CONTEM · Sistema Contable y Empresarial</div>',unsafe_allow_html=True)
     st.stop()
 
 
